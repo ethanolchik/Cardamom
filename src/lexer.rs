@@ -253,18 +253,24 @@ impl Lexer {
     }
 
     fn scan_number(&mut self) {
+        let mut is_float = false;
         while self.peek().is_digit(10) {
             self.advance();
         }
 
         if self.peek() == '.' && self.peek_next().is_digit(10) {
+            is_float = true;
             self.advance(); // Consume the '.'
             while self.peek().is_digit(10) {
                 self.advance();
             }
         }
 
-        self.add_token(TokenKind::Float);
+        if is_float {
+            self.add_token(TokenKind::Float);
+        } else {
+            self.add_token(TokenKind::Integer);
+        }
     }
 
     fn scan_identifier(&mut self) {
