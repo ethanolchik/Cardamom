@@ -3,7 +3,7 @@ Another programming language implementation (hopefully this time will be better)
 
 
 ## Example code
-```
+```cpp
 import "std.io" as io;
 
 public class Person(private name: string, private age: string) {

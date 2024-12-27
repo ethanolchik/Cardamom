@@ -195,14 +195,14 @@ impl Lexer {
     }
 
     fn advance(&mut self) -> char {
-        let c = self.source.chars().nth(self.current).unwrap();
+        let c = self.peek();
         self.current += 1;
         self.col += 1;
         c
     }
 
     fn match_token(&mut self, expected: char) -> bool {
-        if self.is_at_end() || self.source.chars().nth(self.current).unwrap() != expected {
+        if self.is_at_end() || self.peek() != expected {
             return false;
         }
         self.current += 1;
@@ -213,7 +213,7 @@ impl Lexer {
         if self.is_at_end() {
             '\0'
         } else {
-            self.source.chars().nth(self.current).unwrap()
+            self.source[self.current..].chars().next().unwrap_or('\0')
         }
     }
 
@@ -221,7 +221,7 @@ impl Lexer {
         if self.current + 1 >= self.source.len() {
             '\0'
         } else {
-            self.source.chars().nth(self.current + 1).unwrap()
+            self.source[self.current+1..].chars().next().unwrap_or('\0')
         }
     }
 
