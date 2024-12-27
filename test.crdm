@@ -1,0 +1,48 @@
+import "std.io" as io;
+
+public class Person(private name: string, private age: string) {
+private:
+    address: string = "1 High Road";
+
+public:
+    getAddress() -> string {
+        return this.address;
+    }
+
+    moveHouse(address: Option<string>) -> void {
+        this.address = address.value() ?? this.address; // either new address or old address
+    }
+
+    birthday() -> int {
+        this.age += 1;
+
+        return this.age;
+    }
+
+    getName() -> string {
+        return this.name;
+    }
+}
+
+fn main() -> void {
+    let p: Person = new Person("Ethan", "17");
+
+    io.println("Hello, $1! You live at $2.", p.getName(), p.getAddress());
+
+    io.println("Happy $1 birthday, $2!", p.birthday(), p.getName());
+
+    // Pointer Arithmetic
+
+    let x: int = 1;
+    let y: *int = #x;
+
+    let z: &[int] = &[1, 2, 3];
+
+    let a: [int] = [1, 2, 3];
+
+    let b: &[fn(int) -> int];
+
+    let j123: [[int]];
+
+    let c: &[&[int]];
+}
