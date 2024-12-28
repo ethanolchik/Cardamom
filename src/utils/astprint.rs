@@ -204,6 +204,20 @@ impl Visitor for AstPrinter {
         self.indent -= 1;
     }
 
+    fn visit_closure(&mut self, expr: &Expr) {
+        println!("{}Closure: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::Closure { parameters, body, return_type, .. } = expr {
+            for param in parameters.iter() {
+                println!("{}Name: {}", String::from("\t").repeat(self.indent), param.lexeme);
+            }
+            body.accept(self);
+            println!("{}Type: ", String::from("\t").repeat(self.indent));
+            printtype(return_type.clone(), self.indent+1);
+        }
+        self.indent -= 1;
+    }
+
     fn visit_expression(&mut self, stmt: &Stmt) {
         println!("{}Expression: ", String::from("\t").repeat(self.indent));
         self.indent += 1;

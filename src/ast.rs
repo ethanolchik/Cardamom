@@ -116,6 +116,11 @@ pub enum Expr {
     MutReference {
         object: Box<Expr>,
     },
+    Closure {
+        parameters: Vec<Token>,
+        body: Box<Stmt>,
+        return_type: Type,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -144,8 +149,12 @@ pub enum Stmt {
     Return {
         value: Option<Box<Expr>>,
     },
-    Break,
-    Continue,
+    Break {
+        token: Token,
+    },
+    Continue {
+        token: Token,
+    },
     Variable {
         name: Token,
         initialiser: Option<Box<Expr>>,
@@ -205,6 +214,7 @@ pub trait Visitor {
     fn visit_dereference(&mut self, expr: &Expr);
     fn visit_reference(&mut self, expr: &Expr);
     fn visit_mut_reference(&mut self, expr: &Expr);
+    fn visit_closure(&mut self, expr: &Expr);
     fn visit_array(&mut self, expr: &Expr);
     fn visit_tuple(&mut self, expr: &Expr);
     fn visit_member_assignment(&mut self, stmt: &Expr);
@@ -248,6 +258,7 @@ impl Node for Expr {
             Expr::Dereference { .. } => visitor.visit_dereference(self),
             Expr::Reference { .. } => visitor.visit_reference(self),
             Expr::MutReference { .. } => visitor.visit_mut_reference(self),
+            Expr::Closure { .. } => visitor.visit_closure(self),
         }
     }
 }
@@ -261,8 +272,8 @@ impl Stmt {
             Stmt::While { .. } => visitor.visit_while(self),
             Stmt::For { .. } => visitor.visit_for(self),
             Stmt::Return { .. } => visitor.visit_return(self),
-            Stmt::Break => visitor.visit_break(self),
-            Stmt::Continue => visitor.visit_continue(self),
+            Stmt::Break { .. }=> visitor.visit_break(self),
+            Stmt::Continue { .. }=> visitor.visit_continue(self),
             Stmt::Variable { .. } => visitor.visit_variable(self),
             Stmt::Function { .. } => visitor.visit_function(self),
             Stmt::Import { .. } => visitor.visit_import(self),

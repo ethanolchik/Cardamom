@@ -176,13 +176,15 @@ impl Parser {
     }
 
     pub fn break_statement(&mut self) -> Result<Stmt, Error> {
+        let token = self.previous();
         self.consume(TokenKind::Semicolon, "Expected ';' after 'break'.")?;
-        Ok(Stmt::Break)
+        Ok(Stmt::Break { token })
     }
 
     pub fn continue_statement(&mut self) -> Result<Stmt, Error> {
+        let token = self.previous();
         self.consume(TokenKind::Semicolon, "Expected ';' after 'continue'.")?;
-        Ok(Stmt::Continue)
+        Ok(Stmt::Continue { token })
     }
 
     pub fn variable_declaration(&mut self) -> Result<Stmt, Error> {
@@ -678,7 +680,6 @@ impl Parser {
             let mut depth: usize = 0;
     
             while self.match_token(TokenKind::LBracket) {
-                println!("Matched LBracket");
                 depth += 1;
                 clone.push(Vec::new());
                 clone[depth-1].push(Derived::Array);
@@ -813,6 +814,34 @@ impl Parser {
             };
 
             return Ok(function_type); 
+        } else if self.match_token(TokenKind::LParen) {
+            // Tuple handling
+            let mut tuple = Vec::new();
+
+            if !self.check(TokenKind::RParen) {
+                loop {
+                    tuple.push(self.type_expression()?);
+
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+
+            self.consume(TokenKind::RParen, "Expected ')' after tuple type.")?;
+
+            kind = TypeKind::Tuple(tuple.clone());
+
+            let mut lexeme = String::from("(");
+
+            for e in tuple.iter() {
+                lexeme.push_str(&e.name.lexeme);
+                lexeme.push_str(", ");
+            }
+
+            lexeme = lexeme.trim_end_matches(", ").to_string() + ")";
+
+            name = Token::new(TokenKind::Identifier, lexeme, tuple.last().unwrap().name.line, tuple.last().unwrap().name.col);
         } else {
             // check if it is a reference, pointer, mutref
             // if it is, set kind to be Ref(Pointer(MutRef(...))) etc...
@@ -820,7 +849,7 @@ impl Parser {
             kind = TypeKind::from_name(&name.lexeme.clone());
             kind = self.apply_derived(kind, &derived, &attributes, &name, 0);
         }
-    
+
         if self.match_token(TokenKind::Lt) {
             loop {
                 generics.push(self.type_expression()?);
@@ -1139,6 +1168,20 @@ impl Parser {
 
         if self.match_token(TokenKind::LParen) {
             let expr = self.expression()?;
+            if self.match_token(TokenKind::Comma) {
+                let mut elements = vec![expr];
+
+                loop {
+                    elements.push(self.expression()?);
+
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+
+                self.consume(TokenKind::RParen, "Expected ')' after expression.")?;
+                return Ok(Expr::Tuple { elements: elements.into_iter().map(Box::new).collect() });
+            }
             self.consume(TokenKind::RParen, "Expected ')' after expression.")?;
             return Ok(Expr::Grouping { expression: Box::new(expr) });
         }
@@ -1162,6 +1205,14 @@ impl Parser {
 
         if self.match_token(TokenKind::New) {
             return self.class_init();
+        }
+
+        if self.match_token(TokenKind::Pipe){
+            return self.closure(true);
+        }
+
+        if self.match_token(TokenKind::Or) {
+            return self.closure(false);
         }
 
         if self.errors == 0 {
@@ -1196,6 +1247,32 @@ impl Parser {
 
         self.consume(TokenKind::RParen, "Expected ')' after arguments.")?;
         Ok(Expr::ClassInit { name, arguments: arguments.into_iter().map(Box::new).collect() })
+    }
+
+    pub fn closure(&mut self, fields: bool) -> Result<Expr, Error> {
+        let mut parameters = Vec::new();
+
+        if fields {
+            if !self.check(TokenKind::Pipe) {
+                loop {
+                    parameters.push(self.consume(TokenKind::Identifier, "Expected parameter name.")?);
+    
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+
+            self.consume(TokenKind::Pipe, "Expected '|' after closure parameters.")?;
+        }
+
+        let return_type = self.type_expression()?;
+
+        self.consume(TokenKind::Arrow, "Expected '->' before closure body.")?;        
+
+        let body = Box::new(self.statement()?);
+
+        Ok(Expr::Closure { parameters, body, return_type })
     }
 
     pub fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, Error> {
