@@ -15,21 +15,21 @@ pub enum Modifier {
 }
 
 /// An attribute for a class
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Attribute {
     Generic,
     Class,
 }
 
 /// A derived type
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Derived {
     Const,
     Ref,
     Ptr,
     Array,
     Lambda,
-    Mut,
+    MutRef,
 }
 
 /// AST node
@@ -75,11 +75,18 @@ pub enum Expr {
         value: Box<Expr>,
         op: Token,
     },
+    StaticAssignment {
+        object: Box<Expr>,
+        name: Token,
+        value: Box<Expr>,
+        op: Token,
+    },
     IndexAssignment {
         object: Box<Expr>,
         index: Box<Expr>,
         value: Box<Expr>,
         op: Token,
+        token: Token
     },
     PtrAssignment {
         object: Box<Expr>,
@@ -91,13 +98,24 @@ pub enum Expr {
         paren: Token,
         arguments: Vec<Box<Expr>>,
     },
+    GenericCall {
+        callee: Box<Expr>,
+        paren: Token,
+        arguments: Vec<Box<Expr>>,
+        generics: Vec<Type>,
+    },
     MemberAccess {
+        object: Box<Expr>,
+        name: Token,
+    },
+    StaticAccess {
         object: Box<Expr>,
         name: Token,
     },
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+        token: Token
     },
     Cast {
         object: Box<Expr>,
@@ -117,7 +135,9 @@ pub enum Expr {
         object: Box<Expr>,
     },
     Closure {
+        name: Token,
         parameters: Vec<Token>,
+        param_types: Vec<Type>,
         body: Box<Stmt>,
         return_type: Type,
     }
@@ -147,6 +167,7 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
     Return {
+        token: Token,
         value: Option<Box<Expr>>,
     },
     Break {
@@ -207,7 +228,9 @@ pub trait Visitor {
     fn visit_variable_expr(&mut self, expr: &Expr);
     fn visit_assignment(&mut self, expr: &Expr);
     fn visit_call(&mut self, expr: &Expr);
+    fn visit_generic_call(&mut self, expr: &Expr);
     fn visit_member_access(&mut self, expr: &Expr);
+    fn visit_static_access(&mut self, expr: &Expr);
     fn visit_index(&mut self, expr: &Expr);
     fn visit_cast(&mut self, expr: &Expr);
     fn visit_class_init(&mut self, expr: &Expr);
@@ -218,6 +241,7 @@ pub trait Visitor {
     fn visit_array(&mut self, expr: &Expr);
     fn visit_tuple(&mut self, expr: &Expr);
     fn visit_member_assignment(&mut self, stmt: &Expr);
+    fn visit_static_assignment(&mut self, stmt: &Expr);
     fn visit_index_assignment(&mut self, stmt: &Expr);
     fn visit_ptr_assignment(&mut self, stmt: &Expr);
     fn visit_expression(&mut self, stmt: &Stmt);
@@ -248,10 +272,13 @@ impl Node for Expr {
             Expr::Tuple { .. } => visitor.visit_tuple(self),
             Expr::Assignment { .. } => visitor.visit_assignment(self),
             Expr::MemberAssignment { .. } => visitor.visit_member_assignment(self),
+            Expr::StaticAssignment { .. } => visitor.visit_static_assignment(self),
             Expr::IndexAssignment { .. } => visitor.visit_index_assignment(self),
             Expr::PtrAssignment { .. } => visitor.visit_ptr_assignment(self),
             Expr::Call { .. } => visitor.visit_call(self),
+            Expr::GenericCall { .. } => visitor.visit_generic_call(self),
             Expr::MemberAccess { .. } => visitor.visit_member_access(self),
+            Expr::StaticAccess { .. } => visitor.visit_static_access(self),
             Expr::Index { .. } => visitor.visit_index(self),
             Expr::Cast { .. } => visitor.visit_cast(self),
             Expr::ClassInit { .. } => visitor.visit_class_init(self),
@@ -314,7 +341,7 @@ impl Derived {
             Derived::Ptr => "Ptr".to_string(),
             Derived::Array => "Array".to_string(),
             Derived::Lambda => "Lambda".to_string(),
-            Derived::Mut => "Mut".to_string(),
+            Derived::MutRef => "Mut".to_string(),
         }
     }
 }

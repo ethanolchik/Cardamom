@@ -1,0 +1,50 @@
+public class Person(private name: string, private age: int) {
+private:
+    address: string = "1 High Road";
+
+public:
+    test: string = "hello";
+
+    getAddress() -> string {
+        return this.address;
+    }
+
+    birthday() -> int {
+        this.age += 1;
+
+        return this.age;
+    }
+
+    getName() -> string {
+        return this.name;
+    }
+
+static:
+    hello: string = "Hello";
+}
+
+fn test<T>(x: T) -> T {
+    return x;
+}
+
+fn test2() {
+    return;
+}
+
+fn main() {
+    let p: Person = new Person("Ethan", 18);
+
+    // Pointer Arithmetic
+
+    let x: int = 1;
+
+    let z: &[int] = &[1, 2, 3];
+
+    let a: [int] = [1, 2, 3];
+
+    let b: &[fn(int) -> int];
+
+    let increment: fn(&int) -> void = |x| void -> { x += 1; };
+
+    test<int>(1.1);
+}

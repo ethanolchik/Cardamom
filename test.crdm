@@ -42,7 +42,7 @@ fn main() -> void {
 
     let b: &[fn(int) -> int];
 
-    let j123: [[int]];
+    let j123: [[int]] = [[1, 2, 3], [4, 5, 6]];
 
     let c: &[&[int]];
 }

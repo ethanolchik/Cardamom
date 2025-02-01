@@ -165,6 +165,7 @@ impl Parser {
     }
 
     pub fn return_statement(&mut self) -> Result<Stmt, Error> {
+        let token = self.previous();
         let value = if !self.check(TokenKind::Semicolon) {
             Some(self.expression()?)
         } else {
@@ -172,7 +173,7 @@ impl Parser {
         };
 
         self.consume(TokenKind::Semicolon, "Expected ';' after return value.")?;
-        Ok(Stmt::Return { value: value.map(Box::new) })
+        Ok(Stmt::Return { token, value: value.map(Box::new) })
     }
 
     pub fn break_statement(&mut self) -> Result<Stmt, Error> {
@@ -205,7 +206,7 @@ impl Parser {
             if self.previous().kind == TokenKind::Amp {
                 derived.push(Derived::Ref);
             } else if self.previous().kind == TokenKind::Hash {
-                derived.push(Derived::Mut);
+                derived.push(Derived::MutRef);
             } else if self.previous().kind == TokenKind::Mul {
                 derived.push(Derived::Ptr);
             }
@@ -240,7 +241,7 @@ impl Parser {
         let name = if kind == "function" {
             self.consume(TokenKind::Identifier, "Expected function name.")?
         } else {
-            Token::new(TokenKind::Identifier, "".to_string(), 0, 0)
+            Token::new(TokenKind::Identifier, "".to_string(), 0, Span::new(0, 0))
         };
 
         let mut generics = Vec::new();
@@ -268,7 +269,7 @@ impl Parser {
                     if self.previous().kind == TokenKind::Amp {
                         derived.push(Derived::Ref);
                     } else if self.previous().kind == TokenKind::Hash {
-                        derived.push(Derived::Mut);
+                        derived.push(Derived::MutRef);
                     } else if self.previous().kind == TokenKind::Mul {
                         derived.push(Derived::Ptr);
                     }
@@ -286,9 +287,20 @@ impl Parser {
         }
 
         self.consume(TokenKind::RParen, "Expected ')' after parameters.")?;
-        self.consume(TokenKind::Arrow, "Expected '->' before return type.")?;
 
-        let return_type = self.type_expression()?;
+        let return_type: Type;
+        if self.match_token(TokenKind::Arrow) {
+            return_type = self.type_expression()?;
+        } else {
+            return_type = Type {
+                attributes: vec![],
+                name: Token::new(TokenKind::Identifier, "void".to_string(), self.previous().line, self.previous().span),
+                derived: vec![],
+                generics: vec![],
+                kind: TypeKind::Void,
+                is_constructor: false,
+            };
+        }
 
         self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
         let body = self.block()?;
@@ -337,31 +349,35 @@ impl Parser {
                     if self.match_token(TokenKind::Public) {
                         let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                         self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let type_ = self.type_expression()?;
+                        let mut type_ = self.type_expression()?;
+                        type_.is_constructor = true;
                         let modifiers = vec![Modifier::Public, Modifier::Constructor];
                         let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
                         public_fields.push(Box::new(param));
                     } else if self.match_token(TokenKind::Private) {
                         let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                         self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let type_ = self.type_expression()?;
+                        let mut type_ = self.type_expression()?;
+                        type_.is_constructor = true;
                         let modifiers = vec![Modifier::Private, Modifier::Constructor];
                         let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        public_fields.push(Box::new(param));
+                        private_fields.push(Box::new(param));
                     } else if self.match_token(TokenKind::Protected) {
                         let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                         self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let type_ = self.type_expression()?;
+                        let mut type_ = self.type_expression()?;
+                        type_.is_constructor = true;
                         let modifiers = vec![Modifier::Protected, Modifier::Constructor];
                         let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        public_fields.push(Box::new(param));
+                        protected_fields.push(Box::new(param));
                     } else {
                         let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                         self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let type_ = self.type_expression()?;
+                        let mut type_ = self.type_expression()?;
+                        type_.is_constructor = true;
                         let modifiers = vec![Modifier::Private, Modifier::Constructor];
                         let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        public_fields.push(Box::new(param));
+                        private_fields.push(Box::new(param));
                     }
 
                     if !self.match_token(TokenKind::Comma) {
@@ -379,99 +395,94 @@ impl Parser {
                         || self.match_token(TokenKind::Private)
                         || self.match_token(TokenKind::Protected)
                         || self.match_token(TokenKind::Static) {
-                        if accessors_defined.contains(&self.previous().kind) {
-                            return Err(self.error(String::from("Cannot define multiple accessors for the same class.")));
-                        } else {
-                            accessors_defined.push(self.previous().kind);
+                        accessors_defined.clear();
+                        accessors_defined.push(self.previous().kind);
 
-                            self.consume(TokenKind::Colon, "Expected ':' after accessor.")?;
+                        self.consume(TokenKind::Colon, "Expected ':' after accessor.")?;
 
-                            while !self.check(TokenKind::RBrace) && !self.is_at_end()
-                                && !self.check(TokenKind::Public)
-                                && !self.check(TokenKind::Private)
-                                && !self.check(TokenKind::Protected)
-                                && !self.check(TokenKind::Static)
-                            {
-                                let name = self.consume(TokenKind::Identifier, "Expected field or function name.")?;
+                        while !self.check(TokenKind::RBrace) && !self.is_at_end()
+                            && !self.check(TokenKind::Public)
+                            && !self.check(TokenKind::Private)
+                            && !self.check(TokenKind::Protected)
+                            && !self.check(TokenKind::Static)
+                        {
+                            let name = self.consume(TokenKind::Identifier, "Expected field or function name.")?;
 
-                                if self.match_token(TokenKind::Colon) {
-                                    let type_ = self.type_expression()?;
-                                    
-                                    if self.match_token(TokenKind::Eq) {
-                                        let initialiser = Some(self.expression()?);
-                                        self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
+                            if self.match_token(TokenKind::Colon) {
+                                let type_ = self.type_expression()?;
+                                
+                                if self.match_token(TokenKind::Eq) {
+                                    let initialiser = Some(self.expression()?);
+                                    self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
 
-                                        let mut field = Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived: derived.clone(), modifiers: vec![] };
-
-                                        if accessors_defined[0] == TokenKind::Public {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Public);
-                                            }
-                                            public_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Private {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Private);
-                                            }
-                                            private_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Protected {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Protected);
-                                            }
-                                            protected_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Static {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Static);
-                                            }
-                                            static_fields.push(Box::new(field));
-                                        }
-                                    } else {
-                                        self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
-
-                                        let mut field = Stmt::Variable { name, type_, initialiser: None, derived: derived.clone(), modifiers: vec![] };
-
-                                        if accessors_defined[0] == TokenKind::Public {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Public);
-                                            }
-                                            public_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Private {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Private);
-                                            }
-                                            private_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Protected {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Protected);
-                                            }
-                                            protected_fields.push(Box::new(field));
-                                        } else if accessors_defined[0] == TokenKind::Static {
-                                            if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                                modifiers.push(Modifier::Static);
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let mut method = self.function_declaration("method")?;
-                                    
+                                    let mut field = Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived: derived.clone(), modifiers: vec![] };
                                     if accessors_defined[0] == TokenKind::Public {
-                                        if let Stmt::Function { ref mut modifiers, .. } = method {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
                                             modifiers.push(Modifier::Public);
                                         }
-                                        public_methods.push(Box::new(method));
+                                        public_fields.push(Box::new(field));
                                     } else if accessors_defined[0] == TokenKind::Private {
-                                        if let Stmt::Function { ref mut modifiers, .. } = method {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
                                             modifiers.push(Modifier::Private);
                                         }
-                                        private_methods.push(Box::new(method));
+                                        private_fields.push(Box::new(field));
                                     } else if accessors_defined[0] == TokenKind::Protected {
-                                        if let Stmt::Function { ref mut modifiers, .. } = method {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
                                             modifiers.push(Modifier::Protected);
                                         }
+                                        protected_fields.push(Box::new(field));
+                                    } else if accessors_defined[0] == TokenKind::Static {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
+                                            modifiers.push(Modifier::Static);
+                                            modifiers.push(Modifier::Public);
+                                        }
+                                        static_fields.push(Box::new(field));
+                                    }
+                                } else {
+                                    self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
+
+                                    let mut field = Stmt::Variable { name, type_, initialiser: None, derived: derived.clone(), modifiers: vec![] };
+
+                                    if accessors_defined[0] == TokenKind::Public {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
+                                            modifiers.push(Modifier::Public);
+                                        }
+                                        public_fields.push(Box::new(field));
+                                    } else if accessors_defined[0] == TokenKind::Private {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
+                                            modifiers.push(Modifier::Private);
+                                        }
+                                        private_fields.push(Box::new(field));
+                                    } else if accessors_defined[0] == TokenKind::Protected {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
+                                            modifiers.push(Modifier::Protected);
+                                        }
+                                        protected_fields.push(Box::new(field));
+                                    } else if accessors_defined[0] == TokenKind::Static {
+                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
+                                            modifiers.push(Modifier::Static);
+                                            modifiers.push(Modifier::Public);
+                                        }
+                                        static_fields.push(Box::new(field));
+                                    }
+                                }
+                            } else {
+                                let mut method = self.function_declaration("method")?;
+                                
+                                if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
+                                    *n = name;
+
+                                    if accessors_defined[0] == TokenKind::Public {
+                                        modifiers.push(Modifier::Public);
+                                        public_methods.push(Box::new(method));
+                                    } else if accessors_defined[0] == TokenKind::Private {
+                                        modifiers.push(Modifier::Private);
+                                        private_methods.push(Box::new(method));
+                                    } else if accessors_defined[0] == TokenKind::Protected {
+                                        modifiers.push(Modifier::Protected);
                                         protected_methods.push(Box::new(method));
                                     } else if accessors_defined[0] == TokenKind::Static {
-                                        if let Stmt::Function { ref mut modifiers, .. } = method {
-                                            modifiers.push(Modifier::Static);
-                                        }
+                                        modifiers.push(Modifier::Static);
                                         static_methods.push(Box::new(method));
                                     }
                                 }
@@ -541,32 +552,29 @@ impl Parser {
                             } else if accessors_defined[0] == TokenKind::Static {
                                 if let Stmt::Variable { ref mut modifiers, .. } = field {
                                     modifiers.push(Modifier::Static);
+                                    modifiers.push(Modifier::Public);
                                 }
                                 static_fields.push(Box::new(field));
                             }
                         } else {
                             let mut method = self.function_declaration("method")?;
-                            
-                            if accessors_defined[0] == TokenKind::Public {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    
+                            if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
+                                *n = name;
+
+                                if accessors_defined[0] == TokenKind::Public {
                                     modifiers.push(Modifier::Public);
-                                }
-                                public_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Private {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    public_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Private {
                                     modifiers.push(Modifier::Private);
-                                }
-                                private_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Protected {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    private_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Protected {
                                     modifiers.push(Modifier::Protected);
-                                }
-                                protected_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Static {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    protected_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Static {
                                     modifiers.push(Modifier::Static);
+                                    static_methods.push(Box::new(method));
                                 }
-                                static_methods.push(Box::new(method));
                             }
                         }
                     }
@@ -619,32 +627,29 @@ impl Parser {
                             } else if accessors_defined[0] == TokenKind::Static {
                                 if let Stmt::Variable { ref mut modifiers, .. } = field {
                                     modifiers.push(Modifier::Static);
+                                    modifiers.push(Modifier::Public);
                                 }
                                 static_fields.push(Box::new(field));
                             }
                         } else {
                             let mut method = self.function_declaration("method")?;
-                            
-                            if accessors_defined[0] == TokenKind::Public {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    
+                            if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
+                                *n = name;
+
+                                if accessors_defined[0] == TokenKind::Public {
                                     modifiers.push(Modifier::Public);
-                                }
-                                public_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Private {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    public_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Private {
                                     modifiers.push(Modifier::Private);
-                                }
-                                private_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Protected {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    private_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Protected {
                                     modifiers.push(Modifier::Protected);
-                                }
-                                protected_methods.push(Box::new(method));
-                            } else if accessors_defined[0] == TokenKind::Static {
-                                if let Stmt::Function { ref mut modifiers, .. } = method {
+                                    protected_methods.push(Box::new(method));
+                                } else if accessors_defined[0] == TokenKind::Static {
                                     modifiers.push(Modifier::Static);
+                                    static_methods.push(Box::new(method));
                                 }
-                                static_methods.push(Box::new(method));
                             }
                         }
                     }
@@ -668,7 +673,7 @@ impl Parser {
             if self.previous().kind == TokenKind::Amp {
                 derived.push(Derived::Ref);
             } else if self.previous().kind == TokenKind::Hash {
-                derived.push(Derived::Mut);
+                derived.push(Derived::MutRef);
             } else if self.previous().kind == TokenKind::Mul {
                 derived.push(Derived::Ptr);
             }
@@ -688,7 +693,7 @@ impl Parser {
                     if self.previous().kind == TokenKind::Amp {
                         clone[depth-1].push(Derived::Ref);
                     } else if self.previous().kind == TokenKind::Hash {
-                        clone[depth-1].push(Derived::Mut);
+                        clone[depth-1].push(Derived::MutRef);
                     } else if self.previous().kind == TokenKind::Mul {
                         clone[depth-1].push(Derived::Ptr);
                     }
@@ -728,7 +733,7 @@ impl Parser {
                 self.consume(TokenKind::Arrow, "Expected '->' before function return type.")?;
     
                 let return_type = self.type_expression()?;
-                let name = Token::new(TokenKind::Fn, "".to_string(), 0, 0);
+                let name = Token::new(TokenKind::Fn, "".to_string(), 0, Span::new(0, 0));
     
                 kind = TypeKind::Function(parameters, Box::new(return_type));
 
@@ -748,6 +753,7 @@ impl Parser {
                     derived: derived.clone(),
                     generics: generics.into_iter().map(Box::new).collect(),
                     kind,
+                    is_constructor: false
                 };
 
                 return Ok(function_type);
@@ -799,7 +805,7 @@ impl Parser {
             self.consume(TokenKind::Arrow, "Expected '->' before function return type.")?;
     
             let return_type = self.type_expression()?;
-            let name = Token::new(TokenKind::Fn, "".to_string(), 0, 0);
+            let name = Token::new(TokenKind::Fn, "".to_string(), 0, Span::new(0, 0));
     
             kind = TypeKind::Function(parameters, Box::new(return_type));
     
@@ -811,6 +817,7 @@ impl Parser {
                 derived: derived.clone(),
                 generics: generics.into_iter().map(Box::new).collect(),
                 kind,
+                is_constructor: false,
             };
 
             return Ok(function_type); 
@@ -841,7 +848,7 @@ impl Parser {
 
             lexeme = lexeme.trim_end_matches(", ").to_string() + ")";
 
-            name = Token::new(TokenKind::Identifier, lexeme, tuple.last().unwrap().name.line, tuple.last().unwrap().name.col);
+            name = Token::new(TokenKind::Identifier, lexeme, tuple.last().unwrap().name.line, tuple.last().unwrap().name.span.clone());
         } else {
             // check if it is a reference, pointer, mutref
             // if it is, set kind to be Ref(Pointer(MutRef(...))) etc...
@@ -868,6 +875,7 @@ impl Parser {
                 generics: generics.into_iter().map(Box::new).collect(),
                 derived,
                 kind,
+                is_constructor: false,
             });
         }
     
@@ -877,6 +885,7 @@ impl Parser {
             generics: vec![],
             derived,
             kind,
+            is_constructor: false,
         })
     }
 
@@ -910,8 +919,10 @@ impl Parser {
                 return Ok(Expr::Assignment { name, value: Box::new(value), op: equals });
             } else if let Expr::MemberAccess { object, name } = expr {
                 return Ok(Expr::MemberAssignment { object, name, value: Box::new(value), op: equals });
-            } else if let Expr::Index { object, index } = expr {
-                return Ok(Expr::IndexAssignment { object, index, value: Box::new(value), op: equals });
+            } else if let Expr::StaticAccess { object, name } = expr {
+                return Ok(Expr::StaticAssignment { object, name, value: Box::new(value), op: equals });
+            } else if let Expr::Index { object, index, token } = expr {
+                return Ok(Expr::IndexAssignment { object, index, value: Box::new(value), op: equals, token });
             }
 
             return Err(self.error(String::from("Invalid assignment target.")))
@@ -1104,8 +1115,9 @@ impl Parser {
 
         while self.match_token(TokenKind::LBracket) {
             let index = self.expression()?;
+            let token = self.previous();
             self.consume(TokenKind::RBracket, "Expected ']' after index.")?;
-            expr = Expr::Index { object: Box::new(expr), index: Box::new(index) };
+            expr = Expr::Index { object: Box::new(expr), index: Box::new(index), token };
         }
 
         Ok(expr)
@@ -1114,20 +1126,40 @@ impl Parser {
     pub fn member_access(&mut self) -> Result<Expr, Error> {
         let mut expr = self.call()?;
 
-        while self.match_token(TokenKind::Dot) {
-            let name = self.consume(TokenKind::Identifier, "Expected property name after '.'.")?;
-            expr = Expr::MemberAccess { object: Box::new(expr), name };
+        while self.match_token(TokenKind::Dot) || self.match_token(TokenKind::StaticAccess) {
+            let is_static = self.previous().kind == TokenKind::StaticAccess;
+            let name = self.consume(TokenKind::Identifier, "Expected property name after '.' or '::'.")?;
+            
+            if is_static {
+                expr = Expr::StaticAccess { object: Box::new(expr), name };
+            } else {
+                expr = Expr::MemberAccess { object: Box::new(expr), name };
+            }
         }
 
         Ok(expr)
     }
 
     pub fn call(&mut self) -> Result<Expr, Error> {
-        let paren = self.previous();
         let mut expr = self.primary()?;
 
+        let mut generics: Vec<Type> = Vec::new();
         loop {
+            let mut is_generic = false;
+            if self.match_token(TokenKind::Lt) {
+                is_generic = true;
+                generics = Vec::new();
+                loop {
+                    generics.push(self.type_expression()?);
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+
+                self.consume(TokenKind::Gt, "Expected '>' after generic parameters.")?;
+            }
             if self.match_token(TokenKind::LParen) {
+                let paren = self.previous();
                 let mut arguments = Vec::new();
 
                 if !self.check(TokenKind::RParen) {
@@ -1141,14 +1173,30 @@ impl Parser {
                 }
 
                 self.consume(TokenKind::RParen, "Expected ')' after arguments.")?;
-                expr = Expr::Call { callee: Box::new(expr), paren: paren.clone(), arguments: arguments.into_iter().map(Box::new).collect() };
+
+                // Handle generic parameters
+                if is_generic {
+                    expr = Expr::GenericCall {
+                        callee: Box::new(expr),
+                        paren,
+                        arguments: arguments.into_iter().map(Box::new).collect(),
+                        generics: generics.clone(),
+                    };
+                } else {
+                    expr = Expr::Call {
+                        callee: Box::new(expr),
+                        paren,
+                        arguments: arguments.into_iter().map(Box::new).collect(),
+                    };
+                }
             } else if self.match_token(TokenKind::Dot) {
                 let name = self.consume(TokenKind::Identifier, "Expected property name after '.'.")?;
                 expr = Expr::MemberAccess { object: Box::new(expr), name };
             } else if self.match_token(TokenKind::LBracket) {
                 let index = self.expression()?;
+                let token = self.previous();
                 self.consume(TokenKind::RBracket, "Expected ']' after index.")?;
-                expr = Expr::Index { object: Box::new(expr), index: Box::new(index) };
+                expr = Expr::Index { token, object: Box::new(expr), index: Box::new(index) };
             } else {
                 break;
             }
@@ -1223,7 +1271,7 @@ impl Parser {
                 vec![Note::new(
                     String::from("This error was caused by a previous error."),
                     self.peek().line,
-                    self.peek().col,
+                    self.peek().span,
                     self.filename.clone(),
                 )]
             ))
@@ -1251,28 +1299,47 @@ impl Parser {
 
     pub fn closure(&mut self, fields: bool) -> Result<Expr, Error> {
         let mut parameters = Vec::new();
+        let mut param_types = Vec::new();
+
+        let mut name = self.previous();
+
+        let mut lexeme = String::new();
 
         if fields {
             if !self.check(TokenKind::Pipe) {
                 loop {
                     parameters.push(self.consume(TokenKind::Identifier, "Expected parameter name.")?);
     
+                    lexeme += &self.previous().lexeme;
+
+                    if self.match_token(TokenKind::Colon) {
+                        lexeme += &self.previous().lexeme;
+                        let ty = self.type_expression()?;
+                        param_types.push(ty.clone());
+
+                        lexeme += &ty.name.lexeme;
+                    }
                     if !self.match_token(TokenKind::Comma) {
                         break;
                     }
+                    lexeme += &self.previous().lexeme;
                 }
             }
 
             self.consume(TokenKind::Pipe, "Expected '|' after closure parameters.")?;
+            lexeme += &self.previous().lexeme;
         }
 
         let return_type = self.type_expression()?;
+        lexeme += &return_type.name.lexeme;
 
         self.consume(TokenKind::Arrow, "Expected '->' before closure body.")?;        
 
         let body = Box::new(self.statement()?);
 
-        Ok(Expr::Closure { parameters, body, return_type })
+        name.lexeme = lexeme;
+
+        Ok(Expr::Closure { name, parameters, param_types, body, return_type })
     }
 
     pub fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, Error> {
@@ -1341,7 +1408,7 @@ impl Parser {
     fn error(&mut self, message: String) -> Error {
         self.had_error = true;
         self.errors += 1;
-        let mut e = Error::new(message, self.peek().line, self.peek().col, self.filename.clone());
+        let mut e = Error::new(message, self.peek().line, self.peek().span, self.filename.clone());
         e.add_source(self.source.clone());
         e
     }
@@ -1349,7 +1416,7 @@ impl Parser {
     fn error_with_notes(&mut self, message: String, notes: Vec<Note>) -> Error {
         self.had_error = true;
         self.errors += 1;
-        let mut e = Error::new(message, self.peek().line, self.peek().col, self.filename.clone());
+        let mut e = Error::new(message, self.peek().line, self.peek().span, self.filename.clone());
         e.add_source(self.source.clone());
 
         for note in notes {
@@ -1376,13 +1443,15 @@ impl Parser {
                     derived: vec![Derived::Ref],
                     generics: Vec::new(),
                     kind: current_kind,
+                    is_constructor: false,
                 })),
-                Derived::Mut => TypeKind::MutRef(Box::new(Type {
+                Derived::MutRef => TypeKind::MutRef(Box::new(Type {
                     attributes: attributes.clone(),
                     name: name.clone(),
-                    derived: vec![Derived::Mut],
+                    derived: vec![Derived::MutRef],
                     generics: Vec::new(),
                     kind: current_kind,
+                    is_constructor: false,
                 })),
                 Derived::Ptr => TypeKind::Pointer(Box::new(Type {
                     attributes: attributes.clone(),
@@ -1390,6 +1459,7 @@ impl Parser {
                     derived: vec![Derived::Ptr],
                     generics: Vec::new(),
                     kind: current_kind,
+                    is_constructor: false,
                 })),
                 Derived::Array => {
                     depth_c -= 1;
@@ -1399,6 +1469,7 @@ impl Parser {
                         derived: vec![Derived::Array],
                         generics: Vec::new(),
                         kind: current_kind,
+                        is_constructor: false,
                     }), depth-depth_c)
                 }
                 _ => current_kind,

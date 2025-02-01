@@ -80,11 +80,35 @@ impl Visitor for AstPrinter {
         self.indent -= 1;
     }
 
+    fn visit_generic_call(&mut self, expr: &Expr) {
+        println!("{}GenericCall: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::GenericCall { callee, generics, arguments, .. } = expr {
+            callee.accept(self);
+            for g in generics.iter() {
+                printtype(g.clone(), self.indent);
+            }
+            for arg in arguments.iter() {
+                arg.accept(self);
+            }
+        }
+        self.indent -= 1;
+    }
+
     fn visit_member_access(&mut self, expr: &Expr) {
         println!("{}MemberAccess: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Expr::MemberAccess { object, name, .. } = expr {
             object.accept(self);
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        }
+        self.indent -= 1;
+    }
+
+    fn visit_static_access(&mut self, expr: &Expr) {
+        println!("{}StaticAccess: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::StaticAccess { name, .. } = expr {
             println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
         }
         self.indent -= 1;
@@ -177,6 +201,16 @@ impl Visitor for AstPrinter {
         self.indent += 1;
         if let Expr::MemberAssignment { object, name, value, .. } = stmt {
             object.accept(self);
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            value.accept(self);
+        }
+        self.indent -= 1;
+    }
+
+    fn visit_static_assignment(&mut self, stmt: &Expr) {
+        println!("{}StaticAssignment: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::StaticAssignment { name, value, .. } = stmt {
             println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
             value.accept(self);
         }
@@ -448,9 +482,16 @@ fn printtype(type_: Type, indent: usize) {
             println!("{}User: ", String::from("\t").repeat(indent));
             println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
         }
-        TypeKind::Generic(ref name) => {
+        TypeKind::GenericParam(ref name) => {
             println!("{}Generic: ", String::from("\t").repeat(indent));
             println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
+        }
+        TypeKind::GenericInstance(ref name, ref generics) => {
+            println!("{}GenericInstance: ", String::from("\t").repeat(indent));
+            println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
+            for g in generics.iter() {
+                printtype(g.clone(), indent + 1);
+            }
         }
     }
 

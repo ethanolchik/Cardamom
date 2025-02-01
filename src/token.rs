@@ -1,12 +1,24 @@
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Token {
     pub kind: TokenKind,
     pub lexeme: String,
     pub line: usize,
-    pub col: usize
+    pub span: Span,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Span {
+        Span { start, end }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub enum TokenKind {
     EndOfFile,
 
@@ -18,7 +30,7 @@ pub enum TokenKind {
     Bang, Question, Eq, Neq, Lt, Gt, Lte, Gte, EqEq, And, Or,
     PlusEq, MinusEq, MulEq, DivEq, ModEq, AmpEq, PipeEq, CaretEq,
     QuestionQuestion, Pow, PowEq, LShift, RShift, LShiftEq, RShiftEq,
-    Range, Arrow, Hash,
+    Range, Arrow, Hash, StaticAccess,
 
     // Delimiters
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Dot, Colon, Semicolon,
@@ -33,12 +45,21 @@ pub enum TokenKind {
 }
 
 impl Token {
-    pub fn new(kind: TokenKind, lexeme: String, line: usize, col: usize) -> Token {
-        Token { kind, lexeme, line, col }
+    pub fn new(kind: TokenKind, lexeme: String, line: usize, span: Span) -> Token {
+        Token { kind, lexeme, line, span }
     }
 
     pub fn to_string(&self) -> String {
-        format!("{:?} {} at {}:{}", self.kind.clone().to_string(), self.lexeme, self.line, self.col)
+        format!("{} {} at {}:{}", self.kind.clone().to_string(), self.lexeme, self.line, self.span.start)
+    }
+
+    pub fn dummy(lexeme: &str) -> Token {
+        Token {
+            kind: TokenKind::EndOfFile,
+            lexeme: lexeme.to_string(),
+            line: 0,
+            span: Span::new(0, 0)
+        }
     }
 }
 
@@ -88,6 +109,7 @@ impl TokenKind {
             TokenKind::Range => "Range".to_string(),
             TokenKind::Arrow => "Arrow".to_string(),
             TokenKind::Hash => "Hash".to_string(),
+            TokenKind::StaticAccess => "StaticAccess".to_string(),
             TokenKind::LParen => "LParen".to_string(),
             TokenKind::RParen => "RParen".to_string(),
             TokenKind::LBrace => "LBrace".to_string(),

@@ -1,5 +1,5 @@
-use crate::token::{Token, TokenKind};
-use crate::errors::Error;
+use crate::token::{Token, TokenKind, Span};
+use crate::errors::{Error, Help};
 
 pub struct Lexer {
     pub source: String,
@@ -10,6 +10,8 @@ pub struct Lexer {
     pub current: usize,
     pub line: usize,
     pub col: usize,
+    pub col_start: usize,
+    pub col_end: usize,
 
     pub had_error: bool,
     pub error_tokens: Vec<Token>
@@ -26,6 +28,8 @@ impl Lexer {
             current: 0,
             line: 1,
             col: 1,
+            col_start: 1,
+            col_end: 1,
             had_error: false,
             error_tokens: Vec::new()
         }
@@ -34,6 +38,7 @@ impl Lexer {
     pub fn scan_tokens(&mut self) {
         while !self.is_at_end() {
             self.start = self.current;
+            self.col_start = self.col_end;
             self.scan_token();
         }
 
@@ -42,7 +47,7 @@ impl Lexer {
         let error_tokens: Vec<Token> = self.error_tokens.clone();
         for token in error_tokens.iter() {
             let message = format!("Unexpected token '{}'", token.lexeme);
-            self.lexerr(&message, token.clone());
+            self.lexerr(&message, token.clone(), vec![Help::new("Remove this character".to_string(), token.line, token.span.clone(), self.filename.clone())]);
         }
     }
 
@@ -60,7 +65,10 @@ impl Lexer {
                 let token_kind = if self.match_token('.') { TokenKind::Range } else { TokenKind::Dot };
                 self.add_token(token_kind);
             },
-            ':' => self.add_token(TokenKind::Colon),
+            ':' => {
+                let token_kind = if self.match_token(':') { TokenKind::StaticAccess } else { TokenKind::Colon };
+                self.add_token(token_kind);
+            },
             ';' => self.add_token(TokenKind::Semicolon),
             '+' => {
                 let token_kind = if self.match_token('=') { TokenKind::PlusEq } else { TokenKind::Plus };
@@ -180,7 +188,8 @@ impl Lexer {
             ' ' | '\r' | '\t' => (),
             '\n' => {
                 self.line += 1;
-                self.col = 1;
+                self.col_end = 0;
+                self.col_start = 0;
             },
             _ => {
                 if c.is_digit(10) {
@@ -197,7 +206,7 @@ impl Lexer {
     fn advance(&mut self) -> char {
         let c = self.peek();
         self.current += 1;
-        self.col += 1;
+        self.col_end += 1;
         c
     }
 
@@ -206,6 +215,7 @@ impl Lexer {
             return false;
         }
         self.current += 1;
+        self.col_end += 1;
         true
     }
 
@@ -227,7 +237,7 @@ impl Lexer {
 
     fn add_token(&mut self, kind: TokenKind) {
         let lexeme = self.source[self.start..self.current].to_string();
-        let token = Token::new(kind.clone(), lexeme, self.line, self.col);
+        let token = Token::new(kind.clone(), lexeme, self.line, Span::new(self.col_start, self.col_end));
         self.tokens.push(token.clone());
 
         if kind == TokenKind::Error {
@@ -274,7 +284,7 @@ impl Lexer {
     }
 
     fn scan_identifier(&mut self) {
-        while self.peek().is_alphanumeric() {
+        while self.peek().is_alphanumeric() || self.peek() == '_' {
             self.advance();
         }
 
@@ -313,9 +323,14 @@ impl Lexer {
         self.current >= self.source.len()
     }
 
-    fn lexerr(&mut self, message: &str, token: Token) {
-        let mut error = Error::new(message.to_string(), token.line, token.col, self.filename.clone());
+    fn lexerr(&mut self, message: &str, token: Token, help: Vec<Help>) {
+        let mut error = Error::new(message.to_string(), token.line, token.span, self.filename.clone());
         error.add_source(self.source.clone());
+
+        for h in help {
+            error.add_help(h);
+        }
+
         eprintln!("{}", error.to_string());
 
         self.had_error = true;
