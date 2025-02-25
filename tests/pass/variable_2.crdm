@@ -1,0 +1,4 @@
+fn main() {
+    let test: int = 1;
+    int += 1;
+}

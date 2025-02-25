@@ -426,6 +426,19 @@ impl Visitor for AstPrinter {
         }
         self.indent -= 1;
     }
+
+    fn visit_extension(&mut self, stmt: &Stmt) {
+        println!("{}Extension: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Stmt::Extension { target, methods } = stmt {
+            println!("{}Target: ", String::from("\t").repeat(self.indent));
+            printtype(*target.clone(), self.indent);
+            for method in methods.iter() {
+                method.accept(self);
+            }
+        }
+        self.indent -= 1;
+    }
 }
 
 fn printtype(type_: Type, indent: usize) {
@@ -462,12 +475,6 @@ fn printtype(type_: Type, indent: usize) {
         TypeKind::MutRef(ref inner) => {
             println!("{}MutRef: ", String::from("\t").repeat(indent));
             printtype(*inner.clone(), indent + 1);
-        }
-        TypeKind::Struct(ref fields) => {
-            println!("{}Struct: ", String::from("\t").repeat(indent));
-            for field in fields.iter() {
-                printtype(field.clone(), indent + 1);
-            }
         }
         TypeKind::Tuple(ref fields) => {
             println!("{}Tuple: ", String::from("\t").repeat(indent));

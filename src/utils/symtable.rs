@@ -125,6 +125,14 @@ impl Symbol {
     pub fn new_generic_param(name: Token) -> Self {
         Self::new_variable(name.clone(), Type::new(name.clone(), TypeKind::GenericParam(name.lexeme.clone())))
     }
+
+    pub fn get_name(&self) -> String {
+        match self {
+            Symbol::Variable(_, name, ..) => name.lexeme.clone(),
+            Symbol::Function { name, .. } => name.lexeme.clone(),
+            Symbol::Class { name, .. } => name.lexeme.clone(),
+        }
+    }
 }
 
 /// A multi-scope SymbolTable with separate global tables for classes & functions if needed.
@@ -218,5 +226,24 @@ impl SymbolTable {
     /// Mutably lookup a class
     pub fn lookup_class_mut(&mut self, name: &str) -> Option<&mut Symbol> {
         self.classes.get_mut(name)
+    }
+
+    pub fn register_extension_method(&mut self, target: &str, method: Symbol) {
+        if let Some(class_sym) = self.classes.get_mut(target) {
+            // If the target type already exists as a class, merge the method.
+            if let Symbol::Class { ref mut methods, .. } = class_sym {
+                methods.insert(method.get_name().clone(), method);
+            }
+        } else {
+            // For a primitive type not yet modeled as a class,
+            // create a new class symbol (using a dummy token for the type name)
+            // and insert the extension method.
+            let dummy_token = Token::dummy(target);
+            let mut new_class = Symbol::new_class(dummy_token);
+            if let Symbol::Class { ref mut methods, .. } = new_class {
+                methods.insert(method.get_name().clone(), method);
+            }
+            self.classes.insert(target.to_string(), new_class);
+        }
     }
 }

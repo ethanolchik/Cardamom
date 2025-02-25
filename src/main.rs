@@ -6,12 +6,16 @@ pub mod ast;
 pub mod ty;
 pub mod utils;
 pub mod typecheck;
+pub mod codegen;
 
-use std::fs::read_to_string;
+use std::fs::{read_to_string, File};
 use std::env::args;
+use std::io::Write;
 
 use crate::ast::Node;
 use crate::utils::symtable::SymbolTable;
+
+use crate::codegen::CppCodeGenerator;
 
 const PRINT_HELP: fn() -> () = || {
     println!("Usage: cardamom [options] <filename>");
@@ -19,6 +23,8 @@ const PRINT_HELP: fn() -> () = || {
     println!("\t-d, --debug\tEnable debug mode");
     println!("\t-nc, --no-colour\tDisable coloured output");
     println!("\t-h, --help\tDisplay this help message");
+    println!("\t-ast\tDisplay the AST");
+    println!("\t-out\tDisplay the output of the generated C code");
 };
 
 fn run_file(filename: String) {
@@ -54,13 +60,34 @@ fn run_file(filename: String) {
 
     let symtable = &mut SymbolTable::new();
     let mut tc = typecheck::TypeChecker::new(symtable, filename.clone(), source.clone());
+    let mut cg = CppCodeGenerator::new();
 
-    if let Ok(ref module) = module {
-        tc.check_module(&module);
-    }
+    if let Ok(module) = &module {
+        tc.check_module(module);
+    
+        let code = cg.generate(module);
 
-    for error in tc.errors.iter() {
-        println!("{}", error.to_string());
+        let mut output = File::create("output.cpp").unwrap();
+        output.write_all(code.as_bytes()).unwrap();
+
+        // compile the generated C code
+        let output = std::process::Command::new("g++")
+            .arg("output.cpp")
+            .arg("-o")
+            .arg("output")
+            .output()
+            .expect("Failed to compile the generated C++ code.");
+
+        if !is_flag_set_str!("show output") {
+            std::fs::remove_file("output.cpp").unwrap();
+        }
+
+        if output.status.success() {
+            println!("Successfully compiled the generated C++ code.");
+        } else {
+            eprintln!("Failed to compile the generated C++ code.");
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        }
     }
 
     if l.had_error || p.had_error {
@@ -77,6 +104,7 @@ fn main() {
             "-d" | "--debug" => set_flag_str!("debug"),
             "-nc" | "--no-colour" => set_flag_str!("no colour"),
             "-ast" => set_flag_str!("ast"),
+            "-out" => set_flag_str!("show output"),
             "-h" | "--help" => {
                 PRINT_HELP();
                 return;

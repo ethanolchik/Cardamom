@@ -1,0 +1,5 @@
+fn main() {
+    let increment: fn(&int) -> void = |x| void -> { x += 1; };
+
+    increment(1.0);
+}

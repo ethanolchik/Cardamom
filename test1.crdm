@@ -45,6 +45,10 @@ fn main() {
     let b: &[fn(int) -> int];
 
     let increment: fn(&int) -> void = |x| void -> { x += 1; };
+    
+    let closure_ret_closure: fn() -> fn(&int) -> void = || fn(&int) -> void -> { return increment; };
 
-    test<int>(1.1);
+    closure_ret_closure()(1);
+
+    test<float>(1.1);
 }

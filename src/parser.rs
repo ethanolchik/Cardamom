@@ -71,6 +71,8 @@ impl Parser {
             return Err(self.error(String::from("Unexpected modifier.")));
         } else if self.match_token(TokenKind::Import) {
             return self.import_declaration();
+        } else if (self.match_token(TokenKind::Extend)) {
+            return self.extend_declaration();
         }
 
         self.statement()
@@ -233,13 +235,21 @@ impl Parser {
     pub fn function_declaration(&mut self, kind: &str) -> Result<Stmt, Error> {
         let mut function_modifier = Vec::new();
 
+        if kind == "extension function" {
+            function_modifier.push(Modifier::Extension);
+        }
+
         if self.current_modifier != Modifier::None {
             function_modifier.push(self.current_modifier.clone());
             self.current_modifier = Modifier::None;
         }
 
-        let name = if kind == "function" {
-            self.consume(TokenKind::Identifier, "Expected function name.")?
+        if self.match_token(TokenKind::Extern) {
+            function_modifier.push(Modifier::Extern);
+        }
+
+        let name = if kind == "function" || kind == "extension function" {
+            self.consume(TokenKind::Identifier, &format!("Expected {} name.", kind))?
         } else {
             Token::new(TokenKind::Identifier, "".to_string(), 0, Span::new(0, 0))
         };
@@ -660,6 +670,25 @@ impl Parser {
 
             return Ok(Stmt::Class { name, generics, modifier: class_modifier, public_methods, private_methods, protected_methods, static_methods, public_fields, private_fields, protected_fields, static_fields });
         }
+    }
+
+    pub fn extend_declaration(&mut self) -> Result<Stmt, Error> {
+        let target = self.type_expression()?;
+        self.consume(TokenKind::LBrace, "Expected '{' after extend declaration")?;
+        let mut methods = Vec::new();
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            if self.match_token(TokenKind::Fn) {
+                let func = self.function_declaration("extension function")?;
+                methods.push(Box::new(func));
+            } else {
+                return Err(self.error("Expected function declaration in extend block.".to_string()));
+            }
+        }
+        self.consume(TokenKind::RBrace, "Expected '}' after extend block")?;
+        Ok(Stmt::Extension {
+            target: Box::new(target),
+            methods,
+        })
     }
 
     pub fn type_expression(&mut self) -> Result<Type, Error> {

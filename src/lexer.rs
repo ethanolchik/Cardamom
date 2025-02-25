@@ -308,6 +308,8 @@ impl Lexer {
             "import" => TokenKind::Import,
             "as" => TokenKind::As,
             "new" => TokenKind::New,
+            "extern" => TokenKind::Extern,
+            "extend" => TokenKind::Extend,
             _ => TokenKind::Identifier,
         };
         self.add_token(kind);

@@ -11,6 +11,8 @@ pub enum Modifier {
     Builtin,
     Method,
     Constructor,
+    Extern,
+    Extension,
     None,
 }
 
@@ -189,7 +191,7 @@ pub enum Stmt {
         body: Vec<Box<Stmt>>,
         return_type: Type,
         modifiers: Vec<Modifier>,
-        generics: Vec<Token>,
+        generics: Vec<Token>
     },
     Import {
         path: Box<Expr>,
@@ -208,6 +210,10 @@ pub enum Stmt {
         protected_fields: Vec<Box<Stmt>>,
         static_fields: Vec<Box<Stmt>>,
     },
+    Extension {
+        target: Box<Type>,
+        methods: Vec<Box<Stmt>>,
+    }
 }
 
 pub struct Module {
@@ -257,6 +263,7 @@ pub trait Visitor {
     fn visit_import(&mut self, stmt: &Stmt);
     fn visit_module(&mut self, stmt: &Module);
     fn visit_class(&mut self, stmt: &Stmt);
+    fn visit_extension(&mut self, stmt: &Stmt);
 }
 
 
@@ -305,6 +312,7 @@ impl Stmt {
             Stmt::Function { .. } => visitor.visit_function(self),
             Stmt::Import { .. } => visitor.visit_import(self),
             Stmt::Class { .. } => visitor.visit_class(self),
+            Stmt::Extension { .. } => visitor.visit_extension(self),
         }
     }
 }
@@ -319,6 +327,8 @@ impl Modifier {
             Modifier::Builtin => "Builtin".to_string(),
             Modifier::Method => "Method".to_string(),
             Modifier::Constructor => "Constructor".to_string(),
+            Modifier::Extern => "Extern".to_string(),
+            Modifier::Extension => "Extension".to_string(),
             Modifier::None => "None".to_string(),
         }
     }

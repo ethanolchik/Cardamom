@@ -27,7 +27,6 @@ pub enum TypeKind {
     Pointer(Box<Type>),
     Reference(Box<Type>),
     MutRef(Box<Type>),
-    Struct(Vec<Type>),
     Tuple(Vec<Type>),
     Void,
     User(String),
@@ -78,7 +77,6 @@ impl MonomorphTable {
         }
     }
 }
-
 
 impl TypeKind {
     pub fn inner_type(&self) -> Option<&Type> {
@@ -159,30 +157,22 @@ impl TypeKind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
             TypeKind::String => "string".to_string(),
-            TypeKind::Array(ty, size) => format!("{}[{}]", ty.to_string(), size),
+            TypeKind::Array(ty, size) => format!("{}[{}]", ty.kind.to_string(), size),
             TypeKind::Function(params, ret) => {
                 let params_str = params
                     .iter()
-                    .map(|p| p.to_string())
+                    .map(|p| p.kind.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("fn({}) -> {}", params_str, ret.to_string())
+                format!("fn({}) -> {}", params_str, ret.kind.to_string())
             },
-            TypeKind::Pointer(ty) => format!("*{}", ty.to_string()),
-            TypeKind::Reference(ty) => format!("&{}", ty.to_string()),
-            TypeKind::MutRef(ty) => format!("&mut {}", ty.to_string()),
-            TypeKind::Struct(fields) => {
-                let fields_str = fields
-                    .iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("struct({})", fields_str)
-            },
+            TypeKind::Pointer(ty) => format!("*{}", ty.kind.to_string()),
+            TypeKind::Reference(ty) => format!("&{}", ty.kind.to_string()),
+            TypeKind::MutRef(ty) => format!("&mut {}", ty.kind.to_string()),
             TypeKind::Tuple(types) => {
                 let types_str = types
                     .iter()
-                    .map(|t| t.to_string())
+                    .map(|t| t.kind.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("({})", types_str)
@@ -193,7 +183,7 @@ impl TypeKind {
             TypeKind::GenericInstance(name, types) => {
                 let types_str = types
                     .iter()
-                    .map(|t| t.to_string())
+                    .map(|t| t.kind.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{}<{}>", name, types_str)

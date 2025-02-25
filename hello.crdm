@@ -1,0 +1,19 @@
+fn extern println(content: string) {}
+fn extern toString(num: int) -> string {}
+fn fizzbuzz(n: int) {
+    for (let i: int = 0; i <= n; i+=1) {
+        if ((i % 3 == 0) && (i % 5 == 0)) {
+            println("FizzBuzz");
+        } else if (i % 3 == 0) {
+            println("Fizz");
+        } else if (i % 5 == 0) {
+            println("Buzz");
+        } else {
+            println(toString(i));
+        }
+    }
+}
+
+fn main() {
+    fizzbuzz(20);
+}

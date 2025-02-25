@@ -1,0 +1,8 @@
+fn test(x: int) -> int {
+    return x + 1;
+}
+
+fn main() {
+    let x: float = 1.1;
+    test(x);
+}

@@ -176,7 +176,14 @@ impl Error {
     }
 
     fn wrap_message(message: &str, indent: usize) -> String {
-        let available_width = MAX_LINE_LENGTH - indent;
+        let available_width;
+
+        if indent > MAX_LINE_LENGTH {
+            available_width = MAX_LINE_LENGTH;
+        } else {
+            available_width = MAX_LINE_LENGTH - indent;
+        }
+
         let mut result = String::new();
         let mut current_line = String::new();
         let mut first_line = true;
@@ -247,7 +254,7 @@ impl Error {
         intervals.sort_by(|a, b| a.0.cmp(&b.0));
         let mut merged = Vec::<(usize, usize)>::new();
         for (start, end) in intervals {
-            if let Some((prev_start, prev_end)) = merged.last_mut() {
+            if let Some((_, prev_end)) = merged.last_mut() {
                 // If they overlap or are adjacent, merge them
                 if start <= *prev_end + 1 {
                     *prev_end = (*prev_end).max(end);

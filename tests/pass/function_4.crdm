@@ -1,0 +1,9 @@
+fn ret_one() -> fn() -> int {
+    return || int -> { return 1; };
+}
+
+fn main() {
+    let one: fn() -> int = ret_one();
+
+    one();
+}

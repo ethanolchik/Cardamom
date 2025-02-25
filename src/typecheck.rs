@@ -19,7 +19,6 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 /// - Contains a `MonomorphTable` for storing specialized generic types.
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
-    pub errors: Vec<Error>,
     pub expr_types: ExprTypeMap<'a>,
 
     /// The name of the file we're currently checking, so we can attach it to errors.
@@ -37,17 +36,14 @@ pub struct TypeChecker<'a> {
     in_static_context: bool,
     in_call: bool,
 
-    pub monomorph_table: MonomorphTable
+    pub monomorph_table: MonomorphTable,
 }
 
 impl<'a> TypeChecker<'a> {
     /// Creates a new TypeChecker.
-    ///
-    /// `filename` and `source` will be used to provide better diagnostic messages.
     pub fn new(symtable: &'a mut SymbolTable, filename: String, source: String) -> Self {
         Self {
             symtable,
-            errors: Vec::new(),
             expr_types: HashMap::new(),
 
             filename,
@@ -70,6 +66,7 @@ impl<'a> TypeChecker<'a> {
     pub fn check_module(&mut self, module: &Module) {
         self.collect_declarations(module);
         self.define_class_members(module);
+        self.register_extensions(module);
 
         module.accept(self);
     }
@@ -390,103 +387,31 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn visit_assignment(&mut self, expr: &Expr) {
-        if let Expr::Assignment { name, value, .. } = expr {
-            self.current_assignment = Some(expr.clone());
-            value.accept(self);
-            self.current_assignment = None;
-
-            let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            // Check if the type of the right-hand side exists
-            if !self.type_exists(&rhs_ty) {
-                self.error_token(
-                    name,
-                    &format!("Type `{}` does not exist", rhs_ty.kind),
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
-                return;
-            }
-
-            // Check if the variable being assigned exists
-            if let Some(sym) = self.symtable.lookup_symbol(&name.lexeme) {
-                if let Symbol::Variable(_, _, var_ty, ..) = sym {
-                    // Check if the type of the variable exists
-                    if !self.type_exists(var_ty) {
-                        self.error_token(
-                            name,
-                            &format!("Type `{}` does not exist", var_ty.kind),
-                        );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                name.clone(),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
-                        return;
-                    }
-
-                    if !rhs_ty.is_compatible_with(var_ty) {
-                        self.error_with_notes(
+    fn register_extensions(&mut self, module: &Module) {
+        for stmt in &module.statements {
+            if let Stmt::Extension { target, methods } = &**stmt {
+                let target_name = target.name.lexeme.clone();
+                for method in methods {
+                    if let Stmt::Function { name, params, return_type, .. } = &**method {
+                        let mut param_types = Vec::new();
+                        for p in params {
+                            if let Stmt::Variable { type_, .. } = &**p {
+                                param_types.push(type_.clone());
+                            }
+                        }
+                        // Create a symbol for the extension method.
+                        let sym = Symbol::new_function_with_visibility(
                             name.clone(),
-                            &format!(
-                                "Cannot assign `{}` to variable of type `{}`",
-                                rhs_ty.kind, var_ty.kind
-                            ),
-                            vec![Note::new(
-                                format!("Variable `{}` is declared here with type `{}`", 
-                                    name.lexeme, var_ty.kind),
-                                var_ty.name.line,
-                                var_ty.name.span.clone(),
-                                self.filename.clone()
-                            )],
-                            vec![Help::new(
-                                format!("Try using a value of type `{}`", var_ty.kind),
-                                name.line,
-                                name.span.clone(),
-                                self.filename.clone()
-                            )]
+                            param_types,
+                            return_type.clone(),
+                            true, // mark as method (or extension)
+                            Some(Visibility::Public),
+                            false
                         );
+                        // Register the method for the target type.
+                        self.symtable.register_extension_method(&target_name, sym);
                     }
-                    // Assignment expression type => var's type
-                    self.set_expr_type(expr, var_ty.clone());
-                } else {
-                    self.error_token(
-                        name,
-                        &format!("Symbol `{}` is not a variable", name.lexeme),
-                    );
-                    self.set_expr_type(
-                        expr,
-                        Type::new(
-                            name.clone(),
-                            TypeKind::User("error".to_string()),
-                        ),
-                    );
                 }
-            } else {
-                self.error_token(
-                    name,
-                    &format!("Unknown variable `{}`", name.lexeme),
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
             }
         }
     }
@@ -1344,6 +1269,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                         );
                     }
                 }
+                TypeKind::Int
+                | TypeKind::Float
+                | TypeKind::String => {
+                }
                 _ => {
                     self.error_token(
                         &paren,
@@ -2145,7 +2074,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             body,
             return_type,
             generics,
-            ..
+            modifiers
         } = stmt
         {
             // Begin scope, set up parameters, etc. (same as before)
@@ -2185,6 +2114,11 @@ impl<'a> Visitor for TypeChecker<'a> {
     
             // restore old function return
             self.current_function_return_type = old_ret;
+
+            if modifiers.contains(&Modifier::Extern) {
+                // If the function is extern, we don't need a return statement.
+                return;
+            }
     
             // If the function returns void, we don't need a return statement.
             if return_type.kind == TypeKind::Void {
@@ -2385,7 +2319,11 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.class_stack.pop();
             self.current_class = self.class_stack.last().cloned();
         }
-    }    
+    }
+
+    fn visit_extension(&mut self, _stmt: &Stmt) {
+        // skip
+    }
 }
 
 // Add ToString for Visibility
