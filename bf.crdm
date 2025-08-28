@@ -4,7 +4,7 @@ fn extern len(s: string) -> int {}
 fn extern charAt(s: string, i: int) -> string {}
 fn extern toString(i: int) -> string {}
 
-fn brainfuck(code: string) {
+fn bf(code: string) {
     let tape: [int] = [0];
     let ptr: int = 0;
     let code_len: int = len(code);
@@ -57,7 +57,7 @@ fn main() -> int {
     println("Enter bf code: ");
     let x: string = input();
 
-    brainfuck(x);
+    bf(x);
 
     return 0;
 }
