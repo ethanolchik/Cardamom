@@ -1,0 +1,3 @@
+fn main() {
+    let bad: bool = is_ok(1);
+}

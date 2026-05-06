@@ -1,0 +1,8 @@
+// Core contract for optional values.
+// The compiler loads this file automatically.
+type Option<T>;
+
+extern fn some<T>(value: T) -> Option<T>;
+extern fn none<T>() -> Option<T>;
+extern fn is_some<T>(value: Option<T>) -> bool;
+extern fn is_none<T>(value: Option<T>) -> bool;

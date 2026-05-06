@@ -1,0 +1,8 @@
+// Core contract for fallible values.
+// The compiler loads this file automatically.
+type Result<T, E>;
+
+extern fn ok<T, E>(value: T) -> Result<T, E>;
+extern fn err<T, E>(error: E) -> Result<T, E>;
+extern fn is_ok<T, E>(value: Result<T, E>) -> bool;
+extern fn is_err<T, E>(value: Result<T, E>) -> bool;

@@ -1,0 +1,22 @@
+fn main(args: [string]) -> int {
+    let first: Option<string> = args.get(0);
+    let parsed: Result<int, string> = ok(1);
+
+    if (first.is_some() && is_some(first)) {
+        if (parsed.is_ok() && is_ok(parsed)) {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    if (first.is_none() || is_err(parsed)) {
+        return 2;
+    }
+
+    if (parsed.is_err()) {
+        return 3;
+    }
+
+    return 4;
+}

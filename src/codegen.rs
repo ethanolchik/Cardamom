@@ -101,6 +101,19 @@ impl CppCodeGenerator {
         self.indent_level -= 1;
         self.writeln("}");
         self.writeln("");
+        self.writeln("template <typename T, typename E>");
+        self.writeln("bool __cardamom_result_is_ok(const __cardamom_result<T, E>& value) {");
+        self.indent_level += 1;
+        self.writeln("return std::holds_alternative<__cardamom_ok<T>>(value);");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("template <typename T, typename E>");
+        self.writeln("bool __cardamom_result_is_err(const __cardamom_result<T, E>& value) {");
+        self.indent_level += 1;
+        self.writeln("return std::holds_alternative<__cardamom_err<E>>(value);");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("");
         self.writeln("template <typename T, typename E, typename F>");
         self.writeln("auto __cardamom_result_map(const __cardamom_result<T, E>& value, F mapper) -> __cardamom_result<std::decay_t<decltype(mapper(std::declval<T>()))>, E> {");
         self.indent_level += 1;
@@ -314,6 +327,25 @@ impl CppCodeGenerator {
                 self.write_member_receiver(object, receiver);
                 self.output.push_str(", ");
                 self.write_call_arguments(arguments);
+                self.output.push(')');
+            }
+            "is_some" => {
+                self.write_member_receiver(object, receiver);
+                self.output.push_str(".has_value()");
+            }
+            "is_none" => {
+                self.output.push('!');
+                self.write_member_receiver(object, receiver);
+                self.output.push_str(".has_value()");
+            }
+            "is_ok" => {
+                self.output.push_str("__cardamom_result_is_ok(");
+                self.write_member_receiver(object, receiver);
+                self.output.push(')');
+            }
+            "is_err" => {
+                self.output.push_str("__cardamom_result_is_err(");
+                self.write_member_receiver(object, receiver);
                 self.output.push(')');
             }
             "charAt" => {
@@ -548,6 +580,7 @@ impl Visitor for CppCodeGenerator {
                 if self.builtin_function(name, params, return_type) {
                     return;
                 }
+                return;
             }
 
             if let Some(args_name) = self.cli_main_args_name(name, params, return_type) {
@@ -806,6 +839,33 @@ impl Visitor for CppCodeGenerator {
                             self.write_call_arguments(arguments);
                             self.output.push(')');
                         }
+                        return;
+                    }
+                    "is_some" => {
+                        if let [arg] = arguments.as_slice() {
+                            arg.accept(self);
+                            self.output.push_str(".has_value()");
+                        }
+                        return;
+                    }
+                    "is_none" => {
+                        if let [arg] = arguments.as_slice() {
+                            self.output.push('!');
+                            arg.accept(self);
+                            self.output.push_str(".has_value()");
+                        }
+                        return;
+                    }
+                    "is_ok" => {
+                        self.output.push_str("__cardamom_result_is_ok(");
+                        self.write_call_arguments(arguments);
+                        self.output.push(')');
+                        return;
+                    }
+                    "is_err" => {
+                        self.output.push_str("__cardamom_result_is_err(");
+                        self.write_call_arguments(arguments);
+                        self.output.push(')');
                         return;
                     }
                     _ => {}

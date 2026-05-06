@@ -272,6 +272,18 @@ impl<'a> TypeChecker<'a> {
                 )),
                 _ => None,
             },
+            TypeKind::User(type_name) if type_name == "Option" && self.option_inner_type(obj_ty).is_some() => {
+                match name.lexeme.as_str() {
+                    "is_some" | "is_none" => Some(self.function_type(name, vec![], self.bool_type(name))),
+                    _ => None,
+                }
+            }
+            TypeKind::User(type_name) if type_name == "Result" && self.result_types(obj_ty).is_some() => {
+                match name.lexeme.as_str() {
+                    "is_ok" | "is_err" => Some(self.function_type(name, vec![], self.bool_type(name))),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -1051,6 +1063,60 @@ impl<'a> Visitor for TypeChecker<'a> {
                             self.set_expr_type(expr, self.error_type(paren));
                         } else {
                             self.set_expr_type(expr, expected);
+                        }
+                        return;
+                    }
+                    "is_some" | "is_none" => {
+                        if arguments.len() != 1 {
+                            self.error_token(
+                                paren,
+                                &format!("Function `{}` expects 1 arg, got {}", name.lexeme, arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        let arg = &arguments[0];
+                        arg.accept(self);
+                        let arg_ty = self
+                            .get_expr_type(arg)
+                            .cloned()
+                            .unwrap_or_else(|| self.error_type(paren));
+                        if self.option_inner_type(&arg_ty).is_some() {
+                            self.set_expr_type(expr, self.bool_type(name));
+                        } else {
+                            self.error_token(
+                                name,
+                                &format!("Function `{}` expects an Option<T>, got `{}`", name.lexeme, arg_ty.kind),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                        }
+                        return;
+                    }
+                    "is_ok" | "is_err" => {
+                        if arguments.len() != 1 {
+                            self.error_token(
+                                paren,
+                                &format!("Function `{}` expects 1 arg, got {}", name.lexeme, arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        let arg = &arguments[0];
+                        arg.accept(self);
+                        let arg_ty = self
+                            .get_expr_type(arg)
+                            .cloned()
+                            .unwrap_or_else(|| self.error_type(paren));
+                        if self.result_types(&arg_ty).is_some() {
+                            self.set_expr_type(expr, self.bool_type(name));
+                        } else {
+                            self.error_token(
+                                name,
+                                &format!("Function `{}` expects a Result<T, E>, got `{}`", name.lexeme, arg_ty.kind),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
                         }
                         return;
                     }
@@ -1921,6 +1987,7 @@ mod tests {
             "tests/pass/option_construct_1.crdm",
             "tests/pass/option_chain_1.crdm",
             "tests/pass/result_1.crdm",
+            "tests/pass/predicates_1.crdm",
         ] {
             assert_eq!(typecheck_fixture(fixture), 0, "`{}` should pass", fixture);
         }
@@ -1939,6 +2006,8 @@ mod tests {
             "tests/fail/result_infer_1.crdm",
             "tests/fail/result_mismatch_1.crdm",
             "tests/fail/result_chain_non_result_1.crdm",
+            "tests/fail/predicate_non_option_1.crdm",
+            "tests/fail/predicate_non_result_1.crdm",
         ] {
             assert!(
                 typecheck_fixture(fixture) > 0,

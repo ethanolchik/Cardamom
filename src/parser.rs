@@ -9,6 +9,7 @@ pub struct Parser {
     pub had_error: bool,
     pub source: String,
     pub filename: String,
+    generic_params: Vec<String>,
 
     pub errors: usize,
 }
@@ -21,6 +22,7 @@ impl Parser {
             had_error: false,
             source,
             filename,
+            generic_params: Vec::new(),
             errors: 0,
         }
     }
@@ -59,7 +61,10 @@ impl Parser {
         }
 
         if self.match_token(TokenKind::Fn) {
-            return self.function_declaration("function");
+            return self.function_declaration("function", vec![]);
+        } else if self.match_token(TokenKind::Extern) {
+            self.consume(TokenKind::Fn, "Expected 'fn' after 'extern'.")?;
+            return self.function_declaration("function", vec![Modifier::Extern]);
         } else if self.match_token(TokenKind::Let) {
             return self.variable_declaration();
         } else if self.match_token(TokenKind::Const) {
@@ -225,8 +230,7 @@ impl Parser {
         Ok(Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived, modifiers })
     }
 
-    pub fn function_declaration(&mut self, kind: &str) -> Result<Stmt, Error> {
-        let mut function_modifier = Vec::new();
+    pub fn function_declaration(&mut self, kind: &str, mut function_modifier: Vec<Modifier>) -> Result<Stmt, Error> {
 
         if kind == "extension function" {
             function_modifier.push(Modifier::Extension);
@@ -242,7 +246,22 @@ impl Parser {
             Token::new(TokenKind::Identifier, "".to_string(), 0, Span::new(0, 0))
         };
 
-        let generics = Vec::new();
+        let mut generics = Vec::new();
+        let previous_generic_params = self.generic_params.clone();
+
+        if self.match_token(TokenKind::Lt) {
+            loop {
+                let generic = self.consume(TokenKind::Identifier, "Expected generic parameter name.")?;
+                self.generic_params.push(generic.lexeme.clone());
+                generics.push(generic);
+
+                if !self.match_token(TokenKind::Comma) {
+                    break;
+                }
+            }
+
+            self.consume(TokenKind::Gt, "Expected '>' after function generics.")?;
+        }
 
         self.consume(TokenKind::LParen, &format!("Expected '(' after {} name.", kind))?;
         let mut params = Vec::new();
@@ -288,8 +307,14 @@ impl Parser {
             };
         }
 
-        self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
-        let body = self.block()?;
+        let body = if function_modifier.contains(&Modifier::Extern) && self.match_token(TokenKind::Semicolon) {
+            Vec::new()
+        } else {
+            self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
+            self.block()?
+        };
+
+        self.generic_params = previous_generic_params;
 
         Ok(Stmt::Function { name, params: params.into_iter().collect(), body: body.into_iter().map(Box::new).collect(), return_type, modifiers: function_modifier, generics })
     }
@@ -485,7 +510,11 @@ impl Parser {
             // check if it is a reference, pointer, mutref
             // if it is, set kind to be Ref(Pointer(MutRef(...))) etc...
             name = self.consume(TokenKind::Identifier, "Expected type name.")?;
-            kind = TypeKind::from_name(&name.lexeme.clone());
+            kind = if self.generic_params.contains(&name.lexeme) {
+                TypeKind::GenericParam(name.lexeme.clone())
+            } else {
+                TypeKind::from_name(&name.lexeme.clone())
+            };
             kind = self.apply_derived(kind, &derived, &attributes, &name, 0);
         }
 
