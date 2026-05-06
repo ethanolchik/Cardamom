@@ -799,7 +799,12 @@ impl Parser {
     }
 
     pub fn primary(&mut self) -> Result<Expr, Error> {
-        if self.match_token(TokenKind::Integer) || self.match_token(TokenKind::Float) || self.match_token(TokenKind::String) {
+        if self.match_token(TokenKind::Integer)
+            || self.match_token(TokenKind::Float)
+            || self.match_token(TokenKind::String)
+            || self.match_token(TokenKind::True)
+            || self.match_token(TokenKind::False)
+        {
             return Ok(Expr::Literal { value: self.previous().clone() });
         }
 

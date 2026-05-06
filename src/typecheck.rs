@@ -147,7 +147,7 @@ impl<'a> TypeChecker<'a> {
 
     fn type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
-            TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String | TypeKind::Void => true,
             TypeKind::User(name) => {
                 // Keep cascaded diagnostics readable once an earlier expression has failed.
                 let is_generic_param = matches!(
@@ -197,8 +197,31 @@ impl<'a> TypeChecker<'a> {
         Type::new(token.clone(), TypeKind::String)
     }
 
+    fn bool_type(&self, token: &Token) -> Type {
+        Type::new(token.clone(), TypeKind::Bool)
+    }
+
     fn void_type(&self, token: &Token) -> Type {
         Type::new(token.clone(), TypeKind::Void)
+    }
+
+    fn is_numeric_type(&self, ty: &Type) -> bool {
+        matches!(ty.kind, TypeKind::Int | TypeKind::Float)
+    }
+
+    fn check_bool_condition(&self, condition: &Expr, context: &str) {
+        let token = get_token(condition);
+        let condition_ty = self
+            .get_expr_type(condition)
+            .cloned()
+            .unwrap_or_else(|| self.error_type(&token));
+
+        if condition_ty.kind != TypeKind::Bool && condition_ty.kind != TypeKind::User("error".to_string()) {
+            self.error_token(
+                &token,
+                &format!("{} condition must be `bool`, got `{}`", context, condition_ty.kind),
+            );
+        }
     }
 
     fn unsupported_expr(&mut self, expr: &Expr, token: &Token, message: &str) {
@@ -308,44 +331,81 @@ impl<'a> Visitor for TypeChecker<'a> {
                 )
             });
 
-            // Example: handle arithmetic vs. comparison operators
-            let result_ty = if left_ty.is_compatible_with(&right_ty) {
-                match op.kind {
-                    TokenKind::Plus | TokenKind::Minus | TokenKind::Mul | TokenKind::Div => {
+            let result_ty = match op.kind {
+                TokenKind::Plus | TokenKind::Minus | TokenKind::Mul | TokenKind::Div | TokenKind::Mod => {
+                    if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
                         if left_ty.kind == TypeKind::Float || right_ty.kind == TypeKind::Float {
-                            if left_ty.kind == TypeKind::Float {
-                                left_ty
-                            } else {
-                                right_ty
-                            }
+                            Type::new(op.clone(), TypeKind::Float)
                         } else {
-                            left_ty
+                            Type::new(op.clone(), TypeKind::Int)
                         }
-                    }
-                    TokenKind::EqEq | TokenKind::Neq | TokenKind::Lt | TokenKind::Gt | TokenKind::Lte | TokenKind::Gte => {
-                        Type::new(
-                            Token::dummy("int"),
-                            TypeKind::Int
-                        ) // booleans are just integers.
-                    }
-                    _ => {
-                        // fallback: just assume same as left
-                        left_ty
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Arithmetic operator `{}` requires numeric operands, got `{}` and `{}`",
+                                op.lexeme, left_ty.kind, right_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
                     }
                 }
-            } else {
-                self.error_token(
-                    &op,
-                    &format!(
-                        "Type mismatch in binary operation: `{}` vs `{}` using `{}`",
-                        left_ty.kind, right_ty.kind, op.lexeme
-                    ),
-                );
-
-                Type::new(
-                    op.clone(),
-                    TypeKind::User("error".to_string()),
-                )
+                TokenKind::Lt | TokenKind::Gt | TokenKind::Lte | TokenKind::Gte => {
+                    if self.is_numeric_type(&left_ty) && self.is_numeric_type(&right_ty) {
+                        self.bool_type(&op)
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Comparison operator `{}` requires numeric operands, got `{}` and `{}`",
+                                op.lexeme, left_ty.kind, right_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
+                TokenKind::EqEq | TokenKind::Neq => {
+                    if left_ty.is_compatible_with(&right_ty) {
+                        self.bool_type(&op)
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Equality operator `{}` requires compatible operands, got `{}` and `{}`",
+                                op.lexeme, left_ty.kind, right_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
+                TokenKind::And | TokenKind::Or => {
+                    if left_ty.kind == TypeKind::Bool && right_ty.kind == TypeKind::Bool {
+                        self.bool_type(&op)
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Logical operator `{}` requires bool operands, got `{}` and `{}`",
+                                op.lexeme, left_ty.kind, right_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
+                _ => {
+                    if left_ty.is_compatible_with(&right_ty) {
+                        left_ty
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Type mismatch in binary operation: `{}` vs `{}` using `{}`",
+                                left_ty.kind, right_ty.kind, op.lexeme
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
             };
 
             self.set_expr_type(expr, result_ty);
@@ -368,8 +428,7 @@ impl<'a> Visitor for TypeChecker<'a> {
 
             let result_ty = match op.kind {
                 TokenKind::Minus => {
-                    // numeric only
-                    if right_ty.is_primitive() {
+                    if self.is_numeric_type(&right_ty) {
                         right_ty.clone()
                     } else {
                         self.error_token(
@@ -382,19 +441,15 @@ impl<'a> Visitor for TypeChecker<'a> {
                         )
                     }
                 }
-                TokenKind::Mul => {
-                    // dereference
-                    if let TypeKind::Pointer(inner) = right_ty.kind {
-                        *inner.clone()
+                TokenKind::Bang => {
+                    if right_ty.kind == TypeKind::Bool {
+                        self.bool_type(&op)
                     } else {
                         self.error_token(
                             &op,
-                            &format!("Cannot dereference non-pointer `{}`", right_ty.kind),
+                            &format!("Cannot apply logical not to `{}`", right_ty.kind),
                         );
-                        Type::new(
-                            op.clone(),
-                            TypeKind::User("error".to_string()),
-                        )
+                        self.error_type(&op)
                     }
                 }
                 _ => right_ty.clone(),
@@ -417,9 +472,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                 TokenKind::String => {
                     Type::new(value.clone(), TypeKind::String)
                 }
+                TokenKind::True | TokenKind::False => {
+                    Type::new(value.clone(), TypeKind::Bool)
+                }
                 _ => {
-                    // fallback
-                    Type::new(value.clone(), TypeKind::User("bool".to_string()))
+                    Type::new(value.clone(), TypeKind::User("error".to_string()))
                 }
             };
             self.set_expr_type(expr, lit_ty);
@@ -1118,6 +1175,7 @@ impl<'a> Visitor for TypeChecker<'a> {
         } = stmt
         {
             condition.accept(self);
+            self.check_bool_condition(condition, "If");
             then_branch.accept(self);
             if let Some(e) = else_branch {
                 e.accept(self);
@@ -1128,6 +1186,7 @@ impl<'a> Visitor for TypeChecker<'a> {
     fn visit_while(&mut self, stmt: &Stmt) {
         if let Stmt::While { condition, body } = stmt {
             condition.accept(self);
+            self.check_bool_condition(condition, "While");
             body.accept(self);
         }
     }
@@ -1146,6 +1205,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
             if let Some(cond) = condition {
                 cond.accept(self);
+                self.check_bool_condition(cond, "For");
             }
             if let Some(inc) = increment {
                 inc.accept(self);
@@ -1484,6 +1544,7 @@ mod tests {
             "tests/pass/variable_2.crdm",
             "tests/pass/array_1.crdm",
             "tests/pass/array_2.crdm",
+            "tests/pass/bool_1.crdm",
             "tests/pass/inference_1.crdm",
             "tests/pass/main_args.crdm",
         ] {
@@ -1496,6 +1557,7 @@ mod tests {
         for fixture in [
             "tests/fail/function_1.crdm",
             "tests/fail/function_2.crdm",
+            "tests/fail/bool_condition_1.crdm",
         ] {
             assert!(
                 typecheck_fixture(fixture) > 0,

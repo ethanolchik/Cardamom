@@ -449,6 +449,9 @@ fn printtype(type_: Type, indent: usize) {
         TypeKind::Float => {
             println!("{}Float", String::from("\t").repeat(indent));
         }
+        TypeKind::Bool => {
+            println!("{}Bool", String::from("\t").repeat(indent));
+        }
         TypeKind::String => {
             println!("{}String", String::from("\t").repeat(indent));
         }

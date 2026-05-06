@@ -1,0 +1,15 @@
+fn main(args: [string]) -> int {
+    let active: bool = true;
+    let inactive = false;
+    let same = active == true;
+
+    if (active && !inactive) {
+        return 0;
+    }
+
+    if (same) {
+        return 0;
+    }
+
+    return 1;
+}

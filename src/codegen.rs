@@ -58,6 +58,7 @@ impl CppCodeGenerator {
         match &ty.kind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
+            TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
             TypeKind::User(name) if name == "infer" => "auto".to_string(),

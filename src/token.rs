@@ -38,7 +38,7 @@ pub enum TokenKind {
     // Keywords
     If, Else, While, For, Break, Continue, Return,
     Class, Fn, Let, Const, Public, Private, Protected, Static,
-    Import, As, New, Extern, Extend,
+    Import, As, New, Extern, Extend, True, False,
 
     // Misc
     Error
@@ -140,6 +140,8 @@ impl TokenKind {
             TokenKind::New => "New".to_string(),
             TokenKind::Extern => "Extern".to_string(),
             TokenKind::Extend => "Extend".to_string(),
+            TokenKind::True => "True".to_string(),
+            TokenKind::False => "False".to_string(),
             TokenKind::Error => "Error".to_string()
         }
     }
