@@ -19,6 +19,7 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
+    pub variable_types: HashMap<*const Stmt, Type>,
     pub errors: RefCell<Vec<Error>>,
 
     /// The name of the file we're currently checking, so we can attach it to errors.
@@ -39,6 +40,7 @@ impl<'a> TypeChecker<'a> {
         Self {
             symtable,
             expr_types: HashMap::new(),
+            variable_types: HashMap::new(),
             errors: RefCell::new(Vec::new()),
 
             filename,
@@ -138,6 +140,11 @@ impl<'a> TypeChecker<'a> {
     /// Store `ty` in the map for `expr`.
     fn set_expr_type(&mut self, expr: &Expr, ty: Type) {
         self.expr_types.insert(expr as *const Expr, ty);
+    }
+
+    /// Store the resolved type for a statement.
+    fn set_stmt_type(&mut self, stmt: &Stmt, ty: Type) {
+        self.variable_types.insert(stmt as *const Stmt, ty);
     }
 
     /// Retrieve the stored type for `expr` (if any).
@@ -1388,15 +1395,18 @@ impl<'a> Visitor for TypeChecker<'a> {
                         .get_expr_type(init)
                         .cloned()
                         .unwrap_or_else(|| self.error_type(name));
+                    self.set_stmt_type(stmt, inferred_ty.clone());
                     self.symtable.declare_symbol(
                         &name.lexeme,
                         Symbol::new_variable(name.clone(), inferred_ty),
                     );
                 } else {
+                    let error_ty = self.error_type(name);
                     self.error_token(name, "Cannot infer the type of a variable without an initializer");
+                    self.set_stmt_type(stmt, error_ty.clone());
                     self.symtable.declare_symbol(
                         &name.lexeme,
-                        Symbol::new_variable(name.clone(), self.error_type(name)),
+                        Symbol::new_variable(name.clone(), error_ty),
                     );
                 }
                 return;
@@ -1470,9 +1480,12 @@ impl<'a> Visitor for TypeChecker<'a> {
                     vec![]
                 );
 
-                self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), Type::new(name.clone(), TypeKind::User("error".to_string()))));
+                let error_ty = self.error_type(name);
+                self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), error_ty.clone()));
+                self.set_stmt_type(stmt, self.error_type(name));
             } else {
                 self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), type_.clone()));
+                self.set_stmt_type(stmt, type_.clone());
             }
         }
     }

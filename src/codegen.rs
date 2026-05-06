@@ -2,12 +2,14 @@ use crate::ast::{Module, Node, Stmt, Expr, Visitor};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
 use crate::ast::Modifier;
+use std::collections::HashMap;
 use std::fmt::Write;
 
 /// The CppCodeGenerator traverses the AST and produces C++ source code.
 pub struct CppCodeGenerator {
     output: String,
     indent_level: usize,
+    variable_types: HashMap<*const Stmt, Type>,
 }
 
 impl CppCodeGenerator {
@@ -16,6 +18,15 @@ impl CppCodeGenerator {
         Self {
             output: String::new(),
             indent_level: 0,
+            variable_types: HashMap::new(),
+        }
+    }
+
+    pub fn with_variable_types(variable_types: HashMap<*const Stmt, Type>) -> Self {
+        Self {
+            output: String::new(),
+            indent_level: 0,
+            variable_types,
         }
     }
 
@@ -61,7 +72,6 @@ impl CppCodeGenerator {
             TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
-            TypeKind::User(name) if name == "infer" => "auto".to_string(),
             TypeKind::User(name) => name.clone(), // assume user types become class names
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
@@ -375,7 +385,11 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_variable(&mut self, stmt: &Stmt) {
         if let Stmt::Variable { name, initialiser, type_, modifiers: _, derived: _ } = stmt {
-            let cpp_type = self.translate_type(type_);
+            let resolved_type = self.variable_types.get(&(stmt as *const Stmt)).unwrap_or(type_);
+            if matches!(resolved_type.kind, TypeKind::User(ref n) if n == "infer") {
+                panic!("unresolved inferred variable type reached codegen");
+            }
+            let cpp_type = self.translate_type(resolved_type);
             self.output.push_str(&self.indent());
             self.output.push_str(&cpp_type);
             self.output.push(' ');
@@ -890,6 +904,44 @@ mod tests {
         assert!(
             code.contains("std::vector<std::string> args(argv + 1, argv + argc);"),
             "main args should become a std::vector<std::string> without the program name:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn inferred_variable_types_codegen_concretely() {
+        let relative_path = "tests/pass/inference_1.crdm";
+        let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
+        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+
+        let mut lexer = Lexer::new(source.clone(), filename.clone());
+        lexer.scan_tokens();
+        assert!(!lexer.had_error, "`{}` should lex cleanly", relative_path);
+
+        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
+        let module = match parser.parse() {
+            Ok(module) => module,
+            Err(err) => panic!("`{}` should parse: {}", relative_path, err.to_string()),
+        };
+        assert!(!parser.had_error, "`{}` should parse cleanly", relative_path);
+
+        let mut symtable = SymbolTable::new();
+        let checker_source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+        let mut checker = TypeChecker::new(&mut symtable, filename, checker_source);
+        checker.check_module(&module);
+        assert_eq!(checker.error_count(), 0, "`{}` should typecheck", relative_path);
+
+        let mut generator = CppCodeGenerator::with_variable_types(checker.variable_types.clone());
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("int count = 1;"),
+            "inferred integer variables should codegen as `int`:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("auto count"),
+            "inferred variables should not codegen as `auto`:\n{}",
             code
         );
     }

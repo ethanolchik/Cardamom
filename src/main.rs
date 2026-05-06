@@ -77,7 +77,7 @@ fn run_file(filename: String) -> bool {
             return false;
         }
     
-        let mut cg = CppCodeGenerator::new();
+        let mut cg = CppCodeGenerator::with_variable_types(tc.variable_types.clone());
         let code = cg.generate(module);
 
         let mut output = File::create("output.cpp").unwrap();
