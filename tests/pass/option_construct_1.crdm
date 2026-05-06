@@ -1,0 +1,17 @@
+fn fallback(flag: bool) -> Option<int> {
+    if (flag) {
+        return some(42);
+    }
+
+    return none();
+}
+
+fn main(args: [string]) -> int {
+    let path: string = args.get(0) ?? "input.txt";
+    let present: Option<int> = some(1);
+    let missing: Option<int> = none();
+    let label: Option<string> = some("ready");
+    let selected: string = label ?? "fallback";
+    let chosen: int = present ?? 0;
+    return fallback(false) ?? chosen;
+}
