@@ -36,96 +36,10 @@ impl CppCodeGenerator {
         self.writeln("#include <iostream>");
         self.writeln("#include <vector>");
         self.writeln("#include <string>");
-        self.writeln("#include <optional>");
-        self.writeln("#include <variant>");
-        self.writeln("#include <cstddef>");
-        self.writeln("#include <type_traits>");
-        self.writeln("#include <utility>");
         self.writeln("#include <sstream>");
         self.writeln("#include <cstdlib>");
+        self.writeln("#include \"core/runtime.hpp\"");
         self.writeln("#include \"std.hpp\"");
-        self.writeln("");
-        self.writeln("template <typename T>");
-        self.writeln("std::optional<T> __cardamom_array_get(const std::vector<T>& values, int index) {");
-        self.indent_level += 1;
-        self.writeln("if (index < 0 || static_cast<std::size_t>(index) >= values.size()) {");
-        self.indent_level += 1;
-        self.writeln("return std::nullopt;");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("return values.at(index);");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("template <typename T, typename F>");
-        self.writeln("auto __cardamom_option_map(const std::optional<T>& value, F mapper) -> std::optional<std::decay_t<decltype(mapper(*value))>> {");
-        self.indent_level += 1;
-        self.writeln("if (!value.has_value()) {");
-        self.indent_level += 1;
-        self.writeln("return std::nullopt;");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("return std::make_optional(mapper(*value));");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("template <typename T>");
-        self.writeln("struct __cardamom_ok { T value; };");
-        self.writeln("template <typename E>");
-        self.writeln("struct __cardamom_err { E error; };");
-        self.writeln("template <typename T, typename E>");
-        self.writeln("using __cardamom_result = std::variant<__cardamom_ok<T>, __cardamom_err<E>>;");
-        self.writeln("");
-        self.writeln("template <typename T>");
-        self.writeln("__cardamom_ok<std::decay_t<T>> __cardamom_make_ok(T&& value) {");
-        self.indent_level += 1;
-        self.writeln("return __cardamom_ok<std::decay_t<T>>{std::forward<T>(value)};");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("template <typename E>");
-        self.writeln("__cardamom_err<std::decay_t<E>> __cardamom_make_err(E&& error) {");
-        self.indent_level += 1;
-        self.writeln("return __cardamom_err<std::decay_t<E>>{std::forward<E>(error)};");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("template <typename T, typename E, typename F>");
-        self.writeln("T __cardamom_result_value_or(const __cardamom_result<T, E>& value, F fallback) {");
-        self.indent_level += 1;
-        self.writeln("if (const auto* ok = std::get_if<__cardamom_ok<T>>(&value)) {");
-        self.indent_level += 1;
-        self.writeln("return ok->value;");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("return fallback;");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("template <typename T, typename E>");
-        self.writeln("bool __cardamom_result_is_ok(const __cardamom_result<T, E>& value) {");
-        self.indent_level += 1;
-        self.writeln("return std::holds_alternative<__cardamom_ok<T>>(value);");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("template <typename T, typename E>");
-        self.writeln("bool __cardamom_result_is_err(const __cardamom_result<T, E>& value) {");
-        self.indent_level += 1;
-        self.writeln("return std::holds_alternative<__cardamom_err<E>>(value);");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("template <typename T, typename E, typename F>");
-        self.writeln("auto __cardamom_result_map(const __cardamom_result<T, E>& value, F mapper) -> __cardamom_result<std::decay_t<decltype(mapper(std::declval<T>()))>, E> {");
-        self.indent_level += 1;
-        self.writeln("using R = std::decay_t<decltype(mapper(std::declval<T>()))>;");
-        self.writeln("if (const auto* ok = std::get_if<__cardamom_ok<T>>(&value)) {");
-        self.indent_level += 1;
-        self.writeln("return __cardamom_ok<R>{mapper(ok->value)};");
-        self.indent_level -= 1;
-        self.writeln("}");
-        self.writeln("return __cardamom_err<E>{std::get<__cardamom_err<E>>(value).error};");
-        self.indent_level -= 1;
-        self.writeln("}");
         self.writeln("");
         module.accept(self);
         self.output.clone()
@@ -1277,8 +1191,13 @@ mod tests {
         let code = generator.generate(&module);
 
         assert!(
-            code.contains("#include <optional>"),
-            "Option values should lower through std::optional:\n{}",
+            code.contains("#include \"core/runtime.hpp\""),
+            "Option/runtime helpers should come from the shared runtime header:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("template <typename T>\nstd::optional<T> __cardamom_array_get"),
+            "array.get helper should not be emitted inline into every generated file:\n{}",
             code
         );
         assert!(
