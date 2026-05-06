@@ -36,9 +36,83 @@ impl CppCodeGenerator {
         self.writeln("#include <iostream>");
         self.writeln("#include <vector>");
         self.writeln("#include <string>");
+        self.writeln("#include <optional>");
+        self.writeln("#include <variant>");
+        self.writeln("#include <cstddef>");
+        self.writeln("#include <type_traits>");
+        self.writeln("#include <utility>");
         self.writeln("#include <sstream>");
         self.writeln("#include <cstdlib>");
         self.writeln("#include \"std.hpp\"");
+        self.writeln("");
+        self.writeln("template <typename T>");
+        self.writeln("std::optional<T> __cardamom_array_get(const std::vector<T>& values, int index) {");
+        self.indent_level += 1;
+        self.writeln("if (index < 0 || static_cast<std::size_t>(index) >= values.size()) {");
+        self.indent_level += 1;
+        self.writeln("return std::nullopt;");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("return values.at(index);");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("template <typename T, typename F>");
+        self.writeln("auto __cardamom_option_map(const std::optional<T>& value, F mapper) -> std::optional<std::decay_t<decltype(mapper(*value))>> {");
+        self.indent_level += 1;
+        self.writeln("if (!value.has_value()) {");
+        self.indent_level += 1;
+        self.writeln("return std::nullopt;");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("return std::make_optional(mapper(*value));");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("template <typename T>");
+        self.writeln("struct __cardamom_ok { T value; };");
+        self.writeln("template <typename E>");
+        self.writeln("struct __cardamom_err { E error; };");
+        self.writeln("template <typename T, typename E>");
+        self.writeln("using __cardamom_result = std::variant<__cardamom_ok<T>, __cardamom_err<E>>;");
+        self.writeln("");
+        self.writeln("template <typename T>");
+        self.writeln("__cardamom_ok<std::decay_t<T>> __cardamom_make_ok(T&& value) {");
+        self.indent_level += 1;
+        self.writeln("return __cardamom_ok<std::decay_t<T>>{std::forward<T>(value)};");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("template <typename E>");
+        self.writeln("__cardamom_err<std::decay_t<E>> __cardamom_make_err(E&& error) {");
+        self.indent_level += 1;
+        self.writeln("return __cardamom_err<std::decay_t<E>>{std::forward<E>(error)};");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("template <typename T, typename E, typename F>");
+        self.writeln("T __cardamom_result_value_or(const __cardamom_result<T, E>& value, F fallback) {");
+        self.indent_level += 1;
+        self.writeln("if (const auto* ok = std::get_if<__cardamom_ok<T>>(&value)) {");
+        self.indent_level += 1;
+        self.writeln("return ok->value;");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("return fallback;");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("template <typename T, typename E, typename F>");
+        self.writeln("auto __cardamom_result_map(const __cardamom_result<T, E>& value, F mapper) -> __cardamom_result<std::decay_t<decltype(mapper(std::declval<T>()))>, E> {");
+        self.indent_level += 1;
+        self.writeln("using R = std::decay_t<decltype(mapper(std::declval<T>()))>;");
+        self.writeln("if (const auto* ok = std::get_if<__cardamom_ok<T>>(&value)) {");
+        self.indent_level += 1;
+        self.writeln("return __cardamom_ok<R>{mapper(ok->value)};");
+        self.indent_level -= 1;
+        self.writeln("}");
+        self.writeln("return __cardamom_err<E>{std::get<__cardamom_err<E>>(value).error};");
+        self.indent_level -= 1;
+        self.writeln("}");
         self.writeln("");
         module.accept(self);
         self.output.clone()
@@ -72,7 +146,30 @@ impl CppCodeGenerator {
             TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
-            TypeKind::User(name) => name.clone(), // assume user types become class names
+            TypeKind::User(name) => {
+                if name == "Option" && ty.generics.len() == 1 {
+                    return format!("std::optional<{}>", self.translate_type(&ty.generics[0]));
+                }
+                if name == "Result" && ty.generics.len() == 2 {
+                    return format!(
+                        "__cardamom_result<{}, {}>",
+                        self.translate_type(&ty.generics[0]),
+                        self.translate_type(&ty.generics[1])
+                    );
+                }
+
+                if ty.generics.is_empty() {
+                    name.clone()
+                } else {
+                    let generics = ty
+                        .generics
+                        .iter()
+                        .map(|g| self.translate_type(g))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{}<{}>", name, generics)
+                }
+            }
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
                 for _ in 0..*depth {
@@ -181,38 +278,60 @@ impl CppCodeGenerator {
         }
     }
 
-    fn visit_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+    fn write_member_receiver(&mut self, object: Option<&Expr>, receiver: Option<&str>) {
+        if let Some(receiver) = receiver {
+            self.output.push_str(receiver);
+        } else if let Some(object) = object {
+            object.accept(self);
+        }
+    }
+
+    fn visit_member_call_with_receiver(
+        &mut self,
+        object: Option<&Expr>,
+        receiver: Option<&str>,
+        name: &Token,
+        arguments: &[Box<Expr>],
+    ) {
         match name.lexeme.as_str() {
             "push" => {
-                object.accept(self);
+                self.write_member_receiver(object, receiver);
                 self.output.push_str(".push_back(");
                 self.write_call_arguments(arguments);
                 self.output.push(')');
             }
             "pop" => {
-                object.accept(self);
+                self.write_member_receiver(object, receiver);
                 self.output.push_str(".pop_back()");
             }
             "len" => {
-                object.accept(self);
-                self.output.push_str(".size()");
+                self.output.push_str("static_cast<int>(");
+                self.write_member_receiver(object, receiver);
+                self.output.push_str(".size())");
+            }
+            "get" => {
+                self.output.push_str("__cardamom_array_get(");
+                self.write_member_receiver(object, receiver);
+                self.output.push_str(", ");
+                self.write_call_arguments(arguments);
+                self.output.push(')');
             }
             "charAt" => {
                 self.output.push_str("std::string(1, ");
-                object.accept(self);
+                self.write_member_receiver(object, receiver);
                 self.output.push_str(".at(");
                 self.write_call_arguments(arguments);
                 self.output.push_str("))");
             }
             "charCodeAt" => {
                 self.output.push_str("static_cast<int>(static_cast<unsigned char>(");
-                object.accept(self);
+                self.write_member_receiver(object, receiver);
                 self.output.push_str(".at(");
                 self.write_call_arguments(arguments);
                 self.output.push_str(")))");
             }
             _ => {
-                object.accept(self);
+                self.write_member_receiver(object, receiver);
                 self.output.push('.');
                 self.output.push_str(&name.lexeme);
                 self.output.push('(');
@@ -220,6 +339,26 @@ impl CppCodeGenerator {
                 self.output.push(')');
             }
         }
+    }
+
+    fn visit_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+        self.visit_member_call_with_receiver(Some(object), None, name, arguments);
+    }
+
+    fn visit_optional_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+        self.output.push_str("__cardamom_option_map(");
+        object.accept(self);
+        self.output.push_str(", [&](const auto& __cardamom_value) { return ");
+        self.visit_member_call_with_receiver(None, Some("__cardamom_value"), name, arguments);
+        self.output.push_str("; })");
+    }
+
+    fn visit_result_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+        self.output.push_str("__cardamom_result_map(");
+        object.accept(self);
+        self.output.push_str(", [&](const auto& __cardamom_value) { return ");
+        self.visit_member_call_with_receiver(None, Some("__cardamom_value"), name, arguments);
+        self.output.push_str("; })");
     }
 
     fn cli_main_args_name(
@@ -444,6 +583,10 @@ impl Visitor for CppCodeGenerator {
         }
     }
 
+    fn visit_type(&mut self, _stmt: &Stmt) {
+        // Core type declarations are compile-time only.
+    }
+
     fn visit_import(&mut self, stmt: &Stmt) {
         if let Stmt::Import { path, alias: _ } = stmt {
             self.output.push_str(&self.indent());
@@ -514,6 +657,23 @@ impl Visitor for CppCodeGenerator {
     // Expression visitors
     fn visit_binary(&mut self, expr: &Expr) {
         if let Expr::Binary { left, op, right } = expr {
+            if op.kind == crate::token::TokenKind::QuestionQuestion {
+                self.output.push('(');
+                left.accept(self);
+                self.output.push_str(").value_or(");
+                right.accept(self);
+                self.output.push(')');
+                return;
+            }
+            if op.kind == crate::token::TokenKind::BangBang {
+                self.output.push_str("__cardamom_result_value_or(");
+                left.accept(self);
+                self.output.push_str(", ");
+                right.accept(self);
+                self.output.push(')');
+                return;
+            }
+
             self.output.push('(');
             left.accept(self);
             self.output.push(' ');
@@ -567,6 +727,90 @@ impl Visitor for CppCodeGenerator {
                 self.visit_member_call(object, name, arguments);
                 return;
             }
+            if let Expr::OptionalMemberAccess { object, name } = &**callee {
+                self.visit_optional_member_call(object, name, arguments);
+                return;
+            }
+            if let Expr::ResultMemberAccess { object, name } = &**callee {
+                self.visit_result_member_call(object, name, arguments);
+                return;
+            }
+
+            if let Expr::Variable { name } = &**callee {
+                match name.lexeme.as_str() {
+                    "some" => {
+                        if let [arg] = arguments.as_slice() {
+                            if matches!(
+                                &**arg,
+                                Expr::Literal { value }
+                                    if value.kind == crate::token::TokenKind::String
+                            ) {
+                                self.output.push_str("std::optional<std::string>(");
+                                arg.accept(self);
+                                self.output.push(')');
+                            } else {
+                                self.output.push_str("std::make_optional(");
+                                arg.accept(self);
+                                self.output.push(')');
+                            }
+                        } else {
+                            self.output.push_str("std::make_optional(");
+                            self.write_call_arguments(arguments);
+                            self.output.push(')');
+                        }
+                        return;
+                    }
+                    "none" => {
+                        self.output.push_str("std::nullopt");
+                        return;
+                    }
+                    "ok" => {
+                        if let [arg] = arguments.as_slice() {
+                            if matches!(
+                                &**arg,
+                                Expr::Literal { value }
+                                    if value.kind == crate::token::TokenKind::String
+                            ) {
+                                self.output.push_str("__cardamom_ok<std::string>{");
+                                arg.accept(self);
+                                self.output.push('}');
+                            } else {
+                                self.output.push_str("__cardamom_make_ok(");
+                                arg.accept(self);
+                                self.output.push(')');
+                            }
+                        } else {
+                            self.output.push_str("__cardamom_make_ok(");
+                            self.write_call_arguments(arguments);
+                            self.output.push(')');
+                        }
+                        return;
+                    }
+                    "err" => {
+                        if let [arg] = arguments.as_slice() {
+                            if matches!(
+                                &**arg,
+                                Expr::Literal { value }
+                                    if value.kind == crate::token::TokenKind::String
+                            ) {
+                                self.output.push_str("__cardamom_err<std::string>{");
+                                arg.accept(self);
+                                self.output.push('}');
+                            } else {
+                                self.output.push_str("__cardamom_make_err(");
+                                arg.accept(self);
+                                self.output.push(')');
+                            }
+                        } else {
+                            self.output.push_str("__cardamom_make_err(");
+                            self.write_call_arguments(arguments);
+                            self.output.push(')');
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
 
             callee.accept(self);
             self.output.push('(');
@@ -599,6 +843,26 @@ impl Visitor for CppCodeGenerator {
                 _ => self.output.push_str("."),
             }
             self.output.push_str(&name.lexeme);
+        }
+    }
+
+    fn visit_optional_member_access(&mut self, expr: &Expr) {
+        if let Expr::OptionalMemberAccess { object, name } = expr {
+            self.output.push_str("__cardamom_option_map(");
+            object.accept(self);
+            self.output.push_str(", [&](const auto& __cardamom_value) { return __cardamom_value.");
+            self.output.push_str(&name.lexeme);
+            self.output.push_str("; })");
+        }
+    }
+
+    fn visit_result_member_access(&mut self, expr: &Expr) {
+        if let Expr::ResultMemberAccess { object, name } = expr {
+            self.output.push_str("__cardamom_result_map(");
+            object.accept(self);
+            self.output.push_str(", [&](const auto& __cardamom_value) { return __cardamom_value.");
+            self.output.push_str(&name.lexeme);
+            self.output.push_str("; })");
         }
     }
 
@@ -942,6 +1206,98 @@ mod tests {
         assert!(
             !code.contains("auto count"),
             "inferred variables should not codegen as `auto`:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn option_get_and_fallback_codegen() {
+        let module = parse_and_check("tests/pass/option_1.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("#include <optional>"),
+            "Option values should lower through std::optional:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__cardamom_array_get(args, 0)).value_or(\"input.txt\")"),
+            "array.get followed by ?? should lower to optional value_or:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__cardamom_array_get(nums, 0)).value_or(0)"),
+            "numeric array.get fallback should lower to optional value_or:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn option_constructors_codegen() {
+        let module = parse_and_check("tests/pass/option_construct_1.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("std::optional<int> fallback(bool flag)"),
+            "Option return types should lower to std::optional:\n{}",
+            code
+        );
+        assert!(
+            code.contains("return std::make_optional(42);"),
+            "some(value) should lower to std::make_optional(value):\n{}",
+            code
+        );
+        assert!(
+            code.contains("return std::nullopt;"),
+            "none() should lower to std::nullopt:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn optional_member_access_codegen() {
+        let module = parse_and_check("tests/pass/option_chain_1.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("__cardamom_option_map(__cardamom_array_get(args, 0),"),
+            "?. should lower to optional map over the Option receiver:\n{}",
+            code
+        );
+        assert!(
+            code.contains("return static_cast<int>(__cardamom_value.size());"),
+            "optional len() should map over the unwrapped value:\n{}",
+            code
+        );
+        assert!(
+            code.contains(").value_or(0)"),
+            "optional chain results should compose with ??:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn result_codegen() {
+        let module = parse_and_check("tests/pass/result_1.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("__cardamom_result<std::string, std::string> parse(bool flag)"),
+            "Result return types should lower to the runtime result alias:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__cardamom_result_value_or(good, 0)"),
+            "!! should lower to result value_or:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__cardamom_result_map(parse(true),"),
+            "!. should lower to result map over the Ok value:\n{}",
             code
         );
     }

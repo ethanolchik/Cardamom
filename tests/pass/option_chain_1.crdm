@@ -1,0 +1,5 @@
+fn main(args: [string]) -> int {
+    let length: int = args.get(0)?.len() ?? 0;
+    let first: string = args.get(0)?.charAt(0) ?? "";
+    return length;
+}

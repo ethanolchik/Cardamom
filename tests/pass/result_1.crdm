@@ -1,0 +1,16 @@
+fn parse(flag: bool) -> Result<string, string> {
+    if (flag) {
+        return ok("ready");
+    }
+
+    return err("missing");
+}
+
+fn main(args: [string]) -> int {
+    let good: Result<int, string> = ok(2);
+    let bad: Result<int, string> = err("no value");
+    let value: int = good !! 0;
+    let fallback: int = bad !! 7;
+    let length: int = parse(true)!.len() !! 0;
+    return value + fallback + length;
+}

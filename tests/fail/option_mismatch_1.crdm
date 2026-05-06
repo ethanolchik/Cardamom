@@ -1,0 +1,3 @@
+fn main() {
+    let bad: Option<int> = some("wrong");
+}

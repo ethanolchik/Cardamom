@@ -136,8 +136,13 @@ impl Lexer {
             '#' => self.add_token(TokenKind::Hash),
             '~' => self.add_token(TokenKind::Tilde),
             '!' => {
-                let is_match = self.match_token('=');
-                let token_kind = if is_match { TokenKind::Neq } else { TokenKind::Bang };
+                let token_kind = if self.match_token('=') {
+                    TokenKind::Neq
+                } else if self.match_token('!') {
+                    TokenKind::BangBang
+                } else {
+                    TokenKind::Bang
+                };
                 self.add_token(token_kind);
             },
             '?' => {
@@ -310,6 +315,7 @@ impl Lexer {
             "new" => TokenKind::New,
             "extern" => TokenKind::Extern,
             "extend" => TokenKind::Extend,
+            "type" => TokenKind::Type,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             _ => TokenKind::Identifier,

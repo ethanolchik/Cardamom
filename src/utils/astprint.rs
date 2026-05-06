@@ -105,6 +105,26 @@ impl Visitor for AstPrinter {
         self.indent -= 1;
     }
 
+    fn visit_optional_member_access(&mut self, expr: &Expr) {
+        println!("{}OptionalMemberAccess: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::OptionalMemberAccess { object, name, .. } = expr {
+            object.accept(self);
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        }
+        self.indent -= 1;
+    }
+
+    fn visit_result_member_access(&mut self, expr: &Expr) {
+        println!("{}ResultMemberAccess: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Expr::ResultMemberAccess { object, name, .. } = expr {
+            object.accept(self);
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        }
+        self.indent -= 1;
+    }
+
     fn visit_static_access(&mut self, expr: &Expr) {
         println!("{}StaticAccess: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
@@ -345,6 +365,18 @@ impl Visitor for AstPrinter {
             }
             println!("{}Type: ", String::from("\t").repeat(self.indent));
             printtype(return_type.clone(), self.indent+1);
+        }
+        self.indent -= 1;
+    }
+
+    fn visit_type(&mut self, stmt: &Stmt) {
+        println!("{}Type: ", String::from("\t").repeat(self.indent));
+        self.indent += 1;
+        if let Stmt::Type { name, generics } = stmt {
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            for g in generics.iter() {
+                println!("{}Generic: {}", String::from("\t").repeat(self.indent), g.lexeme);
+            }
         }
         self.indent -= 1;
     }

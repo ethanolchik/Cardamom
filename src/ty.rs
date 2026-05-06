@@ -186,6 +186,15 @@ impl Type {
         // Exact equality check
         //      If exactly the same type kind (and name, etc.), trivially compatible
         if self.kind == other.kind {
+            if matches!(self.kind, TypeKind::User(_)) {
+                return self.generics.len() == other.generics.len()
+                    && self
+                        .generics
+                        .iter()
+                        .zip(other.generics.iter())
+                        .all(|(left, right)| left.is_compatible_with(right));
+            }
+
             return true;
         }
         // Auto-deref for primitives (example):
@@ -268,7 +277,13 @@ impl Type {
         // User-defined: check name equality
         match (&self.kind, &other.kind) {
             (TypeKind::User(u1), TypeKind::User(u2)) => {
-                return u1 == u2;
+                return u1 == u2
+                    && self.generics.len() == other.generics.len()
+                    && self
+                        .generics
+                        .iter()
+                        .zip(other.generics.iter())
+                        .all(|(left, right)| left.is_compatible_with(right));
             }
             _ => {}
         }

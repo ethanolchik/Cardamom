@@ -64,6 +64,8 @@ impl Parser {
             return self.variable_declaration();
         } else if self.match_token(TokenKind::Const) {
             return self.variable_declaration();
+        } else if self.match_token(TokenKind::Type) {
+            return self.type_declaration();
         } else if self.match_token(TokenKind::Import) {
             return self.import_declaration();
         }
@@ -542,6 +544,24 @@ impl Parser {
         Ok(Stmt::Import { path: Box::new(path), alias })
     }
 
+    pub fn type_declaration(&mut self) -> Result<Stmt, Error> {
+        let name = self.consume(TokenKind::Identifier, "Expected type name.")?;
+        let mut generics = Vec::new();
+
+        if self.match_token(TokenKind::Lt) {
+            loop {
+                generics.push(self.consume(TokenKind::Identifier, "Expected generic name.")?);
+                if !self.match_token(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.consume(TokenKind::Gt, "Expected '>' after generics.")?;
+        }
+
+        self.consume(TokenKind::Semicolon, "Expected ';' after type declaration.")?;
+        Ok(Stmt::Type { name, generics })
+    }
+
     pub fn expression_statement(&mut self) -> Result<Stmt, Error> {
         let expr = self.expression()?;
         self.consume(TokenKind::Semicolon, "Expected ';' after expression.")?;
@@ -602,7 +622,7 @@ impl Parser {
     pub fn nullish_coalesce(&mut self) -> Result<Expr, Error> {
         let mut expr = self.bitwise_or()?;
 
-        while self.match_token(TokenKind::QuestionQuestion) {
+        while self.match_token(TokenKind::QuestionQuestion) || self.match_token(TokenKind::BangBang) {
             let op = self.previous().clone();
             let right = self.bitwise_or()?;
             expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
@@ -785,6 +805,14 @@ impl Parser {
             } else if self.match_token(TokenKind::Dot) {
                 let name = self.consume(TokenKind::Identifier, "Expected property name after '.'.")?;
                 expr = Expr::MemberAccess { object: Box::new(expr), name };
+            } else if self.match_token(TokenKind::Question) {
+                self.consume(TokenKind::Dot, "Expected '.' after '?' for optional member access.")?;
+                let name = self.consume(TokenKind::Identifier, "Expected property name after '?.'.")?;
+                expr = Expr::OptionalMemberAccess { object: Box::new(expr), name };
+            } else if self.match_token(TokenKind::Bang) {
+                self.consume(TokenKind::Dot, "Expected '.' after '!' for result member access.")?;
+                let name = self.consume(TokenKind::Identifier, "Expected property name after '!.'.")?;
+                expr = Expr::ResultMemberAccess { object: Box::new(expr), name };
             } else if self.match_token(TokenKind::LBracket) {
                 let index = self.expression()?;
                 let token = self.previous();

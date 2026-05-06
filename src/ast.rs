@@ -110,6 +110,14 @@ pub enum Expr {
         object: Box<Expr>,
         name: Token,
     },
+    OptionalMemberAccess {
+        object: Box<Expr>,
+        name: Token,
+    },
+    ResultMemberAccess {
+        object: Box<Expr>,
+        name: Token,
+    },
     StaticAccess {
         object: Box<Expr>,
         name: Token,
@@ -193,6 +201,10 @@ pub enum Stmt {
         modifiers: Vec<Modifier>,
         generics: Vec<Token>
     },
+    Type {
+        name: Token,
+        generics: Vec<Token>,
+    },
     Import {
         path: Box<Expr>,
         alias: Token,
@@ -236,6 +248,8 @@ pub trait Visitor {
     fn visit_call(&mut self, expr: &Expr);
     fn visit_generic_call(&mut self, expr: &Expr);
     fn visit_member_access(&mut self, expr: &Expr);
+    fn visit_optional_member_access(&mut self, expr: &Expr);
+    fn visit_result_member_access(&mut self, expr: &Expr);
     fn visit_static_access(&mut self, expr: &Expr);
     fn visit_index(&mut self, expr: &Expr);
     fn visit_cast(&mut self, expr: &Expr);
@@ -260,6 +274,7 @@ pub trait Visitor {
     fn visit_continue(&mut self, stmt: &Stmt);
     fn visit_function(&mut self, stmt: &Stmt);
     fn visit_variable(&mut self, stmt: &Stmt);
+    fn visit_type(&mut self, stmt: &Stmt);
     fn visit_import(&mut self, stmt: &Stmt);
     fn visit_module(&mut self, stmt: &Module);
     fn visit_class(&mut self, stmt: &Stmt);
@@ -285,6 +300,8 @@ impl Node for Expr {
             Expr::Call { .. } => visitor.visit_call(self),
             Expr::GenericCall { .. } => visitor.visit_generic_call(self),
             Expr::MemberAccess { .. } => visitor.visit_member_access(self),
+            Expr::OptionalMemberAccess { .. } => visitor.visit_optional_member_access(self),
+            Expr::ResultMemberAccess { .. } => visitor.visit_result_member_access(self),
             Expr::StaticAccess { .. } => visitor.visit_static_access(self),
             Expr::Index { .. } => visitor.visit_index(self),
             Expr::Cast { .. } => visitor.visit_cast(self),
@@ -310,6 +327,7 @@ impl Stmt {
             Stmt::Continue { .. }=> visitor.visit_continue(self),
             Stmt::Variable { .. } => visitor.visit_variable(self),
             Stmt::Function { .. } => visitor.visit_function(self),
+            Stmt::Type { .. } => visitor.visit_type(self),
             Stmt::Import { .. } => visitor.visit_import(self),
             Stmt::Class { .. } => visitor.visit_class(self),
             Stmt::Extension { .. } => visitor.visit_extension(self),

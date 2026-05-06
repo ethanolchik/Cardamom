@@ -1,0 +1,4 @@
+fn main() {
+    let nums: [int] = [1];
+    let bad = some(nums)?.push(2);
+}

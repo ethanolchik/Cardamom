@@ -1,0 +1,3 @@
+fn main() {
+    let bad: Result<int, string> = err(1);
+}

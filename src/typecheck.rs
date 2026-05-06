@@ -31,6 +31,7 @@ pub struct TypeChecker<'a> {
     function_has_valid_return: bool,
     current_assignment: Option<Expr>,
     current_initialiser: Option<Expr>,
+    current_expected_type: Option<Type>,
     in_call: bool,
 }
 
@@ -50,6 +51,7 @@ impl<'a> TypeChecker<'a> {
             function_has_valid_return: false,
             current_assignment: None,
             current_initialiser: None,
+            current_expected_type: None,
             in_call: false,
         }
     }
@@ -76,8 +78,22 @@ impl<'a> TypeChecker<'a> {
 
     // Forward declarations
     fn collect_declarations(&mut self, module: &Module) {
+        if self.symtable.lookup_type("Option").is_none() {
+            let name = Token::dummy("Option");
+            self.symtable.declare_class("Option", Symbol::new_class(name));
+        }
+        if self.symtable.lookup_type("Result").is_none() {
+            let name = Token::dummy("Result");
+            self.symtable.declare_class("Result", Symbol::new_class(name));
+        }
+
         for stmt in &module.statements {
             match &**stmt {
+                Stmt::Type { name, .. } => {
+                    let type_name = name.lexeme.clone();
+                    let sym = Symbol::new_class(name.clone());
+                    self.symtable.declare_class(&type_name, sym);
+                }
                 Stmt::Function {
                     name,
                     params,
@@ -192,6 +208,74 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    fn option_type(&self, token: &Token, inner: Type) -> Type {
+        let mut ty = Type::new(token.clone(), TypeKind::User("Option".to_string()));
+        ty.generics.push(Box::new(inner));
+        ty
+    }
+
+    fn option_inner_type<'b>(&self, ty: &'b Type) -> Option<&'b Type> {
+        match &ty.kind {
+            TypeKind::User(name) if name == "Option" && ty.generics.len() == 1 => {
+                Some(ty.generics[0].as_ref())
+            }
+            _ => None,
+        }
+    }
+
+    fn current_expected_option(&self) -> Option<Type> {
+        self.current_expected_type
+            .as_ref()
+            .filter(|ty| self.option_inner_type(ty).is_some())
+            .cloned()
+    }
+
+    fn result_type(&self, token: &Token, ok: Type, err: Type) -> Type {
+        let mut ty = Type::new(token.clone(), TypeKind::User("Result".to_string()));
+        ty.generics.push(Box::new(ok));
+        ty.generics.push(Box::new(err));
+        ty
+    }
+
+    fn result_types<'b>(&self, ty: &'b Type) -> Option<(&'b Type, &'b Type)> {
+        match &ty.kind {
+            TypeKind::User(name) if name == "Result" && ty.generics.len() == 2 => {
+                Some((ty.generics[0].as_ref(), ty.generics[1].as_ref()))
+            }
+            _ => None,
+        }
+    }
+
+    fn current_expected_result(&self) -> Option<Type> {
+        self.current_expected_type
+            .as_ref()
+            .filter(|ty| self.result_types(ty).is_some())
+            .cloned()
+    }
+
+    fn member_type(&self, obj_ty: &Type, name: &Token) -> Option<Type> {
+        match &obj_ty.kind {
+            TypeKind::String => match name.lexeme.as_str() {
+                "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                "charAt" => Some(self.function_type(name, vec![self.int_type(name)], self.string_type(name))),
+                "charCodeAt" => Some(self.function_type(name, vec![self.int_type(name)], self.int_type(name))),
+                _ => None,
+            },
+            TypeKind::Array(elem_ty, _) => match name.lexeme.as_str() {
+                "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                "push" => Some(self.function_type(name, vec![*elem_ty.clone()], self.void_type(name))),
+                "pop" => Some(self.function_type(name, vec![], self.void_type(name))),
+                "get" => Some(self.function_type(
+                    name,
+                    vec![self.int_type(name)],
+                    self.option_type(name, *elem_ty.clone()),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn error_type(&self, token: &Token) -> Type {
         Type::new(token.clone(), TypeKind::User("error".to_string()))
     }
@@ -276,6 +360,8 @@ fn get_token(expr: &Expr) -> Token {
         | Expr::PtrAssignment { op, .. }
         | Expr::MemberAssignment { name: op, .. }
         | Expr::MemberAccess { name: op, .. }
+        | Expr::OptionalMemberAccess { name: op, .. }
+        | Expr::ResultMemberAccess { name: op, .. }
         | Expr::Call { paren: op, ..} => op.clone(),
         Expr::Grouping { expression } => get_token(expression),
         Expr::Array { elements } => elements
@@ -394,6 +480,57 @@ impl<'a> Visitor for TypeChecker<'a> {
                             &format!(
                                 "Logical operator `{}` requires bool operands, got `{}` and `{}`",
                                 op.lexeme, left_ty.kind, right_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
+                TokenKind::QuestionQuestion => {
+                    if let Some(inner_ty) = self.option_inner_type(&left_ty).cloned() {
+                        if inner_ty.is_compatible_with(&right_ty) {
+                            inner_ty
+                        } else {
+                            self.error_token(
+                                &op,
+                                &format!(
+                                    "Fallback for `{}` must be compatible with `{}`, got `{}`",
+                                    left_ty.kind, inner_ty.kind, right_ty.kind
+                                ),
+                            );
+                            self.error_type(&op)
+                        }
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Null coalescing operator `??` requires an Option on the left, got `{}`",
+                                left_ty.kind
+                            ),
+                        );
+                        self.error_type(&op)
+                    }
+                }
+                TokenKind::BangBang => {
+                    if let Some((ok_ty, _err_ty)) = self.result_types(&left_ty) {
+                        let ok_ty = ok_ty.clone();
+                        if ok_ty.is_compatible_with(&right_ty) {
+                            ok_ty
+                        } else {
+                            self.error_token(
+                                &op,
+                                &format!(
+                                    "Fallback for `{}` must be compatible with `{}`, got `{}`",
+                                    left_ty.kind, ok_ty.kind, right_ty.kind
+                                ),
+                            );
+                            self.error_type(&op)
+                        }
+                    } else {
+                        self.error_token(
+                            &op,
+                            &format!(
+                                "Result coalescing operator `!!` requires a Result on the left, got `{}`",
+                                left_ty.kind
                             ),
                         );
                         self.error_type(&op)
@@ -596,8 +733,18 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_assignment(&mut self, expr: &Expr) {
         if let Expr::Assignment { name, value, .. } = expr {
+            let expected_ty = match self.symtable.lookup_symbol(&name.lexeme) {
+                Some(Symbol::Variable(_, _, var_ty, ..)) => Some(var_ty.clone()),
+                _ => None,
+            };
+
             self.current_assignment = Some(expr.clone());
+            let previous_expected = match expected_ty {
+                Some(ty) => self.current_expected_type.replace(ty),
+                None => None,
+            };
             value.accept(self);
+            self.current_expected_type = previous_expected;
             self.current_assignment = None;
 
             let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
@@ -785,6 +932,132 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_call(&mut self, expr: &Expr) {
         if let Expr::Call { callee, arguments, paren } = expr {
+            if let Expr::Variable { name } = &**callee {
+                match name.lexeme.as_str() {
+                    "some" => {
+                        if arguments.len() != 1 {
+                            self.error_token(
+                                paren,
+                                &format!("Function `some` expects 1 arg, got {}", arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        let arg = &arguments[0];
+                        arg.accept(self);
+                        let arg_ty = self
+                            .get_expr_type(arg)
+                            .cloned()
+                            .unwrap_or_else(|| self.error_type(paren));
+                        self.set_expr_type(expr, self.option_type(name, arg_ty));
+                        return;
+                    }
+                    "none" => {
+                        if !arguments.is_empty() {
+                            self.error_token(
+                                paren,
+                                &format!("Function `none` expects 0 args, got {}", arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        if let Some(expected) = self.current_expected_option() {
+                            self.set_expr_type(expr, expected);
+                        } else {
+                            self.error_token(
+                                name,
+                                "`none()` needs an expected Option<T> type, such as a variable annotation or return type",
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                        }
+                        return;
+                    }
+                    "ok" => {
+                        if arguments.len() != 1 {
+                            self.error_token(
+                                paren,
+                                &format!("Function `ok` expects 1 arg, got {}", arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        let Some(expected) = self.current_expected_result() else {
+                            self.error_token(
+                                name,
+                                "`ok(...)` needs an expected Result<T, E> type, such as a variable annotation or return type",
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        };
+                        let (expected_ok, _expected_err) = self.result_types(&expected).unwrap();
+
+                        let arg = &arguments[0];
+                        arg.accept(self);
+                        let arg_ty = self
+                            .get_expr_type(arg)
+                            .cloned()
+                            .unwrap_or_else(|| self.error_type(paren));
+                        if !arg_ty.is_compatible_with(expected_ok) {
+                            self.error_token(
+                                name,
+                                &format!(
+                                    "`ok(...)` value must be compatible with `{}`, got `{}`",
+                                    expected_ok.kind, arg_ty.kind
+                                ),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                        } else {
+                            self.set_expr_type(expr, expected);
+                        }
+                        return;
+                    }
+                    "err" => {
+                        if arguments.len() != 1 {
+                            self.error_token(
+                                paren,
+                                &format!("Function `err` expects 1 arg, got {}", arguments.len()),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        }
+
+                        let Some(expected) = self.current_expected_result() else {
+                            self.error_token(
+                                name,
+                                "`err(...)` needs an expected Result<T, E> type, such as a variable annotation or return type",
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                            return;
+                        };
+                        let (_expected_ok, expected_err) = self.result_types(&expected).unwrap();
+
+                        let arg = &arguments[0];
+                        arg.accept(self);
+                        let arg_ty = self
+                            .get_expr_type(arg)
+                            .cloned()
+                            .unwrap_or_else(|| self.error_type(paren));
+                        if !arg_ty.is_compatible_with(expected_err) {
+                            self.error_token(
+                                name,
+                                &format!(
+                                    "`err(...)` value must be compatible with `{}`, got `{}`",
+                                    expected_err.kind, arg_ty.kind
+                                ),
+                            );
+                            self.set_expr_type(expr, self.error_type(paren));
+                        } else {
+                            self.set_expr_type(expr, expected);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
@@ -954,27 +1227,99 @@ impl<'a> Visitor for TypeChecker<'a> {
                 .cloned()
                 .unwrap_or_else(|| self.error_type(name));
 
-            let member_ty = match &obj_ty.kind {
-                TypeKind::String => match name.lexeme.as_str() {
-                    "len" => Some(self.function_type(name, vec![], self.int_type(name))),
-                    "charAt" => Some(self.function_type(name, vec![self.int_type(name)], self.string_type(name))),
-                    "charCodeAt" => Some(self.function_type(name, vec![self.int_type(name)], self.int_type(name))),
-                    _ => None,
-                },
-                TypeKind::Array(elem_ty, _) => match name.lexeme.as_str() {
-                    "len" => Some(self.function_type(name, vec![], self.int_type(name))),
-                    "push" => Some(self.function_type(name, vec![*elem_ty.clone()], self.void_type(name))),
-                    "pop" => Some(self.function_type(name, vec![], self.void_type(name))),
-                    _ => None,
-                },
-                _ => None,
-            };
-
-            if let Some(member_ty) = member_ty {
+            if let Some(member_ty) = self.member_type(&obj_ty, name) {
                 self.set_expr_type(expr, member_ty);
             } else {
                 self.error_token(name, &format!("No member `{}` in type `{}`", name.lexeme, obj_ty.kind));
                 self.set_expr_type(expr, self.error_type(name));
+            }
+        }
+    }
+
+    fn visit_optional_member_access(&mut self, expr: &Expr) {
+        if let Expr::OptionalMemberAccess { object, name } = expr {
+            object.accept(self);
+            let obj_ty = self
+                .get_expr_type(object)
+                .cloned()
+                .unwrap_or_else(|| self.error_type(name));
+
+            let Some(inner_ty) = self.option_inner_type(&obj_ty).cloned() else {
+                self.error_token(
+                    name,
+                    &format!("Optional member access `?.` requires an Option, got `{}`", obj_ty.kind),
+                );
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            };
+
+            let Some(member_ty) = self.member_type(&inner_ty, name) else {
+                self.error_token(
+                    name,
+                    &format!("No member `{}` in type `{}`", name.lexeme, inner_ty.kind),
+                );
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            };
+
+            if let TypeKind::Function(params, ret_ty) = member_ty.kind {
+                if ret_ty.kind == TypeKind::Void {
+                    self.error_token(
+                        name,
+                        &format!("Optional member access cannot wrap void-returning member `{}`", name.lexeme),
+                    );
+                    self.set_expr_type(expr, self.error_type(name));
+                } else {
+                    let lifted_ret = self.option_type(name, *ret_ty);
+                    self.set_expr_type(expr, self.function_type(name, params, lifted_ret));
+                }
+            } else {
+                self.set_expr_type(expr, self.option_type(name, member_ty));
+            }
+        }
+    }
+
+    fn visit_result_member_access(&mut self, expr: &Expr) {
+        if let Expr::ResultMemberAccess { object, name } = expr {
+            object.accept(self);
+            let obj_ty = self
+                .get_expr_type(object)
+                .cloned()
+                .unwrap_or_else(|| self.error_type(name));
+
+            let Some((ok_ty, err_ty)) = self.result_types(&obj_ty) else {
+                self.error_token(
+                    name,
+                    &format!("Result member access `!.` requires a Result, got `{}`", obj_ty.kind),
+                );
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            };
+            let ok_ty = ok_ty.clone();
+            let err_ty = err_ty.clone();
+
+            let Some(member_ty) = self.member_type(&ok_ty, name) else {
+                self.error_token(
+                    name,
+                    &format!("No member `{}` in type `{}`", name.lexeme, ok_ty.kind),
+                );
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            };
+
+            if let TypeKind::Function(params, ret_ty) = member_ty.kind {
+                if ret_ty.kind == TypeKind::Void {
+                    self.error_token(
+                        name,
+                        &format!("Result member access cannot wrap void-returning member `{}`", name.lexeme),
+                    );
+                    self.set_expr_type(expr, self.error_type(name));
+                } else {
+                    let lifted_ret = self.result_type(name, *ret_ty, err_ty);
+                    self.set_expr_type(expr, self.function_type(name, params, lifted_ret));
+                }
+            } else {
+                self.set_expr_type(expr, self.result_type(name, member_ty, err_ty));
             }
         }
     }
@@ -1225,7 +1570,13 @@ impl<'a> Visitor for TypeChecker<'a> {
     fn visit_return(&mut self, stmt: &Stmt) {
         if let Stmt::Return { value, .. } = stmt {
             let ret_ty = if let Some(val) = value {
+                let previous_expected = self.current_expected_type.replace(
+                    self.current_function_return_type
+                        .clone()
+                        .unwrap_or_else(|| Type::new(Token::dummy("void"), TypeKind::Void)),
+                );
                 val.accept(self);
+                self.current_expected_type = previous_expected;
                 self.get_expr_type(val).cloned().unwrap_or_else(|| {
                     Type::new(
                         get_token(val),
@@ -1433,7 +1784,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                 }
 
                 self.current_assignment = Some(Expr::Assignment { name: name.clone(), value: init.clone(), op: Token::dummy("=") });
+                let previous_expected = self.current_expected_type.replace(type_.clone());
                 init.accept(self);
+                self.current_expected_type = previous_expected;
                 self.current_initialiser = None;
                 self.symtable.end_scope();
                 let init_ty = self.get_expr_type(init).cloned().unwrap_or_else(|| {
@@ -1492,6 +1845,10 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_import(&mut self, _stmt: &Stmt) {
         // Not doing anything special with imports here
+    }
+
+    fn visit_type(&mut self, _stmt: &Stmt) {
+        // Type declarations are handled during the declaration pass.
     }
 
     fn visit_module(&mut self, module: &Module) {
@@ -1560,6 +1917,10 @@ mod tests {
             "tests/pass/bool_1.crdm",
             "tests/pass/inference_1.crdm",
             "tests/pass/main_args.crdm",
+            "tests/pass/option_1.crdm",
+            "tests/pass/option_construct_1.crdm",
+            "tests/pass/option_chain_1.crdm",
+            "tests/pass/result_1.crdm",
         ] {
             assert_eq!(typecheck_fixture(fixture), 0, "`{}` should pass", fixture);
         }
@@ -1571,6 +1932,13 @@ mod tests {
             "tests/fail/function_1.crdm",
             "tests/fail/function_2.crdm",
             "tests/fail/bool_condition_1.crdm",
+            "tests/fail/option_mismatch_1.crdm",
+            "tests/fail/none_infer_1.crdm",
+            "tests/fail/option_chain_non_option_1.crdm",
+            "tests/fail/option_chain_void_1.crdm",
+            "tests/fail/result_infer_1.crdm",
+            "tests/fail/result_mismatch_1.crdm",
+            "tests/fail/result_chain_non_result_1.crdm",
         ] {
             assert!(
                 typecheck_fixture(fixture) > 0,

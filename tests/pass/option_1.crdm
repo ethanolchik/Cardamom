@@ -1,0 +1,6 @@
+fn main(args: [string]) -> int {
+    let path: string = args.get(0) ?? "input.txt";
+    let nums: [int] = [1, 2, 3];
+    let first: int = nums.get(0) ?? 0;
+    return first;
+}
