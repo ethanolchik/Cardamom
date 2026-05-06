@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
@@ -20,6 +21,7 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
+    pub errors: RefCell<Vec<Error>>,
 
     /// The name of the file we're currently checking, so we can attach it to errors.
     pub filename: String,
@@ -45,6 +47,7 @@ impl<'a> TypeChecker<'a> {
         Self {
             symtable,
             expr_types: HashMap::new(),
+            errors: RefCell::new(Vec::new()),
 
             filename,
             source,
@@ -69,6 +72,20 @@ impl<'a> TypeChecker<'a> {
         self.register_extensions(module);
 
         module.accept(self);
+    }
+
+    pub fn has_errors(&self) -> bool {
+        !self.errors.borrow().is_empty()
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.errors.borrow().len()
+    }
+
+    pub fn emit_errors(&self) {
+        for err in self.errors.borrow().iter() {
+            eprintln!("{}", err.to_string());
+        }
     }
 
     // Forward declarations
@@ -326,7 +343,7 @@ impl<'a> TypeChecker<'a> {
         );
         err.add_source(self.source.clone()); // attach entire source for caret display
 
-        println!("{}", err.to_string());
+        self.errors.borrow_mut().push(err);
     }
 
     fn error_with_notes(&self, token: Token, message: &str, notes: Vec<Note>, helps: Vec<Help>) {
@@ -346,7 +363,7 @@ impl<'a> TypeChecker<'a> {
             err.add_help(help);
         }
 
-        println!("{}", err.to_string());
+        self.errors.borrow_mut().push(err);
     }
 
     /// Store `ty` in the map for `expr`.
@@ -361,11 +378,24 @@ impl<'a> TypeChecker<'a> {
 
     fn type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
+            TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
             TypeKind::User(name) => {
-                // Check if the base type exists in the symbol table
-                self.symtable.lookup_type(name).is_some()
+                // Keep cascaded diagnostics readable once an earlier expression has failed.
+                let is_generic_param = matches!(
+                    self.symtable.lookup_symbol(name),
+                    Some(Symbol::Variable(_, _, ty, ..))
+                        if matches!(ty.kind, TypeKind::GenericParam(_))
+                );
+
+                (name == "error" || self.symtable.lookup_type(name).is_some() || is_generic_param)
+                    && ty.generics.iter().all(|arg| self.type_exists(arg))
             }
-            TypeKind::Reference(inner) | TypeKind::Pointer(inner) => {
+            TypeKind::GenericParam(name) => self.symtable.lookup_symbol(name).is_some(),
+            TypeKind::GenericInstance(name, args) => {
+                self.symtable.lookup_type(name).is_some()
+                    && args.iter().all(|arg| self.type_exists(arg))
+            }
+            TypeKind::Reference(inner) | TypeKind::Pointer(inner) | TypeKind::MutRef(inner) => {
                 // Check if the inner type exists
                 self.type_exists(inner)
             }
@@ -382,8 +412,50 @@ impl<'a> TypeChecker<'a> {
                 // Check if all parameter types exist
                 params.iter().all(|p| self.type_exists(p))
             }
-            // Add checks for other derived types as needed
-            _ => true, // For primitive types, we assume they exist
+            TypeKind::Tuple(types) => types.iter().all(|ty| self.type_exists(ty)),
+        }
+    }
+
+    fn error_type(&self, token: &Token) -> Type {
+        Type::new(token.clone(), TypeKind::User("error".to_string()))
+    }
+
+    fn int_type(&self, token: &Token) -> Type {
+        Type::new(token.clone(), TypeKind::Int)
+    }
+
+    fn string_type(&self, token: &Token) -> Type {
+        Type::new(token.clone(), TypeKind::String)
+    }
+
+    fn void_type(&self, token: &Token) -> Type {
+        Type::new(token.clone(), TypeKind::Void)
+    }
+
+    fn function_type(&self, token: &Token, params: Vec<Type>, return_type: Type) -> Type {
+        Type::new(
+            token.clone(),
+            TypeKind::Function(params, Box::new(return_type)),
+        )
+    }
+
+    fn statements_guarantee_return(&self, statements: &[Box<Stmt>]) -> bool {
+        statements.iter().any(|stmt| self.statement_guarantees_return(stmt))
+    }
+
+    fn statement_guarantees_return(&self, stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return { .. } => true,
+            Stmt::Block { statements } => self.statements_guarantee_return(statements),
+            Stmt::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                self.statement_guarantees_return(then_branch)
+                    && self.statement_guarantees_return(else_branch)
+            }
+            _ => false,
         }
     }
 
@@ -430,8 +502,14 @@ fn get_token(expr: &Expr) -> Token {
         | Expr::MemberAccess { name: op, .. }
         | Expr::Call { paren: op, ..} => op.clone(),
         Expr::Grouping { expression } => get_token(expression),
-        Expr::Array { elements } => get_token(&elements[0]),
-        Expr::Tuple { elements } => get_token(&elements[0]),
+        Expr::Array { elements } => elements
+            .first()
+            .map(|expr| get_token(expr))
+            .unwrap_or_else(|| Token::dummy("[]")),
+        Expr::Tuple { elements } => elements
+            .first()
+            .map(|expr| get_token(expr))
+            .unwrap_or_else(|| Token::dummy("()")),
         _ => Token::dummy("unknown"),
     }
 }
@@ -593,8 +671,6 @@ impl<'a> Visitor for TypeChecker<'a> {
                 TokenKind::String => {
                     Type::new(value.clone(), TypeKind::String)
                 }
-                // Possibly booleans if your lexer sets them differently,
-                // but let's handle them as `Identifier("true"/"false")` or a special token kind.
                 _ => {
                     // fallback
                     Type::new(value.clone(), TypeKind::User("bool".to_string()))
@@ -914,6 +990,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 Expr::Variable { name: class_name } => &class_name.lexeme,
                 _ => {
                     self.error_token(name, "Static access must be on a class name");
+                    self.set_expr_type(expr, self.error_type(name));
                     self.in_static_context = old_static_context;
                     return;
                 }
@@ -942,33 +1019,53 @@ impl<'a> Visitor for TypeChecker<'a> {
                         );
                     }
                     self.set_expr_type(expr, field_ty.clone());
-                } else if let Some(Symbol::Function { is_static, .. }) = methods.get(&name.lexeme) {
+                } else if let Some(Symbol::Function {
+                    params,
+                    return_type,
+                    is_static,
+                    ..
+                }) = methods.get(&name.lexeme) {
                     if !is_static {
                         self.error_with_notes(
                             name.clone(),
-                            &format!("Static method `{}` must be accessed using a static access `{}::{}`", 
-                                name.lexeme, class_name, name.lexeme),
+                            &format!(
+                                "Cannot access non-static method `{}` in static context",
+                                name.lexeme
+                            ),
                             vec![Note::new(
-                                format!("Method `{}` is defined here as static", name.lexeme),
+                                format!("Method `{}` is defined here as non-static", name.lexeme),
                                 name.line,
                                 name.span.clone(),
                                 self.filename.clone()
                             )],
                             vec![Help::new(
-                                format!("Try accessing the method using a static access `{}::{}`", class_name, name.lexeme),
+                                "Try accessing the method using an instance of the class".to_string(),
                                 name.line,
                                 name.span.clone(),
                                 self.filename.clone()
                             )]
                         );
                     }
-                    // ... rest of method handling ...
+                    self.set_expr_type(
+                        expr,
+                        Type::new(
+                            name.clone(),
+                            TypeKind::Function(params.clone(), Box::new(return_type.clone())),
+                        ),
+                    );
                 } else {
                     self.error_token(
                         name,
                         &format!("No static member `{}` found in class `{}`", name.lexeme, class_name),
                     );
+                    self.set_expr_type(expr, self.error_type(name));
                 }
+            } else {
+                self.error_token(
+                    name,
+                    &format!("Unknown class `{}` in static access", class_name),
+                );
+                self.set_expr_type(expr, self.error_type(name));
             }
 
             self.in_static_context = old_static_context;
@@ -976,7 +1073,8 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
-        if let Expr::StaticAssignment { name, value, .. } = expr {
+        if let Expr::StaticAssignment { object, name, value, .. } = expr {
+            object.accept(self);
             self.current_assignment = Some(expr.clone());
             value.accept(self);
             self.current_assignment = None;
@@ -985,11 +1083,26 @@ impl<'a> Visitor for TypeChecker<'a> {
                 Type::new(name.clone(), TypeKind::User("error".to_string()))
             });
 
+            let class_name = match &**object {
+                Expr::Variable { name: class_name } => class_name.lexeme.clone(),
+                _ => {
+                    self.error_token(name, "Static assignment must be on a class name");
+                    self.set_expr_type(expr, self.error_type(name));
+                    return;
+                }
+            };
+
             // Look up the static field in the class
             if let Some(Symbol::Class { fields, .. }) = 
-                self.symtable.lookup_class(&name.lexeme)
+                self.symtable.lookup_class(&class_name)
             {
-                if let Some((field_ty, _, _)) = fields.get(&name.lexeme) {
+                if let Some((field_ty, _, is_static)) = fields.get(&name.lexeme) {
+                    if !is_static {
+                        self.error_token(
+                            name,
+                            &format!("Cannot assign non-static field `{}` using static access", name.lexeme),
+                        );
+                    }
                     if !rhs_ty.is_compatible_with(field_ty) {
                         self.error_token(
                             name,
@@ -1005,12 +1118,12 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                 self.error_token(
                     name,
-                    &format!("No static field `{}` found", name.lexeme),
+                    &format!("No static field `{}` found in class `{}`", name.lexeme, class_name),
                 );
             } else {
                 self.error_token(
                     name,
-                    &format!("Cannot find class for static assignment `{}`", name.lexeme),
+                    &format!("Cannot find class `{}` for static assignment", class_name),
                 );
             }
 
@@ -1272,6 +1385,12 @@ impl<'a> Visitor for TypeChecker<'a> {
                 TypeKind::Int
                 | TypeKind::Float
                 | TypeKind::String => {
+                    self.error_token(
+                        &paren,
+                        &format!("Cannot call non-function type `{}`", callee_ty.kind),
+                    );
+                    let token = get_token(callee);
+                    self.set_expr_type(expr, self.error_type(&token));
                 }
                 _ => {
                     self.error_token(
@@ -1279,13 +1398,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         &format!("Cannot call non-function type `{}`", callee_ty.kind),
                     );
                     let token = get_token(callee);
-                    self.set_expr_type(
-                        expr,
-                        Type::new(
-                            token.clone(),
-                            TypeKind::User("error".to_string()),
-                        ),
-                    );
+                    self.set_expr_type(expr, self.error_type(&token));
                 }
             }
         }
@@ -1433,7 +1546,58 @@ impl<'a> Visitor for TypeChecker<'a> {
                 Type::new(name.clone(), TypeKind::User("error".to_string()))
             });
 
-            if let TypeKind::User(ref class_name) = obj_ty.kind {
+            match &obj_ty.kind {
+                TypeKind::String => {
+                    let member_ty = match name.lexeme.as_str() {
+                        "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                        "charAt" => Some(self.function_type(
+                            name,
+                            vec![self.int_type(name)],
+                            self.string_type(name),
+                        )),
+                        "charCodeAt" => Some(self.function_type(
+                            name,
+                            vec![self.int_type(name)],
+                            self.int_type(name),
+                        )),
+                        _ => None,
+                    };
+
+                    if let Some(member_ty) = member_ty {
+                        self.set_expr_type(expr, member_ty);
+                    } else {
+                        self.error_token(
+                            name,
+                            &format!("No member `{}` in type `string`", name.lexeme),
+                        );
+                        self.set_expr_type(expr, self.error_type(name));
+                    }
+                    return;
+                }
+                TypeKind::Array(elem_ty, _) => {
+                    let member_ty = match name.lexeme.as_str() {
+                        "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                        "push" => Some(self.function_type(
+                            name,
+                            vec![*elem_ty.clone()],
+                            self.void_type(name),
+                        )),
+                        "pop" => Some(self.function_type(name, vec![], self.void_type(name))),
+                        _ => None,
+                    };
+
+                    if let Some(member_ty) = member_ty {
+                        self.set_expr_type(expr, member_ty);
+                    } else {
+                        self.error_token(
+                            name,
+                            &format!("No member `{}` in array type `{}`", name.lexeme, obj_ty.kind),
+                        );
+                        self.set_expr_type(expr, self.error_type(name));
+                    }
+                    return;
+                }
+                TypeKind::User(class_name) => {
                 if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
                     // Check if we're in a static context
                     if !self.in_static_context {
@@ -1553,6 +1717,14 @@ impl<'a> Visitor for TypeChecker<'a> {
                             ),
                         );
                     }
+                }
+                }
+                _ => {
+                    self.error_token(
+                        name,
+                        &format!("Cannot access member `{}` on type `{}`", name.lexeme, obj_ty.kind),
+                    );
+                    self.set_expr_type(expr, self.error_type(name));
                 }
             }
         }
@@ -1799,7 +1971,9 @@ impl<'a> Visitor for TypeChecker<'a> {
             // declared return type as the "current function return type" 
             // (so `return` statements inside the closure are checked).
             let old_ret = self.current_function_return_type.take();
+            let old_has_valid_return = self.function_has_valid_return;
             self.current_function_return_type = Some(return_type.clone());
+            self.function_has_valid_return = false;
     
             // Check if we are currently in an assignment.
             // If we are, then we can lookup the variable we are assigning to
@@ -1866,12 +2040,36 @@ impl<'a> Visitor for TypeChecker<'a> {
 
             // Visit the closure body statement (which can contain returns)
             body.accept(self);
+            let closure_has_return = self.statement_guarantees_return(body);
+
+            if return_type.kind != TypeKind::Void && !closure_has_return {
+                self.error_with_notes(
+                    name.clone(),
+                    &format!(
+                        "Closure (return type `{}`) does not return a value on all paths",
+                        return_type.kind
+                    ),
+                    vec![Note::new(
+                        "Closure return type is declared here".to_string(),
+                        return_type.name.line,
+                        return_type.name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        "Add a return statement to the closure body".to_string(),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+            }
     
             // End the closure scope
             self.symtable.end_scope();
     
             // Restore the old function return type
             self.current_function_return_type = old_ret;
+            self.function_has_valid_return = old_has_valid_return;
     
             // Finally, set the closure's type. We treat the closure 
             // as a function with `param_types -> return_type`.
@@ -1907,6 +2105,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
 
             if elem_tys.is_empty() {
+                self.error_token(&name, "Cannot infer the type of an empty array literal");
                 self.set_expr_type(
                     expr,
                     Type::new(name, TypeKind::User("error".to_string())),
@@ -1925,7 +2124,7 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                 let arr_ty = Type::new(
                     first_ty.name.clone(),
-                    TypeKind::Array(Box::new(first_ty.clone()), first_ty.get_array_depth() + 1),
+                    TypeKind::Array(Box::new(first_ty.clone()), 1),
                 );
 
                 self.set_expr_type(expr, arr_ty);
@@ -1945,6 +2144,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                         Type::new(name.clone(), TypeKind::User("error".to_string()))
                     })
                 );
+            }
+            if tuple_elems.is_empty() {
+                self.error_token(&name, "Cannot infer the type of an empty tuple literal");
+                self.set_expr_type(expr, self.error_type(&name));
+                return;
             }
             let tuple_ty = Type::new(
                 tuple_elems[0].name.clone(),
@@ -2081,6 +2285,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.symtable.begin_scope();
     
             let old_ret = self.current_function_return_type.take();
+            let old_has_valid_return = self.function_has_valid_return;
             self.current_function_return_type = Some(return_type.clone());
     
             // We'll track if we ever see a matching return
@@ -2114,6 +2319,8 @@ impl<'a> Visitor for TypeChecker<'a> {
     
             // restore old function return
             self.current_function_return_type = old_ret;
+            let has_guaranteed_return = self.statements_guarantee_return(body);
+            self.function_has_valid_return = old_has_valid_return;
 
             if modifiers.contains(&Modifier::Extern) {
                 // If the function is extern, we don't need a return statement.
@@ -2145,7 +2352,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
     
             // If we haven't seen a valid return statement, produce an error
-            if !self.function_has_valid_return {
+            if !has_guaranteed_return {
                 self.error_with_notes(
                     name.clone(),
                     &format!(
@@ -2184,7 +2391,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), type_.clone()));
 
                 // check if the type exists
-                if !type_.is_primitive() && !self.symtable.user_defined_type_exists(type_) {
+                if !self.type_exists(type_) {
                     self.error_with_notes(
                         type_.name.clone(),
                         &format!("Unknown type `{}`", type_.name.lexeme),
@@ -2233,7 +2440,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
 
             // check if the type exists
-            if !type_.is_primitive() && !self.symtable.user_defined_type_exists(type_) {
+            if !self.type_exists(type_) {
                 self.error_with_notes(
                     type_.name.clone(),
                     &format!("Unknown type `{}`", type_.name.lexeme),
@@ -2334,6 +2541,82 @@ impl ToString for Visibility {
             Visibility::Private => "Private".to_string(),
             Visibility::Protected => "Protected".to_string(),
             Visibility::Static => "Static".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn typecheck_fixture(relative_path: &str) -> usize {
+        let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
+        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+
+        let mut lexer = Lexer::new(source.clone(), filename.clone());
+        lexer.scan_tokens();
+        assert!(
+            !lexer.had_error,
+            "fixture `{}` should lex cleanly",
+            relative_path
+        );
+
+        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
+        let module = match parser.parse() {
+            Ok(module) => module,
+            Err(err) => panic!("fixture `{}` should parse: {}", relative_path, err.to_string()),
+        };
+        assert!(
+            !parser.had_error,
+            "fixture `{}` should parse cleanly",
+            relative_path
+        );
+
+        let mut symtable = SymbolTable::new();
+        let mut checker = TypeChecker::new(&mut symtable, filename, source);
+        checker.check_module(&module);
+        checker.error_count()
+    }
+
+    #[test]
+    fn pass_fixtures_typecheck_cleanly() {
+        for fixture in [
+            "tests/pass/empty.crdm",
+            "tests/pass/function_1.crdm",
+            "tests/pass/function_2.crdm",
+            "tests/pass/function_3.crdm",
+            "tests/pass/function_4.crdm",
+            "tests/pass/comparison_1.crdm",
+            "tests/pass/variable_1.crdm",
+            "tests/pass/variable_2.crdm",
+            "tests/pass/array_1.crdm",
+            "tests/pass/array_2.crdm",
+            "tests/pass/array_3.crdm",
+            "tests/pass/closure_1.crdm",
+            "tests/pass/closure_2.crdm",
+        ] {
+            assert_eq!(typecheck_fixture(fixture), 0, "`{}` should pass", fixture);
+        }
+    }
+
+    #[test]
+    fn fail_fixtures_report_type_errors() {
+        for fixture in [
+            "tests/fail/function_1.crdm",
+            "tests/fail/function_2.crdm",
+            "tests/fail/closure_1.crdm",
+            "tests/fail/closure_2.crdm",
+            "tests/fail/closure_3.crdm",
+            "tests/fail/closure_4.crdm",
+            "tests/fail/closure_5.crdm",
+        ] {
+            assert!(
+                typecheck_fixture(fixture) > 0,
+                "`{}` should report at least one type error",
+                fixture
+            );
         }
     }
 }

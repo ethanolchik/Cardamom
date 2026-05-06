@@ -1,7 +1,7 @@
 use crate::ast::{Module, Node, Stmt, Expr, Visitor};
-use crate::token::{Token, TokenKind};
+use crate::token::Token;
 use crate::ty::{Type, TypeKind};
-use crate::ast::{Modifier, Derived};
+use crate::ast::Modifier;
 use std::fmt::Write;
 
 /// The CppCodeGenerator traverses the AST and produces C++ source code.
@@ -58,7 +58,7 @@ impl CppCodeGenerator {
         match &ty.kind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
-            TypeKind::String => "String".to_string(),
+            TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
             TypeKind::User(name) => name.clone(), // assume user types become class names
             TypeKind::Array(inner, depth) => {
@@ -74,7 +74,7 @@ impl CppCodeGenerator {
 
     /// Check if a function is a built-in function and generate its C++ code.
     /// Returns true if the function is a built-in and was generated.
-    fn builtin_function(&mut self, name: &Token, params: &Vec<Box<Stmt>>, return_type: &Type) -> bool {
+    fn builtin_function(&mut self, name: &Token, _params: &[Box<Stmt>], _return_type: &Type) -> bool {
         if name.lexeme == "print" {
             self.writeln("void print(std::string s) {");
             self.indent_level += 1;
@@ -125,6 +125,14 @@ impl CppCodeGenerator {
             self.writeln("}");
             return true;
         }
+        if name.lexeme == "fromASCII" {
+            self.writeln("std::string fromASCII(int ascii) {");
+            self.indent_level += 1;
+            self.writeln("return std::string(1, static_cast<char>(ascii));");
+            self.indent_level -= 1;
+            self.writeln("}");
+            return true;
+        }
         if name.lexeme == "len" {
             self.writeln("int len(std::string s) {");
             self.indent_level += 1;
@@ -136,12 +144,70 @@ impl CppCodeGenerator {
         if name.lexeme == "charAt" {
             self.writeln("std::string charAt(std::string s, int i) {");
             self.indent_level += 1;
-            self.writeln("return s[i];");
+            self.writeln("return std::string(1, s.at(i));");
+            self.indent_level -= 1;
+            self.writeln("}");
+            return true;
+        }
+        if name.lexeme == "charCodeAt" {
+            self.writeln("int charCodeAt(std::string s, int i) {");
+            self.indent_level += 1;
+            self.writeln("return static_cast<unsigned char>(s.at(i));");
             self.indent_level -= 1;
             self.writeln("}");
             return true;
         }
         false
+    }
+
+    fn write_call_arguments(&mut self, arguments: &[Box<Expr>]) {
+        for (i, arg) in arguments.iter().enumerate() {
+            arg.accept(self);
+            if i < arguments.len() - 1 {
+                self.output.push_str(", ");
+            }
+        }
+    }
+
+    fn visit_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+        match name.lexeme.as_str() {
+            "push" => {
+                object.accept(self);
+                self.output.push_str(".push_back(");
+                self.write_call_arguments(arguments);
+                self.output.push(')');
+            }
+            "pop" => {
+                object.accept(self);
+                self.output.push_str(".pop_back()");
+            }
+            "len" => {
+                object.accept(self);
+                self.output.push_str(".size()");
+            }
+            "charAt" => {
+                self.output.push_str("std::string(1, ");
+                object.accept(self);
+                self.output.push_str(".at(");
+                self.write_call_arguments(arguments);
+                self.output.push_str("))");
+            }
+            "charCodeAt" => {
+                self.output.push_str("static_cast<int>(static_cast<unsigned char>(");
+                object.accept(self);
+                self.output.push_str(".at(");
+                self.write_call_arguments(arguments);
+                self.output.push_str(")))");
+            }
+            _ => {
+                object.accept(self);
+                self.output.push('.');
+                self.output.push_str(&name.lexeme);
+                self.output.push('(');
+                self.write_call_arguments(arguments);
+                self.output.push(')');
+            }
+        }
     }
 }
 
@@ -433,14 +499,14 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_call(&mut self, expr: &Expr) {
         if let Expr::Call { callee, paren: _, arguments } = expr {
+            if let Expr::MemberAccess { object, name } = &**callee {
+                self.visit_member_call(object, name, arguments);
+                return;
+            }
+
             callee.accept(self);
             self.output.push('(');
-            for (i, arg) in arguments.iter().enumerate() {
-                arg.accept(self);
-                if i < arguments.len() - 1 {
-                    self.output.push_str(", ");
-                }
-            }
+            self.write_call_arguments(arguments);
             self.output.push(')');
         }
     }
@@ -588,7 +654,12 @@ impl Visitor for CppCodeGenerator {
     fn visit_member_assignment(&mut self, expr: &Expr) {
         if let Expr::MemberAssignment { object, name, value, op } = expr {
             object.accept(self);
-            self.output.push_str("->");
+            match *object.clone() {
+                Expr::Reference { object: _ } | Expr::MutReference { object: _ } => {
+                    self.output.push_str("->")
+                }
+                _ => self.output.push('.'),
+            }
             self.output.push_str(&name.lexeme);
             self.output.push(' ');
             self.output.push_str(&op.lexeme);
@@ -668,5 +739,90 @@ impl Visitor for CppCodeGenerator {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::typecheck::TypeChecker;
+    use crate::utils::symtable::SymbolTable;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn parse_and_check(relative_path: &str) -> Module {
+        let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
+        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+
+        let mut lexer = Lexer::new(source.clone(), filename.clone());
+        lexer.scan_tokens();
+        assert!(!lexer.had_error, "`{}` should lex cleanly", relative_path);
+
+        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
+        let module = match parser.parse() {
+            Ok(module) => module,
+            Err(err) => panic!("`{}` should parse: {}", relative_path, err.to_string()),
+        };
+        assert!(!parser.had_error, "`{}` should parse cleanly", relative_path);
+
+        let mut symtable = SymbolTable::new();
+        let checker_source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+        let mut checker = TypeChecker::new(&mut symtable, filename, checker_source);
+        checker.check_module(&module);
+        assert_eq!(checker.error_count(), 0, "`{}` should typecheck", relative_path);
+
+        module
+    }
+
+    #[test]
+    fn bf_codegen_compiles_and_runs_input_echo() {
+        let module = parse_and_check("bf.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        let pid = std::process::id();
+        let cpp_path = format!("/tmp/cardamom_bf_{}.cpp", pid);
+        let bin_path = format!("/tmp/cardamom_bf_{}", pid);
+        std::fs::write(&cpp_path, code).expect("generated C++ should be writable");
+
+        let compile = Command::new("g++")
+            .arg(&cpp_path)
+            .arg("-I")
+            .arg(env!("CARGO_MANIFEST_DIR"))
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("g++ should run");
+        assert!(
+            compile.status.success(),
+            "generated bf C++ should compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let mut child = Command::new(&bin_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("generated bf binary should run");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin should be open")
+            .write_all(b",.\nA\n")
+            .expect("stdin write should succeed");
+        let output = child.wait_with_output().expect("run should finish");
+        assert!(output.status.success(), "generated bf binary should exit cleanly");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.ends_with("A\n"),
+            "generated bf binary should echo one input byte, got `{}`",
+            stdout
+        );
+
+        let _ = std::fs::remove_file(cpp_path);
+        let _ = std::fs::remove_file(bin_path);
     }
 }

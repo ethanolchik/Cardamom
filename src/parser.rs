@@ -71,7 +71,7 @@ impl Parser {
             return Err(self.error(String::from("Unexpected modifier.")));
         } else if self.match_token(TokenKind::Import) {
             return self.import_declaration();
-        } else if (self.match_token(TokenKind::Extend)) {
+        } else if self.match_token(TokenKind::Extend) {
             return self.extend_declaration();
         }
 
@@ -1175,7 +1175,8 @@ impl Parser {
         let mut generics: Vec<Type> = Vec::new();
         loop {
             let mut is_generic = false;
-            if self.match_token(TokenKind::Lt) {
+            if self.check(TokenKind::Lt) && self.starts_generic_call() {
+                self.match_token(TokenKind::Lt);
                 is_generic = true;
                 generics = Vec::new();
                 loop {
@@ -1414,6 +1415,53 @@ impl Parser {
 
     pub fn is_at_end(&self) -> bool {
         self.peek().kind == TokenKind::EndOfFile
+    }
+
+    fn starts_generic_call(&self) -> bool {
+        let mut depth = 0usize;
+        let mut paren_depth = 0usize;
+        let mut bracket_depth = 0usize;
+
+        for (index, token) in self.tokens.iter().enumerate().skip(self.current) {
+            match token.kind {
+                TokenKind::Lt if paren_depth == 0 && bracket_depth == 0 => depth += 1,
+                TokenKind::Gt if paren_depth == 0 && bracket_depth == 0 => {
+                    if depth == 0 {
+                        return false;
+                    }
+
+                    depth -= 1;
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(index + 1)
+                            .map_or(false, |next| next.kind == TokenKind::LParen);
+                    }
+                }
+                TokenKind::LParen if depth > 0 => paren_depth += 1,
+                TokenKind::RParen if depth > 0 => {
+                    if paren_depth == 0 {
+                        return false;
+                    }
+                    paren_depth -= 1;
+                }
+                TokenKind::LBracket if depth > 0 => bracket_depth += 1,
+                TokenKind::RBracket if depth > 0 => {
+                    if bracket_depth == 0 {
+                        return false;
+                    }
+                    bracket_depth -= 1;
+                }
+                TokenKind::Semicolon | TokenKind::EndOfFile
+                    if depth > 0 && paren_depth == 0 && bracket_depth == 0 =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
+        false
     }
 
     pub fn synchronize(&mut self) {

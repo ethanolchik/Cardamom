@@ -27,18 +27,22 @@ const PRINT_HELP: fn() -> () = || {
     println!("\t-out\tDisplay the output of the generated C code");
 };
 
-fn run_file(filename: String) {
+fn run_file(filename: String) -> bool {
     let source = match read_to_string(filename.clone()) {
         Ok(source) => source,
         Err(e) => {
             eprintln!("Error reading file: {}", e);
-            return;
+            return false;
         }
     };
 
     let mut l = lexer::Lexer::new(source.clone(), filename.clone());
 
     l.scan_tokens();
+    if l.had_error {
+        eprintln!("Program exited with {} error(s).", l.error_tokens.len());
+        return false;
+    }
 
     if is_flag_set_str!("debug") {
         for token in l.tokens.iter() {
@@ -49,6 +53,10 @@ fn run_file(filename: String) {
     let mut p = parser::Parser::new(l.tokens.clone(), source.clone(), filename.clone());
 
     let module = p.parse();
+    if p.had_error {
+        eprintln!("Program exited with {} error(s).", p.errors);
+        return false;
+    }
 
     if is_flag_set_str!("debug") {
         if let Ok(module) = &module {
@@ -58,13 +66,18 @@ fn run_file(filename: String) {
         }
     }
 
-    let symtable = &mut SymbolTable::new();
-    let mut tc = typecheck::TypeChecker::new(symtable, filename.clone(), source.clone());
-    let mut cg = CppCodeGenerator::new();
-
     if let Ok(module) = &module {
+        let symtable = &mut SymbolTable::new();
+        let mut tc = typecheck::TypeChecker::new(symtable, filename.clone(), source.clone());
         tc.check_module(module);
+
+        if tc.has_errors() {
+            tc.emit_errors();
+            eprintln!("Program exited with {} error(s).", tc.error_count());
+            return false;
+        }
     
+        let mut cg = CppCodeGenerator::new();
         let code = cg.generate(module);
 
         let mut output = File::create("output.cpp").unwrap();
@@ -79,7 +92,7 @@ fn run_file(filename: String) {
             .expect("Failed to compile the generated C++ code.");
 
         if !is_flag_set_str!("show output") {
-            std::fs::remove_file("output.cpp").unwrap();
+            let _ = std::fs::remove_file("output.cpp");
         }
 
         if output.status.success() {
@@ -87,12 +100,11 @@ fn run_file(filename: String) {
         } else {
             eprintln!("Failed to compile the generated C++ code.");
             eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            return false;
         }
     }
 
-    if l.had_error || p.had_error {
-        println!("Program exited with {} error(s).", l.error_tokens.len() + p.errors);
-    }
+    true
 }
 
 fn main() {
@@ -116,6 +128,8 @@ fn main() {
     }
 
     if let Some(filename) = filename {
-        run_file(filename);
+        if !run_file(filename) {
+            std::process::exit(1);
+        }
     }
 }
