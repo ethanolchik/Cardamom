@@ -46,38 +46,6 @@ impl Display for TypeKind {
     }
 }
 
-/// A unique “signature” that identifies a single instantiation, e.g. "Vec<int>".
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
-pub struct MonomorphSignature {
-    pub name: String,       // "Vec"
-    pub arg_types: Vec<Type>, // [int]
-}
-
-/// Tracks each known instantiation of a generic type.
-/// For classes, you'd store Symbol::Class; for functions, Symbol::Function, etc.
-#[derive(Clone, Debug)]
-pub struct MonomorphTable {
-    pub instances: HashMap<MonomorphSignature, Type>,
-}
-
-impl MonomorphTable {
-    pub fn new() -> Self {
-        MonomorphTable {
-            instances: HashMap::new(),
-        }
-    }
-
-    /// Insert or retrieve a generic instantiation.
-    pub fn get_or_insert(&mut self, sig: MonomorphSignature, specialized_type: Type) -> Type {
-        if let Some(existing) = self.instances.get(&sig) {
-            existing.clone()
-        } else {
-            self.instances.insert(sig.clone(), specialized_type.clone());
-            specialized_type
-        }
-    }
-}
-
 impl TypeKind {
     pub fn inner_type(&self) -> Option<&Type> {
         match self {

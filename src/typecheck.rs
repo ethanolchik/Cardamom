@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::token::{Token, TokenKind};
-use crate::ty::{Type, TypeKind, MonomorphSignature, MonomorphTable};
-use crate::utils::symtable::{SymbolTable, Symbol, Visibility};
+use crate::ty::{Type, TypeKind};
+use crate::utils::symtable::{SymbolTable, Symbol};
 use crate::errors::{Error, Note, Help};
 
 /// A map from expressions to their inferred types.
@@ -16,8 +16,6 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 /// - Maintains a list of `Error` objects.
 /// - Stores an `ExprTypeMap` so we know each expression's resulting `Type`.
 /// - Tracks the current filename and source code for better error messages.
-/// - Also tracks the current class or function context (for `this`, access checks, etc.).
-/// - Contains a `MonomorphTable` for storing specialized generic types.
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
@@ -28,17 +26,11 @@ pub struct TypeChecker<'a> {
     /// The entire source code of the file, used for showing the line with an error.
     pub source: String,
 
-    // Class & function context
-    current_class: Option<String>,
-    class_stack: Vec<String>,
     current_function_return_type: Option<Type>,
     function_has_valid_return: bool,
     current_assignment: Option<Expr>,
     current_initialiser: Option<Expr>,
-    in_static_context: bool,
     in_call: bool,
-
-    pub monomorph_table: MonomorphTable,
 }
 
 impl<'a> TypeChecker<'a> {
@@ -52,25 +44,17 @@ impl<'a> TypeChecker<'a> {
             filename,
             source,
 
-            current_class: None,
-            class_stack: Vec::new(),
             current_function_return_type: None,
             function_has_valid_return: false,
             current_assignment: None,
             current_initialiser: None,
-            in_static_context: false,
             in_call: false,
-
-            monomorph_table: MonomorphTable::new(),
         }
     }
 
     /// Main entry point for type-checking a module.
     pub fn check_module(&mut self, module: &Module) {
         self.collect_declarations(module);
-        self.define_class_members(module);
-        self.register_extensions(module);
-
         module.accept(self);
     }
 
@@ -92,11 +76,6 @@ impl<'a> TypeChecker<'a> {
     fn collect_declarations(&mut self, module: &Module) {
         for stmt in &module.statements {
             match &**stmt {
-                Stmt::Class { name, .. } => {
-                    let class_name = name.lexeme.clone();
-                    let sym = Symbol::new_class(name.clone());
-                    self.symtable.declare_class(&class_name, sym);
-                }
                 Stmt::Function {
                     name,
                     params,
@@ -121,216 +100,6 @@ impl<'a> TypeChecker<'a> {
                 _ => {}
             }
         }
-    }
-
-    // Class fields & methods
-    fn define_class_members(&mut self, module: &Module) {
-        for stmt in &module.statements {
-            if let Stmt::Class {
-                name,
-                public_fields,
-                private_fields,
-                protected_fields,
-                static_fields,
-                public_methods,
-                private_methods,
-                protected_methods,
-                static_methods,
-                ..
-            } = &**stmt
-            {
-                let class_name = name.lexeme.clone();
-
-                // Collect all field declarations first
-                let mut field_declarations = Vec::new();
-                
-                // Process all fields and collect their declarations
-                for f in public_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Public,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in private_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Private,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in protected_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Protected,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in static_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Static,
-                            true
-                        ));
-                    }
-                }
-
-                // Now process all method declarations
-                let mut method_declarations = Vec::new();
-                
-                for m in public_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Public,
-                            false
-                        ));
-                    }
-                }
-
-                for m in private_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Private,
-                            false
-                        ));
-                    }
-                }
-
-                for m in protected_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Protected,
-                            false
-                        ));
-                    }
-                }
-
-                for m in static_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Static,
-                            true
-                        ));
-                    }
-                }
-
-                // Now update the class symbol with all collected declarations
-                let mut symbol_declarations = Vec::new();
-                if let Some(class_sym) = self.symtable.lookup_class_mut(&class_name) {
-                    if let Symbol::Class { fields, methods, fully_defined, .. } = class_sym {
-                        // Add all fields
-                        for (field_name, field_type, visibility, is_static) in field_declarations {
-                            fields.insert(
-                                field_name.lexeme.clone(),
-                                (field_type.clone(), visibility.clone(), is_static)
-                            );
-                            
-                            symbol_declarations.push((
-                                field_name.lexeme.clone(),
-                                Symbol::new_variable_with_visibility(
-                                    field_name,
-                                    field_type,
-                                    Some(visibility),
-                                    is_static
-                                )
-                            ));
-                        }
-
-                        // Add all methods
-                        for (method_name, param_types, return_type, visibility, is_static) in method_declarations {
-                            methods.insert(
-                                method_name.lexeme.clone(),
-                                Symbol::new_function_with_visibility(
-                                    method_name,
-                                    param_types,
-                                    return_type,
-                                    true,
-                                    Some(visibility),
-                                    is_static
-                                )
-                            );
-                        }
-
-                        *fully_defined = true;
-                    }
-                }
-
-                // Now declare the symbols after the class symbol borrow is dropped
-                for (name, symbol) in symbol_declarations {
-                    self.symtable.declare_symbol(&name, symbol);
-                }
-            }
-        }
-    }
-
-    /// Given a generic type like `Vec<T>` plus a substitution map T->int,
-    /// produce a specialized type `Vec<int>`, and record it in the monomorph table.
-    fn instantiate_generic_type(&mut self, original: &Type, subs: &HashMap<String, TypeKind>) -> Type {
-        // 1) Apply the substitution e.g. `Vec<T>` => `Vec<int>`.
-        let specialized = original.apply_substitution(subs);
-
-        // 2) If specialized is a GenericInstance("Vec", [int]), store it in monomorph_table
-        if let TypeKind::GenericInstance(ref base, ref args) = specialized.kind {
-            let sig = MonomorphSignature {
-                name: base.clone(),
-                arg_types: args.clone(),
-            };
-            return self.monomorph_table.get_or_insert(sig, specialized);
-        }
-
-        // If it's not actually a generic instance (like T -> int but original was T),
-        // just return the substituted type.
-        specialized
     }
 
     /// Creates an `Error` object based on a `Token` (for line/col info) and appends it to `self.errors`.
@@ -432,6 +201,11 @@ impl<'a> TypeChecker<'a> {
         Type::new(token.clone(), TypeKind::Void)
     }
 
+    fn unsupported_expr(&mut self, expr: &Expr, token: &Token, message: &str) {
+        self.error_token(token, message);
+        self.set_expr_type(expr, self.error_type(token));
+    }
+
     fn function_type(&self, token: &Token, params: Vec<Type>, return_type: Type) -> Type {
         Type::new(
             token.clone(),
@@ -459,34 +233,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn register_extensions(&mut self, module: &Module) {
-        for stmt in &module.statements {
-            if let Stmt::Extension { target, methods } = &**stmt {
-                let target_name = target.name.lexeme.clone();
-                for method in methods {
-                    if let Stmt::Function { name, params, return_type, .. } = &**method {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        // Create a symbol for the extension method.
-                        let sym = Symbol::new_function_with_visibility(
-                            name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            true, // mark as method (or extension)
-                            Some(Visibility::Public),
-                            false
-                        );
-                        // Register the method for the target type.
-                        self.symtable.register_extension_method(&target_name, sym);
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn get_token(expr: &Expr) -> Token {
@@ -886,256 +632,18 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_member_assignment(&mut self, expr: &Expr) {
-        if let Expr::MemberAssignment {
-            object, name, value, ..
-        } = expr
-        {
-            object.accept(self);
-
-            self.current_assignment = Some(expr.clone());
-            value.accept(self);
-            self.current_assignment = None;
-
-            let obj_ty = self
-                .get_expr_type(object)
-                .cloned()
-                .unwrap_or_else(|| Type::new(name.clone(), TypeKind::User("error".to_string())));
-            let rhs_ty = self
-                .get_expr_type(value)
-                .cloned()
-                .unwrap_or_else(|| Type::new(name.clone(), TypeKind::User("error".to_string())));
-
-            if let TypeKind::User(ref class_name) = obj_ty.kind {
-                if let Some(Symbol::Class { fields, .. }) = self.symtable.lookup_class(class_name)
-                {
-                    if let Some(field_ty) = fields.get(&name.lexeme) {
-                        if !rhs_ty.is_compatible_with(&field_ty.0) {
-                            self.error_with_notes(
-                                name.clone(),
-                                &format!(
-                                    "Type mismatch in member assignment. Expected `{}`, got `{}`",
-                                    field_ty.0.kind, rhs_ty.kind
-                                ),
-                                vec![Note::new(
-                                    format!("Field `{}` is declared here with type `{}`", 
-                                        name.lexeme, field_ty.0.kind),
-                                    field_ty.0.name.line,
-                                    field_ty.0.name.span.clone(),
-                                    self.filename.clone()
-                                )],
-                                vec![Help::new(
-                                    format!("Try using a value of type `{}`", field_ty.0.kind),
-                                    name.line,
-                                    name.span.clone(),
-                                    self.filename.clone()
-                                )]
-                            );
-                        }
-                        self.set_expr_type(expr, field_ty.0.clone());
-                    } else {
-                        self.error_token(
-                            name,
-                            &format!(
-                                "No field `{}` in class `{}`",
-                                name.lexeme, class_name
-                            ),
-                        );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                name.clone(),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
-                    }
-                } else {
-                    self.error_token(
-                        name,
-                        &format!("`{}` is not a defined class type", class_name),
-                    );
-                    self.set_expr_type(
-                        expr,
-                        Type::new(
-                            name.clone(),
-                            TypeKind::User("error".to_string()),
-                        ),
-                    );
-                }
-            } else {
-                self.error_token(
-                    name,
-                    &format!("Cannot do member assignment on non-class type `{}`", obj_ty.kind),
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
-            }
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Member assignment is not part of Cardamom V1.");
     }
 
     fn visit_static_access(&mut self, expr: &Expr) {
-        if let Expr::StaticAccess { object, name } = expr {
-            let old_static_context = self.in_static_context;
-            self.in_static_context = true;
-
-            // First visit the object expression to type check it
-            object.accept(self);
-
-            // Get the class name from the object expression
-            let class_name = match &**object {
-                Expr::Variable { name: class_name } => &class_name.lexeme,
-                _ => {
-                    self.error_token(name, "Static access must be on a class name");
-                    self.set_expr_type(expr, self.error_type(name));
-                    self.in_static_context = old_static_context;
-                    return;
-                }
-            };
-
-            // Look up the class and verify static member access
-            if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
-                // Check static fields first
-                if let Some((field_ty, _, is_static)) = fields.get(&name.lexeme) {
-                    if !is_static {
-                        self.error_with_notes(
-                            name.clone(),
-                            &format!("Cannot access non-static field `{}` in static context", name.lexeme),
-                            vec![Note::new(
-                                format!("Field `{}` is defined here as non-static", name.lexeme),
-                                name.line,
-                                name.span.clone(),
-                                self.filename.clone()
-                            )],
-                            vec![Help::new(
-                                "Try accessing the field using an instance of the class".to_string(),
-                                name.line,
-                                name.span.clone(),
-                                self.filename.clone()
-                            )]
-                        );
-                    }
-                    self.set_expr_type(expr, field_ty.clone());
-                } else if let Some(Symbol::Function {
-                    params,
-                    return_type,
-                    is_static,
-                    ..
-                }) = methods.get(&name.lexeme) {
-                    if !is_static {
-                        self.error_with_notes(
-                            name.clone(),
-                            &format!(
-                                "Cannot access non-static method `{}` in static context",
-                                name.lexeme
-                            ),
-                            vec![Note::new(
-                                format!("Method `{}` is defined here as non-static", name.lexeme),
-                                name.line,
-                                name.span.clone(),
-                                self.filename.clone()
-                            )],
-                            vec![Help::new(
-                                "Try accessing the method using an instance of the class".to_string(),
-                                name.line,
-                                name.span.clone(),
-                                self.filename.clone()
-                            )]
-                        );
-                    }
-                    self.set_expr_type(
-                        expr,
-                        Type::new(
-                            name.clone(),
-                            TypeKind::Function(params.clone(), Box::new(return_type.clone())),
-                        ),
-                    );
-                } else {
-                    self.error_token(
-                        name,
-                        &format!("No static member `{}` found in class `{}`", name.lexeme, class_name),
-                    );
-                    self.set_expr_type(expr, self.error_type(name));
-                }
-            } else {
-                self.error_token(
-                    name,
-                    &format!("Unknown class `{}` in static access", class_name),
-                );
-                self.set_expr_type(expr, self.error_type(name));
-            }
-
-            self.in_static_context = old_static_context;
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Static access is not part of Cardamom V1.");
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
-        if let Expr::StaticAssignment { object, name, value, .. } = expr {
-            object.accept(self);
-            self.current_assignment = Some(expr.clone());
-            value.accept(self);
-            self.current_assignment = None;
-
-            let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
-            });
-
-            let class_name = match &**object {
-                Expr::Variable { name: class_name } => class_name.lexeme.clone(),
-                _ => {
-                    self.error_token(name, "Static assignment must be on a class name");
-                    self.set_expr_type(expr, self.error_type(name));
-                    return;
-                }
-            };
-
-            // Look up the static field in the class
-            if let Some(Symbol::Class { fields, .. }) = 
-                self.symtable.lookup_class(&class_name)
-            {
-                if let Some((field_ty, _, is_static)) = fields.get(&name.lexeme) {
-                    if !is_static {
-                        self.error_token(
-                            name,
-                            &format!("Cannot assign non-static field `{}` using static access", name.lexeme),
-                        );
-                    }
-                    if !rhs_ty.is_compatible_with(field_ty) {
-                        self.error_token(
-                            name,
-                            &format!(
-                                "Cannot assign value of type `{}` to static field `{}` of type `{}`",
-                                rhs_ty.kind, name.lexeme, field_ty.kind
-                            ),
-                        );
-                    }
-                    self.set_expr_type(expr, field_ty.clone());
-                    return;
-                }
-
-                self.error_token(
-                    name,
-                    &format!("No static field `{}` found in class `{}`", name.lexeme, class_name),
-                );
-            } else {
-                self.error_token(
-                    name,
-                    &format!("Cannot find class `{}` for static assignment", class_name),
-                );
-            }
-
-            // Set error type if we couldn't resolve the static field
-            self.set_expr_type(
-                expr,
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                ),
-            );
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Static assignment is not part of Cardamom V1.");
     }
 
     fn visit_index_assignment(&mut self, expr: &Expr) {
@@ -1207,43 +715,8 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_ptr_assignment(&mut self, expr: &Expr) {
-        if let Expr::PtrAssignment { object, value, op } = expr {
-            object.accept(self);
-            value.accept(self);
-
-            let token = get_token(object);
-
-            let obj_ty = self
-                .get_expr_type(object)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-            let rhs_ty = self
-                .get_expr_type(value)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-
-            if let TypeKind::Pointer(inner_ty) = obj_ty.kind {
-                if !rhs_ty.is_compatible_with(&inner_ty) {
-                    self.error_token(
-                        &op,
-                        &format!(
-                            "Pointer assignment mismatch. Expected `{}`, got `{}`",
-                            inner_ty.kind, rhs_ty.kind
-                        ),
-                    );
-                }
-                self.set_expr_type(expr, *inner_ty.clone());
-            } else {
-                self.error_token(
-                    &op,
-                    "Cannot pointer-assign to non-pointer type",
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(token.clone(), TypeKind::User("error".to_string())),
-                );
-            }
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Pointer assignment is not part of Cardamom V1.");
     }
 
     fn visit_call(&mut self, expr: &Expr) {
@@ -1405,327 +878,39 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_generic_call(&mut self, expr: &Expr) {
-        if let Expr::GenericCall { callee, arguments, generics, .. } = expr {
-            self.in_call = true;
-            callee.accept(self);
-            self.in_call = false;
-
-            let arg_tys: Vec<Type> = arguments
-                .iter()
-                .map(|a| {
-                    a.accept(self);
-                    self.get_expr_type(a).cloned().unwrap_or_else(|| {
-                        Type::new(
-                            get_token(a),
-                            TypeKind::User("error".to_string()),
-                        )
-                    })
-                })
-                .collect();
-
-            let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
-                Type::new(
-                    get_token(callee),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            match callee_ty.kind {
-                TypeKind::Function(param_tys, ret_ty) => {
-                    if param_tys.len() != arg_tys.len() {
-                        self.error_token(
-                            &get_token(callee),
-                            &format!(
-                                "Function expects {} args, found {}",
-                                param_tys.len(),
-                                arg_tys.len()
-                            ),
-                        );
-                    } else {
-                        // Create a substitution map for monomorphization
-                        let mut subs: HashMap<String, TypeKind> = HashMap::new();
-
-                        // Fill substitution map with provided generic types
-                        for (i, param) in param_tys.iter().enumerate() {
-                            if let TypeKind::GenericParam(param_name) = &param.kind {
-                                if let Some(generic_type) = generics.get(i) {
-                                    subs.insert(param_name.clone(), generic_type.kind.clone());
-                                }
-                            }
-                        }
-
-                        // Now check arguments against substituted parameter types
-                        for (expected, actual) in param_tys.iter().zip(arg_tys.iter()) {
-                            let substituted_type = expected.apply_substitution(&subs);
-
-                            if !actual.is_compatible_with(&substituted_type) {
-                                self.error_token(
-                                    &get_token(callee),
-                                    &format!(
-                                        "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
-                                        get_token(callee).lexeme, substituted_type.kind, actual.kind
-                                    ),
-                                );
-                            }
-                        }
-
-                        let instantiated_ret_ty = ret_ty.apply_substitution(&subs);
-                        self.set_expr_type(expr, instantiated_ret_ty);
-                    }
-                }
-                TypeKind::User(ref name) => {
-                    if let Some(sym) = self.symtable.lookup_function(name) {
-                        if let Symbol::Function { params, return_type, .. } = sym {
-                            if params.len() != arg_tys.len() {
-                                self.error_token(
-                                    &get_token(callee),
-                                    &format!(
-                                        "Function `{}` expects {} args, got {}",
-                                        name, params.len(), arg_tys.len()
-                                    ),
-                                );
-                            } else {
-                                for (i, (_, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
-                                    if !actual.is_compatible_with(&generics[i]) {
-                                        self.error_token(&generics[i].name, &format!(
-                                            "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
-                                            name, generics[i].kind, actual.kind
-                                        ));
-                                    }
-                                }
-                                self.set_expr_type(expr, return_type.clone());
-                            }
-                        } else {
-                            self.error_token(
-                                &get_token(callee),
-                                &format!("`{}` is not a function symbol", name),
-                            );
-                            self.set_expr_type(
-                                expr,
-                                Type::new(
-                                    get_token(callee),
-                                    TypeKind::User("error".to_string()),
-                                ),
-                            );
-                        }
-                    } else {
-                        self.error_token(
-                            &get_token(callee),
-                            &format!("Cannot call object of type `{}`", callee_ty.kind),
-                        );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                get_token(callee),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
-                    }
-                }
-                _ => {
-                    self.error_token(
-                        &get_token(callee),
-                        &format!("Cannot call non-function type `{}`", callee_ty.kind),
-                    );
-                    self.set_expr_type(
-                        expr,
-                        Type::new(
-                            get_token(callee),
-                            TypeKind::User("error".to_string()),
-                        ),
-                    );
-                }
-            }
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Generic function calls are not part of Cardamom V1.");
     }
 
     fn visit_member_access(&mut self, expr: &Expr) {
         if let Expr::MemberAccess { object, name } = expr {
             object.accept(self);
-            let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
-            });
+            let obj_ty = self
+                .get_expr_type(object)
+                .cloned()
+                .unwrap_or_else(|| self.error_type(name));
 
-            match &obj_ty.kind {
-                TypeKind::String => {
-                    let member_ty = match name.lexeme.as_str() {
-                        "len" => Some(self.function_type(name, vec![], self.int_type(name))),
-                        "charAt" => Some(self.function_type(
-                            name,
-                            vec![self.int_type(name)],
-                            self.string_type(name),
-                        )),
-                        "charCodeAt" => Some(self.function_type(
-                            name,
-                            vec![self.int_type(name)],
-                            self.int_type(name),
-                        )),
-                        _ => None,
-                    };
+            let member_ty = match &obj_ty.kind {
+                TypeKind::String => match name.lexeme.as_str() {
+                    "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                    "charAt" => Some(self.function_type(name, vec![self.int_type(name)], self.string_type(name))),
+                    "charCodeAt" => Some(self.function_type(name, vec![self.int_type(name)], self.int_type(name))),
+                    _ => None,
+                },
+                TypeKind::Array(elem_ty, _) => match name.lexeme.as_str() {
+                    "len" => Some(self.function_type(name, vec![], self.int_type(name))),
+                    "push" => Some(self.function_type(name, vec![*elem_ty.clone()], self.void_type(name))),
+                    "pop" => Some(self.function_type(name, vec![], self.void_type(name))),
+                    _ => None,
+                },
+                _ => None,
+            };
 
-                    if let Some(member_ty) = member_ty {
-                        self.set_expr_type(expr, member_ty);
-                    } else {
-                        self.error_token(
-                            name,
-                            &format!("No member `{}` in type `string`", name.lexeme),
-                        );
-                        self.set_expr_type(expr, self.error_type(name));
-                    }
-                    return;
-                }
-                TypeKind::Array(elem_ty, _) => {
-                    let member_ty = match name.lexeme.as_str() {
-                        "len" => Some(self.function_type(name, vec![], self.int_type(name))),
-                        "push" => Some(self.function_type(
-                            name,
-                            vec![*elem_ty.clone()],
-                            self.void_type(name),
-                        )),
-                        "pop" => Some(self.function_type(name, vec![], self.void_type(name))),
-                        _ => None,
-                    };
-
-                    if let Some(member_ty) = member_ty {
-                        self.set_expr_type(expr, member_ty);
-                    } else {
-                        self.error_token(
-                            name,
-                            &format!("No member `{}` in array type `{}`", name.lexeme, obj_ty.kind),
-                        );
-                        self.set_expr_type(expr, self.error_type(name));
-                    }
-                    return;
-                }
-                TypeKind::User(class_name) => {
-                if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
-                    // Check if we're in a static context
-                    if !self.in_static_context {
-                        // Only allow static access through StaticAccess expression
-                        if let Some((_, _, is_static)) = fields.get(&name.lexeme) {
-                            if *is_static {
-                                self.error_with_notes(
-                                    name.clone(),
-                                    &format!("Static field `{}` must be accessed using static access syntax", name.lexeme),
-                                    vec![Note::new(
-                                        format!("Field `{}` is defined here as static", name.lexeme),
-                                        name.line,
-                                        name.span.clone(),
-                                        self.filename.clone()
-                                    )],
-                                    vec![Help::new(
-                                        format!("Try using static access syntax: `Class::{}`", name.lexeme),
-                                        name.line,
-                                        name.span.clone(),
-                                        self.filename.clone()
-                                    )]
-                                );
-                            }
-                        }
-                        if let Some(Symbol::Function { is_static: true, .. }) = methods.get(&name.lexeme) {
-                            self.error_with_notes(
-                                name.clone(),
-                                &format!("Static method `{}` must be accessed using static access syntax", name.lexeme),
-                                vec![Note::new(
-                                    format!("Method `{}` is defined here as static", name.lexeme),
-                                    name.line,
-                                    name.span.clone(),
-                                    self.filename.clone()
-                                )],
-                                vec![Help::new(
-                                    format!("Try using static access syntax: `Class::{}`", name.lexeme),
-                                    name.line,
-                                    name.span.clone(),
-                                    self.filename.clone()
-                                )]
-                            );
-                        }
-                    }
-                    // Check fields
-                    if let Some((field_ty, visibility, ..)) = fields.get(&name.lexeme) {
-                        // Check visibility
-                        let is_visible = match visibility {
-                            Visibility::Public => true,
-                            Visibility::Static => true,
-                            Visibility::Private => Some(class_name.as_str()) == self.current_class.as_deref(),
-                            Visibility::Protected => {
-                                self.current_class.as_deref().map_or(false, |current| {
-                                    current == class_name // TODO: Add inheritance check
-                                })
-                            }
-                        };
-
-                        if !is_visible {
-                            self.error_token(
-                                name,
-                                &format!("Cannot access {} field `{}` of class `{}`", 
-                                    visibility.to_string().to_lowercase(),
-                                    name.lexeme, 
-                                    class_name
-                                ),
-                            );
-                        }
-
-                        self.set_expr_type(expr, field_ty.clone());
-                    } else if let Some(method) = methods.get(&name.lexeme) {
-                        if let Symbol::Function {
-                            params,
-                            return_type,
-                            visibility,
-                            ..
-                        } = method {
-                            // Check method visibility
-                            let is_visible = match visibility {
-                                Some(Visibility::Public) => true,
-                                Some(Visibility::Static) => true,
-                                Some(Visibility::Private) => Some(class_name.as_str()) == self.current_class.as_deref(),
-                                Some(Visibility::Protected) => {
-                                    self.current_class.as_deref().map_or(false, |current| {
-                                        current == class_name // TODO: Add inheritance check
-                                    })
-                                },
-                                None => true,
-                            };
-
-                            if !is_visible {
-                                self.error_token(
-                                    name,
-                                    &format!("Cannot access {} method `{}` of class `{}`",
-                                        visibility.as_ref().map_or("".to_string(), |v| v.to_string().to_lowercase()),
-                                        name.lexeme,
-                                        class_name
-                                    ),
-                                );
-                            }
-
-                            let fn_ty = Type::new(
-                                name.clone(),
-                                TypeKind::Function(params.clone(), Box::new(return_type.clone())),
-                            );
-                            self.set_expr_type(expr, fn_ty);
-                        }
-                    } else {
-                        self.error_token(
-                            name,
-                            &format!("No member `{}` in class `{}`", name.lexeme, class_name),
-                        );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                name.clone(),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
-                    }
-                }
-                }
-                _ => {
-                    self.error_token(
-                        name,
-                        &format!("Cannot access member `{}` on type `{}`", name.lexeme, obj_ty.kind),
-                    );
-                    self.set_expr_type(expr, self.error_type(name));
-                }
+            if let Some(member_ty) = member_ty {
+                self.set_expr_type(expr, member_ty);
+            } else {
+                self.error_token(name, &format!("No member `{}` in type `{}`", name.lexeme, obj_ty.kind));
+                self.set_expr_type(expr, self.error_type(name));
             }
         }
     }
@@ -1817,278 +1002,29 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_class_init(&mut self, expr: &Expr) {
-        if let Expr::ClassInit { name, arguments } = expr {
-            // Look up the class
-            if let Some(Symbol::Class { fields, fully_defined, .. }) =
-                self.symtable.lookup_class(&name.lexeme)
-            {
-                // If not fully defined => error
-                if !fully_defined {
-                    self.error_token(
-                        name,
-                        &format!("Class `{}` is not fully defined yet", name.lexeme),
-                    );
-                }
-    
-                // Check argument count
-                // If we stored `constructor_param_count`, do:
-                //   if arguments.len() != constructor_param_count => error
-                //
-                // But if you're just using the length of `fields`,
-                // we can do:
-                let expected_args = fields.iter().filter(|(_, ty)| ty.0.is_constructor).count();
-                let actual_args = arguments.len();
-                if actual_args != expected_args {
-                    self.error_token(
-                        name,
-                        &format!(
-                            "Constructor for `{}` expects {} arguments, but {} provided",
-                            name.lexeme, expected_args, actual_args
-                        ),
-                    );
-                }
-    
-                // Type check each argument
-                for arg in arguments {
-                    arg.accept(self);
-                }
-    
-                // Finally, set the expression type to the class type
-                let class_ty = Type::new(
-                    name.clone(),
-                    TypeKind::User(name.lexeme.clone()),
-                );
-                self.set_expr_type(expr, class_ty);
-    
-            } else {
-                self.error_token(
-                    name,
-                    &format!("Unknown class `{}`", name.lexeme),
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
-            }
-        }
-    }    
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Constructors are not part of Cardamom V1.");
+    }
 
     fn visit_dereference(&mut self, expr: &Expr) {
-        // Similar to unary star
-        if let Expr::Dereference { object } = expr {
-            object.accept(self);
-
-            let name = get_token(object);
-            let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            obj_ty.derived.push(Derived::Ptr);
-
-            if let TypeKind::Pointer(inner) = obj_ty.kind {
-                self.set_expr_type(expr, *inner.clone());
-            } else {
-                self.error_token(&name,&format!(
-                    "Cannot dereference non-pointer type `{}`",
-                    obj_ty.kind
-                ));
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
-            }
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Pointer dereference is not part of Cardamom V1.");
     }
 
     fn visit_reference(&mut self, expr: &Expr) {
-        if let Expr::Reference { object } = expr {
-            object.accept(self);
-
-            let name = get_token(object);
-
-            let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            obj_ty.derived.push(Derived::Ref);
-
-            let ref_ty = Type::new(
-                obj_ty.name.clone(),
-                TypeKind::Reference(Box::new(obj_ty)),
-            );
-
-            self.set_expr_type(expr, ref_ty);
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "References are not part of Cardamom V1.");
     }
 
     fn visit_mut_reference(&mut self, expr: &Expr) {
-        if let Expr::MutReference { object } = expr {
-            object.accept(self);
-            
-            let name = get_token(object);
-            let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            obj_ty.derived.push(Derived::MutRef);
-
-            let ref_ty = Type::new(
-                obj_ty.name.clone(),
-                TypeKind::MutRef(Box::new(obj_ty)),
-            );
-            self.set_expr_type(expr, ref_ty);
-        }
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Mutable references are not part of Cardamom V1.");
     }
 
     fn visit_closure(&mut self, expr: &Expr) {
-        if let Expr::Closure {
-            name,
-            parameters,
-            body,
-            return_type,
-            param_types
-        } = expr
-        {
-            // Enter a new scope for the closure body
-            self.symtable.begin_scope();
-    
-            // Save the old function return type context, then set the closure's
-            // declared return type as the "current function return type" 
-            // (so `return` statements inside the closure are checked).
-            let old_ret = self.current_function_return_type.take();
-            let old_has_valid_return = self.function_has_valid_return;
-            self.current_function_return_type = Some(return_type.clone());
-            self.function_has_valid_return = false;
-    
-            // Check if we are currently in an assignment.
-            // If we are, then we can lookup the variable we are assigning to
-            // and check if the type of the closure matches the expected type
-            // If we are not in an assignment, then we should expect type annotations on each parameter.
-            let expected_type: Option<Type>;
-            if let Some(expr) = &self.current_assignment {
-                expected_type = match expr {
-                    Expr::Assignment { name, .. } => {
-                        let sym = self.symtable.lookup_symbol(&name.lexeme);
-
-                        if let Some(x) = sym {
-                            match x {
-                                Symbol::Variable(_, _, ty, ..) => Some(ty.clone()),
-                                _ => unreachable!()
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    Expr::MemberAssignment { name, ..} => {
-                        let sym = self.symtable.lookup_symbol(&name.lexeme);
-
-                        if let Some(x) = sym {
-                            match x {
-                                Symbol::Variable(_, _, ty, ..) => Some(ty.clone()),
-                                _ => unreachable!()
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None
-                }
-            } else {
-                expected_type = None;
-            }
-
-            let mut tys: Vec<Type> = Vec::new();
-            // Declare each closure parameter in the symbol table
-            if let Some(ref ty) = expected_type {
-                tys = match ty.kind {
-                    TypeKind::Function(ref params, _) => params.clone(),
-                    _ => unreachable!()
-                };
-
-                for (i, param_token) in parameters.iter().enumerate() {
-                    // Declare in the symbol table
-                    self.symtable.declare_symbol(
-                        &param_token.lexeme, 
-                        Symbol::new_variable(param_token.clone(), tys[i].clone())
-                    );
-                }
-            } else {
-                for (i, param_token) in parameters.iter().enumerate() {
-                    self.symtable.declare_symbol(
-                        &param_token.lexeme,
-                        Symbol::new_variable(param_token.clone(), param_types[i].clone())
-                    );
-
-                    // No need to push the type of the parameter anymore
-                }
-            }
-
-            // Visit the closure body statement (which can contain returns)
-            body.accept(self);
-            let closure_has_return = self.statement_guarantees_return(body);
-
-            if return_type.kind != TypeKind::Void && !closure_has_return {
-                self.error_with_notes(
-                    name.clone(),
-                    &format!(
-                        "Closure (return type `{}`) does not return a value on all paths",
-                        return_type.kind
-                    ),
-                    vec![Note::new(
-                        "Closure return type is declared here".to_string(),
-                        return_type.name.line,
-                        return_type.name.span.clone(),
-                        self.filename.clone(),
-                    )],
-                    vec![Help::new(
-                        "Add a return statement to the closure body".to_string(),
-                        name.line,
-                        name.span.clone(),
-                        self.filename.clone(),
-                    )],
-                );
-            }
-    
-            // End the closure scope
-            self.symtable.end_scope();
-    
-            // Restore the old function return type
-            self.current_function_return_type = old_ret;
-            self.function_has_valid_return = old_has_valid_return;
-    
-            // Finally, set the closure's type. We treat the closure 
-            // as a function with `param_types -> return_type`.
-            let closure_type: Type;
-            if expected_type.is_none() {
-                closure_type = Type::new(
-                    name.clone(),
-                    // The function type: (param_types) -> return_type
-                    TypeKind::Function(param_types.clone(), Box::new(return_type.clone())),
-                );
-            } else {
-                closure_type = Type::new(
-                    name.clone(),
-                    TypeKind::Function(tys, Box::new(return_type.clone()))
-                )
-            }
-            self.set_expr_type(expr, closure_type);
-        }
-    }    
+        let token = get_token(expr);
+        self.unsupported_expr(expr, &token, "Closures are not part of Cardamom V1.");
+    }
 
     fn visit_array(&mut self, expr: &Expr) {
         if let Expr::Array { elements } = expr {
@@ -2345,7 +1281,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                             }
                         }).collect(),
                         return_type.clone(),
-                        self.current_class.is_some(),
+                        false,
                     )
                 );
                 return;
@@ -2385,6 +1321,27 @@ impl<'a> Visitor for TypeChecker<'a> {
             ..
         } = stmt
         {
+            if type_.kind == TypeKind::User("infer".to_string()) {
+                if let Some(init) = initialiser {
+                    init.accept(self);
+                    let inferred_ty = self
+                        .get_expr_type(init)
+                        .cloned()
+                        .unwrap_or_else(|| self.error_type(name));
+                    self.symtable.declare_symbol(
+                        &name.lexeme,
+                        Symbol::new_variable(name.clone(), inferred_ty),
+                    );
+                } else {
+                    self.error_token(name, "Cannot infer the type of a variable without an initializer");
+                    self.symtable.declare_symbol(
+                        &name.lexeme,
+                        Symbol::new_variable(name.clone(), self.error_type(name)),
+                    );
+                }
+                return;
+            }
+
             if let Some(init) = initialiser {
                 // Temporarily define the variable
                 self.symtable.begin_scope();
@@ -2472,76 +1429,11 @@ impl<'a> Visitor for TypeChecker<'a> {
         }
     }
 
-    fn visit_class(&mut self, stmt: &Stmt) {
-        if let Stmt::Class {
-            name,
-            public_fields,
-            private_fields,
-            protected_fields,
-            static_fields,
-            public_methods,
-            private_methods,
-            protected_methods,
-            static_methods,
-            ..
-        } = stmt
-        {
-            // Set the current_class so we know which class we're in
-            let class_name = name.lexeme.clone();
-            self.current_class = Some(class_name.clone());
-            self.class_stack.push(class_name.clone());
-    
-            for field in public_fields
-                .iter()
-                .chain(private_fields)
-                .chain(protected_fields)
-                .chain(static_fields)
-            {
-                field.accept(self); 
-            }
-    
-            // Construct a Type that represents this class, e.g. `User(className)`
-            let class_type = Type::new(name.clone(), TypeKind::User(class_name.clone()));
-    
-            for method in public_methods
-                .iter()
-                .chain(private_methods)
-                .chain(protected_methods)
-                .chain(static_methods)
-            {
-                // Start a new scope for the method
-                self.symtable.begin_scope();
-    
-                // Declare `this` in the symbol table, pointing to `class_type`
-                let this_symbol = Symbol::new_variable(name.clone(), class_type.clone());
-
-                self.symtable.declare_symbol("this", this_symbol);    
-                // Now visit the method AST node itself
-                method.accept(self);
-    
-                // End the scope
-                self.symtable.end_scope();
-            }
-
-            self.class_stack.pop();
-            self.current_class = self.class_stack.last().cloned();
-        }
+    fn visit_class(&mut self, _stmt: &Stmt) {
     }
 
     fn visit_extension(&mut self, _stmt: &Stmt) {
         // skip
-    }
-}
-
-// Add ToString for Visibility
-impl ToString for Visibility {
-    fn to_string(&self) -> String {
-        match self {
-            Visibility::Public => "Public".to_string(),
-            Visibility::Private => "Private".to_string(),
-            Visibility::Protected => "Protected".to_string(),
-            Visibility::Static => "Static".to_string(),
-        }
     }
 }
 
@@ -2587,15 +1479,13 @@ mod tests {
             "tests/pass/function_1.crdm",
             "tests/pass/function_2.crdm",
             "tests/pass/function_3.crdm",
-            "tests/pass/function_4.crdm",
             "tests/pass/comparison_1.crdm",
             "tests/pass/variable_1.crdm",
             "tests/pass/variable_2.crdm",
             "tests/pass/array_1.crdm",
             "tests/pass/array_2.crdm",
-            "tests/pass/array_3.crdm",
-            "tests/pass/closure_1.crdm",
-            "tests/pass/closure_2.crdm",
+            "tests/pass/inference_1.crdm",
+            "tests/pass/main_args.crdm",
         ] {
             assert_eq!(typecheck_fixture(fixture), 0, "`{}` should pass", fixture);
         }
@@ -2606,11 +1496,6 @@ mod tests {
         for fixture in [
             "tests/fail/function_1.crdm",
             "tests/fail/function_2.crdm",
-            "tests/fail/closure_1.crdm",
-            "tests/fail/closure_2.crdm",
-            "tests/fail/closure_3.crdm",
-            "tests/fail/closure_4.crdm",
-            "tests/fail/closure_5.crdm",
         ] {
             assert!(
                 typecheck_fixture(fixture) > 0,

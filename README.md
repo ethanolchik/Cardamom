@@ -1,50 +1,78 @@
 # Cardamom
-Another programming language implementation (hopefully this time will be better).
 
+Cardamom is a small statically typed language for writing fast command-line
+tools and data-processing programs.
 
-## Example code
-```cpp
-import "std.io" as io;
+The compiler currently targets C++. That backend is a practical bootstrap
+target: it keeps Cardamom native, gives the standard library access to proven
+C++ facilities, and leaves room for another backend later once the language is
+more stable.
 
-public class Person(private name: string, private age: string) {
-private:
-    address: string = "1 High Road";
+## Design Goals
 
-public:
-    getAddress() -> string {
-        return this.address;
+- Make common CLI and file-processing programs concise.
+- Keep performance predictable by compiling ahead of time.
+- Prefer explicit, simple types over dynamic runtime behavior.
+- Build a useful standard library before adding large language features.
+
+## Example Direction
+
+```crdm
+import fs;
+
+fn main(args: [string]) -> int {
+    let path = args.get(0) ?? "input.txt";
+    let lines = fs.lines(path)?;
+
+    for line in lines {
+        if line.contains("ERROR") {
+            print(line);
+        }
     }
 
-    moveHouse(address: Option<string>) -> void {
-        this.address = address.value() ?? this.address; // either new address or old address
-    }
-
-    birthday() -> int {
-        this.age += 1;
-
-        return this.age;
-    }
-
-    getName() -> string {
-        return this.name;
-    }
-}
-
-fn main() -> void {
-    let p: Person = new Person("Ethan", "17");
-
-    io.println("Hello, $1! You live at $2.", p.getName(), p.getAddress());
-
-    io.println("Happy $1 birthday, $2!", p.birthday(), p.getName());
+    return 0;
 }
 ```
 
-## Progress
-- [x] Lexing
-- [x] Parsing
-- [ ] Symbol Table
-- [ ] Type Checking
-- [ ] Code Generation
-- [ ] Maybe GC?
+This is target syntax for the redesign. Some of it may not be implemented yet.
 
-I am currently developing this programming language as a hobby
+## Near-Term Scope
+
+Core language features:
+
+- functions
+- variables
+- conditionals
+- loops
+- arrays
+- strings
+- simple imports
+- basic static type checking
+
+Data-tooling features to add:
+
+- `main(args: [string]) -> int`
+- string interpolation
+- `for item in collection`
+- `Option<T>` for missing values
+- `Result<T, E>` or `?` for recoverable errors
+- file IO helpers
+- string helpers such as `split`, `trim`, and `contains`
+
+Features to postpone:
+
+- classes as the main abstraction
+- inheritance
+- complex generics
+- macros
+- async
+- garbage collection
+- direct pointer-heavy programming
+
+## Roadmap
+
+See:
+
+- [docs/cli-data-roadmap.md](docs/cli-data-roadmap.md)
+- [docs/simplification-plan.md](docs/simplification-plan.md)
+- [docs/v1-language-shape.md](docs/v1-language-shape.md)

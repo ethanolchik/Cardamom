@@ -60,6 +60,7 @@ impl CppCodeGenerator {
             TypeKind::Float => "float".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
+            TypeKind::User(name) if name == "infer" => "auto".to_string(),
             TypeKind::User(name) => name.clone(), // assume user types become class names
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
@@ -209,6 +210,44 @@ impl CppCodeGenerator {
             }
         }
     }
+
+    fn cli_main_args_name(
+        &self,
+        name: &Token,
+        params: &[Box<Stmt>],
+        return_type: &Type,
+    ) -> Option<String> {
+        if name.lexeme != "main" || return_type.kind != TypeKind::Int || params.len() != 1 {
+            return None;
+        }
+
+        let Stmt::Variable {
+            name: param_name,
+            type_,
+            ..
+        } = &*params[0]
+        else {
+            return None;
+        };
+
+        match &type_.kind {
+            TypeKind::Array(inner, 1) if inner.kind == TypeKind::String => {
+                Some(param_name.lexeme.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn write_function_body(&mut self, body: &[Box<Stmt>]) {
+        self.output.push_str(&self.indent());
+        self.output.push_str("{\n");
+        self.indent_level += 1;
+        for s in body {
+            s.accept(self);
+        }
+        self.indent_level -= 1;
+        self.writeln("}");
+    }
 }
 
 /// Implement the Visitor trait to generate C++ code.
@@ -356,6 +395,23 @@ impl Visitor for CppCodeGenerator {
                     return;
                 }
             }
+
+            if let Some(args_name) = self.cli_main_args_name(name, params, return_type) {
+                self.writeln("int main(int argc, char** argv)");
+                self.output.push_str(&self.indent());
+                self.output.push_str("{\n");
+                self.indent_level += 1;
+                self.writeln(&format!(
+                    "std::vector<std::string> {}(argv + 1, argv + argc);",
+                    args_name
+                ));
+                for s in body {
+                    s.accept(self);
+                }
+                self.indent_level -= 1;
+                self.writeln("}");
+                return;
+            }
             
             let ret_type = self.translate_type(return_type);
             let mut param_str = String::new();
@@ -369,14 +425,7 @@ impl Visitor for CppCodeGenerator {
                 }
             }
             self.writeln(&format!("{} {}({})", ret_type, name.lexeme, param_str));
-            self.output.push_str(&self.indent());
-            self.output.push_str("{\n");
-            self.indent_level += 1;
-            for s in body {
-                s.accept(self);
-            }
-            self.indent_level -= 1;
-            self.writeln("}");
+            self.write_function_body(body);
         }
     }
 
@@ -824,5 +873,23 @@ mod tests {
 
         let _ = std::fs::remove_file(cpp_path);
         let _ = std::fs::remove_file(bin_path);
+    }
+
+    #[test]
+    fn cli_main_args_codegen_uses_argc_argv() {
+        let module = parse_and_check("tests/pass/main_args.crdm");
+        let mut generator = CppCodeGenerator::new();
+        let code = generator.generate(&module);
+
+        assert!(
+            code.contains("int main(int argc, char** argv)"),
+            "main with `[string]` args should lower to argc/argv:\n{}",
+            code
+        );
+        assert!(
+            code.contains("std::vector<std::string> args(argv + 1, argv + argc);"),
+            "main args should become a std::vector<std::string> without the program name:\n{}",
+            code
+        );
     }
 }

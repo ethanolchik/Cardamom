@@ -1,0 +1,9 @@
+import std.io as io;
+
+fn main(args: [string]) -> int {
+    let count = 1;
+    let name = "cardamom";
+    let copied_args = args;
+
+    return count;
+}
