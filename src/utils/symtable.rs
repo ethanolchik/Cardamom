@@ -223,7 +223,7 @@ impl SymbolTable {
 
     pub fn user_defined_type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
-            TypeKind::Reference(inner) | TypeKind::Pointer(inner) | TypeKind::MutRef(inner) | TypeKind::Array(inner, _) => self.user_defined_type_exists(inner),
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) | TypeKind::Array(inner, _) => self.user_defined_type_exists(inner),
             TypeKind::Function(params, ret) => params.iter().any(|p| self.user_defined_type_exists(p)) || self.user_defined_type_exists(ret),
             _ => self.classes.contains_key(&ty.name.lexeme),
         }

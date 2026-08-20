@@ -204,13 +204,12 @@ impl Parser {
             derived.push(Derived::Const);
         }
 
-        while self.match_token(TokenKind::Amp) || self.match_token(TokenKind::Hash) || self.match_token(TokenKind::Mul) {
-            if self.previous().kind == TokenKind::Amp {
-                derived.push(Derived::Ref);
-            } else if self.previous().kind == TokenKind::Hash {
+        while self.match_token(TokenKind::Amp) {
+            // `&T` borrows immutably, `&mut T` mutably.
+            if self.match_token(TokenKind::Mut) {
                 derived.push(Derived::MutRef);
-            } else if self.previous().kind == TokenKind::Mul {
-                derived.push(Derived::Ptr);
+            } else {
+                derived.push(Derived::Ref);
             }
         }
 
@@ -275,13 +274,11 @@ impl Parser {
             loop {
                 let mut derived = Vec::new();
 
-                while self.match_token(TokenKind::Amp) || self.match_token(TokenKind::Hash) || self.match_token(TokenKind::Mul) {
-                    if self.previous().kind == TokenKind::Amp {
-                        derived.push(Derived::Ref);
-                    } else if self.previous().kind == TokenKind::Hash {
+                while self.match_token(TokenKind::Amp) {
+                    if self.match_token(TokenKind::Mut) {
                         derived.push(Derived::MutRef);
-                    } else if self.previous().kind == TokenKind::Mul {
-                        derived.push(Derived::Ptr);
+                    } else {
+                        derived.push(Derived::Ref);
                     }
                 }
 
@@ -519,13 +516,12 @@ impl Parser {
         // Prefix modifiers: `&T`, `#T`, `*T`. These bind more loosely than a postfix
         // `[]`, so `&int[]` is a reference to an array of ints. Use parentheses to get
         // the other grouping: `(&int)[]` is an array of references.
-        while self.match_token(TokenKind::Amp) || self.match_token(TokenKind::Hash) || self.match_token(TokenKind::Mul) {
-            if self.previous().kind == TokenKind::Amp {
-                derived.push(Derived::Ref);
-            } else if self.previous().kind == TokenKind::Hash {
+        while self.match_token(TokenKind::Amp) {
+            // `&T` borrows immutably, `&mut T` mutably.
+            if self.match_token(TokenKind::Mut) {
                 derived.push(Derived::MutRef);
-            } else if self.previous().kind == TokenKind::Mul {
-                derived.push(Derived::Ptr);
+            } else {
+                derived.push(Derived::Ref);
             }
         }
 
@@ -851,26 +847,15 @@ impl Parser {
 
     pub fn reference(&mut self) -> Result<Expr, Error> {
         if self.match_token(TokenKind::Amp) {
+            // `&mut expr` borrows mutably, `&expr` immutably.
+            let mutable = self.match_token(TokenKind::Mut);
             let right = self.reference()?;
-            return Ok(Expr::Reference { object: Box::new(right) });
-        }
 
-        self.mutreference()
-    }
-
-    pub fn mutreference(&mut self) -> Result<Expr, Error> {
-        if self.match_token(TokenKind::Hash) {
-            let right = self.mutreference()?;
-            return Ok(Expr::MutReference { object: Box::new(right) });
-        }
-
-        self.dereference()
-    }
-
-    pub fn dereference(&mut self) -> Result<Expr, Error> {
-        if self.match_token(TokenKind::Mul) {
-            let right = self.dereference()?;
-            return Ok(Expr::Dereference { object: Box::new(right) });
+            return Ok(if mutable {
+                Expr::MutReference { object: Box::new(right) }
+            } else {
+                Expr::Reference { object: Box::new(right) }
+            });
         }
 
         self.cast()
@@ -1032,6 +1017,7 @@ impl Parser {
         }
 
         if self.match_token(TokenKind::LBracket) {
+            let token = self.previous();
             let mut elements = Vec::new();
 
             if !self.check(TokenKind::RBracket) {
@@ -1045,7 +1031,7 @@ impl Parser {
             }
 
             self.consume(TokenKind::RBracket, "Expected ']' after array elements.")?;
-            return Ok(Expr::Array { elements: elements.into_iter().map(Box::new).collect() });
+            return Ok(Expr::Array { elements: elements.into_iter().map(Box::new).collect(), token });
         }
 
         if self.match_token(TokenKind::New) {
@@ -1293,14 +1279,6 @@ impl Parser {
                     attributes: attributes.clone(),
                     name: name.clone(),
                     derived: vec![Derived::MutRef],
-                    generics: Vec::new(),
-                    kind: current_kind,
-                    is_constructor: false,
-                })),
-                Derived::Ptr => TypeKind::Pointer(Box::new(Type {
-                    attributes: attributes.clone(),
-                    name: name.clone(),
-                    derived: vec![Derived::Ptr],
                     generics: Vec::new(),
                     kind: current_kind,
                     is_constructor: false,

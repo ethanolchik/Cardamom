@@ -1,0 +1,13 @@
+fn bump(x: &mut int) -> void {
+    x += 1;
+}
+
+fn pass(r: &int) -> void {
+    // An immutable borrow cannot be passed where a mutable one is required.
+    bump(r);
+}
+
+fn main() {
+    let n: int = 1;
+    pass(n);
+}

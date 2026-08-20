@@ -55,7 +55,6 @@ pub enum Attribute {
 pub enum Derived {
     Const,
     Ref,
-    Ptr,
     Array,
     Lambda,
     MutRef,
@@ -89,6 +88,8 @@ pub enum Expr {
     },
     Array {
         elements: Vec<Box<Expr>>,
+        /// The `[` token, so an empty literal still has a source location.
+        token: Token,
     },
     Tuple {
         elements: Vec<Box<Expr>>,
@@ -116,11 +117,6 @@ pub enum Expr {
         value: Box<Expr>,
         op: Token,
         token: Token
-    },
-    PtrAssignment {
-        object: Box<Expr>,
-        value: Box<Expr>,
-        op: Token,
     },
     Call {
         callee: Box<Expr>,
@@ -153,9 +149,6 @@ pub enum Expr {
     ClassInit {
         name: Token,
         arguments: Vec<Box<Expr>>,
-    },
-    Dereference {
-        object: Box<Expr>,
     },
     Reference {
         object: Box<Expr>,
@@ -275,7 +268,6 @@ pub trait Visitor {
     fn visit_index(&mut self, expr: &Expr);
     fn visit_cast(&mut self, expr: &Expr);
     fn visit_class_init(&mut self, expr: &Expr);
-    fn visit_dereference(&mut self, expr: &Expr);
     fn visit_reference(&mut self, expr: &Expr);
     fn visit_mut_reference(&mut self, expr: &Expr);
     fn visit_closure(&mut self, expr: &Expr);
@@ -285,7 +277,6 @@ pub trait Visitor {
     fn visit_member_assignment(&mut self, stmt: &Expr);
     fn visit_static_assignment(&mut self, stmt: &Expr);
     fn visit_index_assignment(&mut self, stmt: &Expr);
-    fn visit_ptr_assignment(&mut self, stmt: &Expr);
     fn visit_expression(&mut self, stmt: &Stmt);
     fn visit_block(&mut self, stmt: &Stmt);
     fn visit_if(&mut self, stmt: &Stmt);
@@ -317,7 +308,6 @@ impl Node for Expr {
             Expr::MemberAssignment { .. } => visitor.visit_member_assignment(self),
             Expr::StaticAssignment { .. } => visitor.visit_static_assignment(self),
             Expr::IndexAssignment { .. } => visitor.visit_index_assignment(self),
-            Expr::PtrAssignment { .. } => visitor.visit_ptr_assignment(self),
             Expr::Call { .. } => visitor.visit_call(self),
             Expr::GenericCall { .. } => visitor.visit_generic_call(self),
             Expr::MemberAccess { .. } => visitor.visit_member_access(self),
@@ -325,7 +315,6 @@ impl Node for Expr {
             Expr::Index { .. } => visitor.visit_index(self),
             Expr::Cast { .. } => visitor.visit_cast(self),
             Expr::ClassInit { .. } => visitor.visit_class_init(self),
-            Expr::Dereference { .. } => visitor.visit_dereference(self),
             Expr::Reference { .. } => visitor.visit_reference(self),
             Expr::MutReference { .. } => visitor.visit_mut_reference(self),
             Expr::Closure { .. } => visitor.visit_closure(self),
@@ -385,7 +374,6 @@ impl Derived {
         match self {
             Derived::Const => "Const".to_string(),
             Derived::Ref => "Ref".to_string(),
-            Derived::Ptr => "Ptr".to_string(),
             Derived::Array => "Array".to_string(),
             Derived::Lambda => "Lambda".to_string(),
             Derived::MutRef => "Mut".to_string(),

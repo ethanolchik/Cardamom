@@ -1,0 +1,8 @@
+fn bad(x: &int) -> void {
+    // Cannot write through an immutable borrow.
+    x += 1;
+}
+
+fn main() {
+    bad(1);
+}

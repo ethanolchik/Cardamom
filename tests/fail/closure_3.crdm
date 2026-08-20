@@ -1,7 +1,9 @@
 fn main() {
-    let increment: fn(&int) -> void = |x| void -> { x += 1; };
+    let increment: fn(&mut int) -> void = |x| void -> { x += 1; };
 
-    let closure_ret_closure: fn() -> fn(&int) -> void = || fn(&int) -> void -> { return increment; };
+    let closure_ret_closure: fn() -> fn(&mut int) -> void = || fn(&mut int) -> void -> { return increment; };
 
-    closure_ret_closure()(1.0);
+    // Wrong argument type.
+    let f: float = 1.0;
+    closure_ret_closure()(f);
 }

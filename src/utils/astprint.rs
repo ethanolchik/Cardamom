@@ -147,15 +147,6 @@ impl Visitor for AstPrinter {
         self.indent -= 1;
     }
 
-    fn visit_dereference(&mut self, expr: &Expr) {
-        println!("{}Dereference: ", String::from("\t").repeat(self.indent));
-        self.indent += 1;
-        if let Expr::Dereference { object, .. } = expr {
-            object.accept(self);
-        }
-        self.indent -= 1;
-    }
-
     fn visit_reference(&mut self, expr: &Expr) {
         println!("{}Reference: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
@@ -223,16 +214,6 @@ impl Visitor for AstPrinter {
         if let Expr::IndexAssignment { object, index, value, .. } = stmt {
             object.accept(self);
             index.accept(self);
-            value.accept(self);
-        }
-        self.indent -= 1;
-    }
-
-    fn visit_ptr_assignment(&mut self, stmt: &Expr) {
-        println!("{}PtrAssignment: ", String::from("\t").repeat(self.indent));
-        self.indent += 1;
-        if let Expr::PtrAssignment { object, value, .. } = stmt {
-            object.accept(self);
             value.accept(self);
         }
         self.indent -= 1;
@@ -459,10 +440,6 @@ fn printtype(type_: Type, indent: usize) {
                 printtype(param.clone(), indent + 1);
             }
             printtype(*return_type.clone(), indent + 1);
-        }
-        TypeKind::Pointer(ref inner) => {
-            println!("{}Pointer: ", String::from("\t").repeat(indent));
-            printtype(*inner.clone(), indent + 1);
         }
         TypeKind::Reference(ref inner) => {
             println!("{}Reference: ", String::from("\t").repeat(indent));

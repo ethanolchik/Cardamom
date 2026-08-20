@@ -1,0 +1,4 @@
+fn main() {
+    // No annotation to infer the element type from.
+    let xs: int = [];
+}

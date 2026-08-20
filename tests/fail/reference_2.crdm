@@ -1,0 +1,8 @@
+fn bump(x: &mut int) -> void {
+    x += 1;
+}
+
+fn main() {
+    // Cannot mutably borrow a temporary.
+    bump(1);
+}

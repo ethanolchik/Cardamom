@@ -1,0 +1,26 @@
+import io;
+import str;
+
+// Names that are C++ keywords but not Cardamom keywords.
+fn double(x: int) -> int {
+    return x * 2;
+}
+
+public class Widget(private namespace: string) {
+    private union: int = 5;
+
+    public delete() -> int {
+        return this.union;
+    }
+}
+
+fn main() {
+    let template: int = 1;
+    let operator: int = double(template);
+    let virtual: string = "ok";
+
+    io.println(str.fromInt(operator) + " " + virtual);
+
+    let w: Widget = new Widget("x");
+    io.println(str.fromInt(w.delete()));
+}

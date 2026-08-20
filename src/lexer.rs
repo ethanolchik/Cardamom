@@ -134,7 +134,6 @@ impl Lexer {
                 let token_kind = if self.match_token('=') { TokenKind::CaretEq } else { TokenKind::Caret };
                 self.add_token(token_kind);
             },
-            '#' => self.add_token(TokenKind::Hash),
             '~' => self.add_token(TokenKind::Tilde),
             '!' => {
                 let is_match = self.match_token('=');
@@ -311,6 +310,7 @@ impl Lexer {
             "new" => TokenKind::New,
             "extern" => TokenKind::Extern,
             "extend" => TokenKind::Extend,
+            "mut" => TokenKind::Mut,
             _ => TokenKind::Identifier,
         };
         self.add_token(kind);

@@ -24,7 +24,6 @@ pub enum TypeKind {
     String,
     Array(Box<Type>, usize),
     Function(Vec<Type>, Box<Type>),
-    Pointer(Box<Type>),
     Reference(Box<Type>),
     MutRef(Box<Type>),
     Tuple(Vec<Type>),
@@ -85,7 +84,6 @@ impl MonomorphTable {
 impl TypeKind {
     pub fn inner_type(&self) -> Option<&Type> {
         match self {
-            TypeKind::Pointer(inner) => Some(inner),
             TypeKind::Reference(inner) => Some(inner),
             TypeKind::MutRef(inner) => Some(inner),
             TypeKind::Array(inner, _) => Some(inner),
@@ -108,17 +106,11 @@ impl TypeKind {
         match self {
             TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
             TypeKind::Array(inner, _) => inner.is_primitive(),
-            TypeKind::Pointer(inner) => inner.is_primitive(),
             TypeKind::Reference(inner) => inner.is_primitive(),
             TypeKind::MutRef(inner) => inner.is_primitive(),
             TypeKind::Function(_, ret) => ret.is_primitive(),
             _ => false,
         }
-    }
-
-    /// Returns `true` if the `TypeKind` represents a pointer.
-    pub fn is_pointer(&self) -> bool {
-        matches!(self, TypeKind::Pointer(inner) if inner.is_primitive())
     }
 
     /// Returns `true` if the `TypeKind` represents a reference.
@@ -168,8 +160,7 @@ impl TypeKind {
             TypeKind::Array(ty, _) => match &ty.kind {
                 TypeKind::Function(..)
                 | TypeKind::Reference(_)
-                | TypeKind::MutRef(_)
-                | TypeKind::Pointer(_) => format!("({})[]", ty.kind.to_string()),
+                | TypeKind::MutRef(_) => format!("({})[]", ty.kind.to_string()),
                 _ => format!("{}[]", ty.kind.to_string()),
             },
             TypeKind::Function(params, ret) => {
@@ -180,9 +171,9 @@ impl TypeKind {
                     .join(", ");
                 format!("fn({}) -> {}", params_str, ret.kind.to_string())
             },
-            TypeKind::Pointer(ty) => format!("*{}", ty.kind.to_string()),
             TypeKind::Reference(ty) => format!("&{}", ty.kind.to_string()),
-            TypeKind::MutRef(ty) => format!("&mut {}", ty.kind.to_string()),
+            // Printed with the syntax that produces them: `&T` and `#T`.
+            TypeKind::MutRef(ty) => format!("#{}", ty.kind.to_string()),
             TypeKind::Tuple(types) => {
                 let types_str = types
                     .iter()
@@ -219,7 +210,11 @@ impl Type {
         }
     }
 
-    /// Returns true if `self` is compatible with `other`.
+    /// Returns true if a value of type `self` can be used where `other` is expected.
+    ///
+    /// The direction matters: `self` is the type a value actually has, and `other` is
+    /// the type the surrounding code requires.
+    ///
     /// This covers:
     /// - pointer/ref/mutref with identical inner type
     /// - arrays with same inner type & length
@@ -232,54 +227,45 @@ impl Type {
         if self.kind == other.kind {
             return true;
         }
-        // Auto-deref for primitives (example):
-        //    if function param is `int` and argument is `&int`, allow it.
-        //    (Or you could do the inverse, or also handle `MutRef(int)`. 
-        //    Adjust to match your language rules.)
+        // Borrows.
+        //
+        // `&T` is an immutable borrow and `#T` a mutable one. The rules mirror what the
+        // generated C++ (`const T&` and `T&`) will actually accept:
+        //
+        //   - reading through a borrow yields the borrowed type, so `&T` and `#T` are
+        //     both usable where `T` is wanted;
+        //   - anything can be borrowed immutably, since `const T&` binds to temporaries;
+        //   - a mutable borrow can be used where an immutable one is wanted, but not
+        //     the other way round, which would discard the immutability.
+        //
+        // Whether a value may be borrowed *mutably* also depends on it being an lvalue,
+        // which is a property of the expression rather than the type, so the type
+        // checker enforces that separately at each call site.
         match (&self.kind, &other.kind) {
-            (TypeKind::Int, TypeKind::Reference(inner)) 
-            | (TypeKind::Float, TypeKind::Reference(inner)) 
-            | (TypeKind::String, TypeKind::Reference(inner)) => {
-                // e.g. param = int, arg = &int => good
-                if inner.kind == self.kind {
+            // An immutable borrow cannot stand in for a mutable one; that would let the
+            // callee write through a reference the caller only lent out for reading.
+            (TypeKind::Reference(_), TypeKind::MutRef(_)) => return false,
+
+            // Two borrows of the same kind agree if their pointees do.
+            (TypeKind::Reference(a), TypeKind::Reference(b))
+            | (TypeKind::MutRef(a), TypeKind::MutRef(b)) => return a.is_compatible_with(b),
+
+            // A mutable borrow may be used where an immutable one is expected.
+            (TypeKind::MutRef(a), TypeKind::Reference(b)) => return a.is_compatible_with(b),
+
+            // Reading through a borrow yields the borrowed type.
+            (TypeKind::Reference(inner), _) | (TypeKind::MutRef(inner), _) => {
+                if inner.is_compatible_with(other) {
                     return true;
                 }
             }
-            _ => {}
-        }
 
-        // Same as above but for mutref
-        match (&self.kind, &other.kind) {
-            (TypeKind::Int, TypeKind::MutRef(inner)) 
-            | (TypeKind::Float, TypeKind::MutRef(inner)) 
-            | (TypeKind::String, TypeKind::MutRef(inner)) => {
-                // e.g. param = int, arg = &int => good
-                if inner.kind == self.kind {
+            // Borrowing a value. A mutable borrow additionally requires an lvalue,
+            // which is a property of the expression and is checked at the call site.
+            (_, TypeKind::Reference(inner)) | (_, TypeKind::MutRef(inner)) => {
+                if self.is_compatible_with(inner) {
                     return true;
                 }
-            }
-            _ => {}
-        }
-
-        // Same as above but for pointer
-        match (&self.kind, &other.kind) {
-            (TypeKind::Int, TypeKind::Pointer(inner)) 
-            | (TypeKind::Float, TypeKind::Pointer(inner)) 
-            | (TypeKind::String, TypeKind::Pointer(inner)) => {
-                // e.g. param = int, arg = &int => good
-                if inner.kind == self.kind {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-
-        // Pointer, reference, or mutref with identical subtypes
-        match (&self.kind, &other.kind) {
-            (TypeKind::Pointer(a), TypeKind::Pointer(b))
-            | (TypeKind::Reference(a), TypeKind::Reference(b))
-            | (TypeKind::MutRef(a), TypeKind::MutRef(b)) => {
-                return a.is_compatible_with(b);
             }
             _ => {}
         }
@@ -410,13 +396,6 @@ impl Type {
             },
 
             // Arrays, pointers, references, etc.: apply to subtypes if needed
-            TypeKind::Pointer(inner) => {
-                let new_inner = inner.apply_substitution(subs);
-                Type {
-                    kind: TypeKind::Pointer(Box::new(new_inner)),
-                    ..self.clone()
-                }
-            },
             TypeKind::Reference(inner) => {
                 let new_inner = inner.apply_substitution(subs);
                 Type {
@@ -481,10 +460,6 @@ impl Type {
     
     pub fn is_primitive(&self) -> bool {
         self.kind.is_primitive()
-    }
-    
-    pub fn is_pointer(&self) -> bool {
-        self.kind.is_pointer()
     }
     
     pub fn is_reference(&self) -> bool {

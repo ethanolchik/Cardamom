@@ -1,0 +1,10 @@
+import io;
+
+fn main() {
+    let x: string = "world";
+
+    io.println("a" + "b");
+    io.println("hello, " + x);
+    io.println(x + "!");
+    io.println("a" + "b" + "c" + x);
+}

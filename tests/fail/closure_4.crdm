@@ -1,7 +1,9 @@
 fn main() {
-    let increment: fn(&int) -> void = |x| void -> { x += 1; };
+    let increment: fn(&mut int) -> void = |x| void -> { x += 1; };
 
-    let closure_ret_closure: fn() -> fn(&string) -> void = || fn(&int) -> void -> { return increment; };
+    // Declared type and closure signature disagree.
+    let closure_ret_closure: fn() -> fn(&mut string) -> void = || fn(&mut int) -> void -> { return increment; };
 
-    closure_ret_closure()(1);
+    let n: int = 1;
+    closure_ret_closure()(n);
 }

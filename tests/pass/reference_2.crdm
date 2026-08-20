@@ -1,0 +1,44 @@
+import io;
+import str;
+
+public class Counter(private n: int) {
+    public get() -> int {
+        return this.n;
+    }
+
+    public bump() -> int {
+        this.n += 1;
+        return this.get();
+    }
+}
+
+// Borrows see through to the underlying value for members and indexing.
+fn sum(xs: &int[]) -> int {
+    let total: int = 0;
+    let i: int = 0;
+    while (i < xs.len()) {
+        total += xs[i];
+        i += 1;
+    }
+    return total;
+}
+
+fn append(xs: &mut int[], v: int) -> void {
+    xs.push(v);
+}
+
+fn peek(c: &Counter) -> int {
+    return c.get();
+}
+
+fn main() {
+    let xs: int[] = [1, 2, 3];
+    io.println(str.fromInt(sum(xs)));
+
+    append(xs, 4);
+    io.println(str.fromInt(sum(xs)));
+
+    let c: Counter = new Counter(9);
+    io.println(str.fromInt(peek(c)));
+    io.println(str.fromInt(c.bump()));
+}

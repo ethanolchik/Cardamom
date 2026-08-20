@@ -30,7 +30,7 @@ pub enum TokenKind {
     Bang, Question, Eq, Neq, Lt, Gt, Lte, Gte, EqEq, And, Or,
     PlusEq, MinusEq, MulEq, DivEq, ModEq, AmpEq, PipeEq, CaretEq,
     QuestionQuestion, Pow, PowEq, LShift, RShift, LShiftEq, RShiftEq,
-    Range, Arrow, Hash, StaticAccess, At,
+    Range, Arrow, StaticAccess, At,
 
     // Delimiters
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Dot, Colon, Semicolon,
@@ -38,7 +38,7 @@ pub enum TokenKind {
     // Keywords
     If, Else, While, For, Break, Continue, Return,
     Class, Fn, Let, Const, Public, Private, Protected, Static,
-    Import, As, New, Extern, Extend,
+    Import, As, New, Extern, Extend, Mut,
 
     // Misc
     Error
@@ -108,7 +108,6 @@ impl TokenKind {
             TokenKind::RShiftEq => "RShiftEq".to_string(),
             TokenKind::Range => "Range".to_string(),
             TokenKind::Arrow => "Arrow".to_string(),
-            TokenKind::Hash => "Hash".to_string(),
             TokenKind::StaticAccess => "StaticAccess".to_string(),
             TokenKind::At => "At".to_string(),
             TokenKind::LParen => "LParen".to_string(),
@@ -141,6 +140,7 @@ impl TokenKind {
             TokenKind::New => "New".to_string(),
             TokenKind::Extern => "Extern".to_string(),
             TokenKind::Extend => "Extend".to_string(),
+            TokenKind::Mut => "Mut".to_string(),
             TokenKind::Error => "Error".to_string()
         }
     }

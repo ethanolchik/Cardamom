@@ -1,0 +1,20 @@
+import io;
+import str;
+
+fn twice(x: int) -> int {
+    return x * 2;
+}
+
+fn apply(f: fn(int) -> int, v: int) -> int {
+    return f(v);
+}
+
+fn main() {
+    // A named function used as a value: stored, passed and held in an array.
+    let f: fn(int) -> int = twice;
+    io.println(str.fromInt(f(21)));
+    io.println(str.fromInt(apply(twice, 5)));
+
+    let fs: (fn(int) -> int)[] = [twice, f];
+    io.println(str.fromInt(fs[1](3)));
+}

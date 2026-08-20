@@ -115,6 +115,63 @@ public fn repeat(s: string, times: int) -> string {
 
 `fn extern name(..) -> T {}` remains available to declare a function you link yourself.
 
+## Functions as values
+
+A named function can be used wherever a `fn` type is expected:
+
+```cpp
+fn twice(x: int) -> int { return x * 2; }
+
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v); }
+
+fn main() {
+    let f: fn(int) -> int = twice;
+    let fs: (fn(int) -> int)[] = [twice, f];
+
+    apply(twice, 5);
+}
+```
+
+## References
+
+`&T` is an immutable borrow and `&mut T` a mutable one. They lower to `const T&` and
+`T&`:
+
+```cpp
+fn bump(x: &mut int) -> void {
+    x += 1;              // visible to the caller
+}
+
+fn readonly(x: &int) -> int {
+    return x + 1;        // reading only
+}
+
+fn main() {
+    let n: int = 1;
+    bump(n);             // n is now 2
+    readonly(n);
+    readonly(5);         // an immutable borrow accepts a temporary
+}
+```
+
+The rules the checker enforces:
+
+- assigning through a `&T` is an error; use `&mut T`
+- a `&mut T` argument must be a variable, index or field, not a temporary
+- a `&T` cannot be passed where a `&mut T` is required (the reverse is fine)
+- members and indexing reach through a borrow, so `xs.len()` works for `xs: &int[]`
+
+Class methods that never write to `this` are emitted as `const`, which is what lets
+them be called through a `&T`.
+
+## Notes
+
+Empty array literals take their type from the context they appear in, so `let xs: int[] = [];`
+and `total([])` both work; a literal with nothing to infer from is an error.
+
+Names that are C++ keywords but not Cardamom keywords (`double`, `template`, `union`, ...)
+are usable as ordinary identifiers and renamed during code generation.
+
 I am currently developing this programming language as a hobby
 
 ## Building

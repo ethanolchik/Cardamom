@@ -14,5 +14,8 @@ Cargo.lock
 *.pdb
 
 # ignore binaries
-./output
-./cardamom
+# Build artifacts written next to the sources by the compiler driver.
+# A leading `./` never matches, so these are anchored with a leading slash.
+/output
+/output.cpp
+/cardamom

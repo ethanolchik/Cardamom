@@ -42,11 +42,12 @@ fn main() {
 
     let b: &(fn(int) -> int)[];
 
-    let increment: fn(&int) -> void = |x| void -> { x += 1; };
+    let increment: fn(&mut int) -> void = |x| void -> { x += 1; };
     
-    let closure_ret_closure: fn() -> fn(&int) -> void = || fn(&int) -> void -> { return increment; };
+    let closure_ret_closure: fn() -> fn(&mut int) -> void = || fn(&mut int) -> void -> { return increment; };
 
-    closure_ret_closure()(1);
+    let n: int = 1;
+    closure_ret_closure()(n);
 
     test<float>(1.1);
 }

@@ -1,0 +1,19 @@
+import io;
+import str;
+
+fn total(xs: int[]) -> int {
+    return xs.len();
+}
+
+fn main() {
+    // Empty array literals infer from the type they are checked against.
+    let xs: int[] = [];
+    xs.push(1);
+
+    let nested: int[][] = [[], []];
+    nested[0].push(7);
+
+    io.println(str.fromInt(xs.len()));
+    io.println(str.fromInt(nested[0][0]));
+    io.println(str.fromInt(total([])));
+}

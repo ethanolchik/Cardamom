@@ -1,0 +1,22 @@
+import io;
+import str;
+
+// `&mut T` is a mutable borrow: writes are visible to the caller.
+fn bump(x: &mut int) -> void {
+    x += 1;
+}
+
+// `&T` is an immutable borrow: read-only, and binds to temporaries.
+fn readonly(x: &int) -> int {
+    return x + 1;
+}
+
+fn main() {
+    let n: int = 1;
+    bump(n);
+    bump(n);
+
+    io.println(str.fromInt(n));
+    io.println(str.fromInt(readonly(n)));
+    io.println(str.fromInt(readonly(5)));
+}

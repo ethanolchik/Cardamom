@@ -35,6 +35,9 @@ pub struct TypeChecker<'a> {
     function_has_valid_return: bool,
     current_assignment: Option<Expr>,
     current_initialiser: Option<Expr>,
+    /// The type an expression is expected to produce, used to infer things that carry
+    /// no type of their own: empty array literals and unannotated closure parameters.
+    current_expected_type: Option<Type>,
     in_static_context: bool,
     in_call: bool,
 
@@ -80,6 +83,7 @@ impl<'a> TypeChecker<'a> {
             function_has_valid_return: false,
             current_assignment: None,
             current_initialiser: None,
+            current_expected_type: None,
             in_static_context: false,
             in_call: false,
 
@@ -399,6 +403,146 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Looks through any borrows to the type actually being operated on.
+    ///
+    /// Members and indexing reach through a borrow: given `xs: &int[]`, `xs.len()` and
+    /// `xs[0]` operate on the array. C++ references behave the same way, so the
+    /// generated code needs no explicit dereference.
+    fn without_borrows(ty: &Type) -> Type {
+        match &ty.kind {
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => Self::without_borrows(inner),
+            _ => ty.clone(),
+        }
+    }
+
+    /// Whether `expr` denotes a place in memory, rather than a temporary value.
+    ///
+    /// Only an lvalue can be borrowed mutably: `#x` names something the callee can
+    /// write back into, whereas `#(a + b)` or `#f()` would write into a value that is
+    /// about to disappear. C++ enforces the same rule for binding `T&`.
+    fn is_lvalue(expr: &Expr) -> bool {
+        match expr {
+            Expr::Variable { .. }
+            | Expr::Index { .. }
+            | Expr::MemberAccess { .. }
+            | Expr::StaticAccess { .. } => true,
+            Expr::Grouping { expression } => Self::is_lvalue(expression),
+            Expr::Reference { object } | Expr::MutReference { object } => Self::is_lvalue(object),
+            _ => false,
+        }
+    }
+
+    /// Reports an error if `argument` cannot be borrowed mutably for a `#T` parameter.
+    fn check_mutable_borrow(&self, expected: &Type, argument: &Expr, actual: &Type) {
+        if !matches!(expected.kind, TypeKind::MutRef(_)) {
+            return;
+        }
+
+        // Passing an existing mutable borrow along is fine whatever it came from.
+        if matches!(actual.kind, TypeKind::MutRef(_)) {
+            return;
+        }
+
+        if Self::is_lvalue(argument) {
+            return;
+        }
+
+        let token = get_token(argument);
+        self.error_with_notes(
+            token.clone(),
+            &format!(
+                "Cannot mutably borrow a temporary value for a `{}` parameter",
+                expected.kind
+            ),
+            vec![Note::new(
+                "A `#` parameter writes back through the reference, so it needs a variable to write into".to_string(),
+                token.line,
+                token.span.clone(),
+                self.filename.clone(),
+            )],
+            vec![Help::new(
+                "Assign the value to a variable first, then pass that".to_string(),
+                token.line,
+                token.span.clone(),
+                self.filename.clone(),
+            )],
+        );
+    }
+
+    /// Reports an error if `target_ty` is an immutable borrow being written through.
+    fn check_assignable(&self, target_ty: &Type, token: &Token, description: &str) {
+        if matches!(target_ty.kind, TypeKind::Reference(_)) {
+            self.error_with_notes(
+                token.clone(),
+                &format!("Cannot assign through immutable borrow `{}`", target_ty.kind),
+                vec![Note::new(
+                    format!("{} is borrowed immutably with `&`", description),
+                    token.line,
+                    token.span.clone(),
+                    self.filename.clone(),
+                )],
+                vec![Help::new(
+                    format!(
+                        "Use a mutable borrow instead: `#{}`",
+                        target_ty.kind.to_string().trim_start_matches('&')
+                    ),
+                    token.line,
+                    token.span.clone(),
+                    self.filename.clone(),
+                )],
+            );
+        }
+    }
+
+    /// The parameter types of whatever `callee` refers to, if it can be resolved.
+    fn callee_param_types(&self, callee: &Expr) -> Option<Vec<Type>> {
+        let callee_ty = self.get_expr_type(callee)?;
+
+        match &callee_ty.kind {
+            TypeKind::Function(params, _) => Some(params.clone()),
+            // A bare function name in callee position is typed as `User(name)` and
+            // resolved against the function table.
+            TypeKind::User(name) => match self.symtable.lookup_function(name) {
+                Some(Symbol::Function { params, .. }) => Some(params.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The type the expression currently being checked is expected to have, if known.
+    ///
+    /// This comes either from an explicit expectation pushed by the surrounding
+    /// expression (a declared variable type, or a parameter type at a call site), or
+    /// from the variable being assigned to.
+    fn expected_type(&self) -> Option<Type> {
+        if let Some(ty) = &self.current_expected_type {
+            return Some(ty.clone());
+        }
+
+        match &self.current_assignment {
+            Some(Expr::Assignment { name, .. }) | Some(Expr::MemberAssignment { name, .. }) => {
+                match self.symtable.lookup_symbol(&name.lexeme) {
+                    Some(Symbol::Variable(_, _, ty, ..)) => Some(ty.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Runs `f` with `expected` as the expected type, restoring the previous one after.
+    fn with_expected_type<R>(
+        &mut self,
+        expected: Option<Type>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = std::mem::replace(&mut self.current_expected_type, expected);
+        let result = f(self);
+        self.current_expected_type = previous;
+        result
+    }
+
     /// Whether a member of `class_name` with the given visibility is reachable from the
     /// code currently being checked.
     fn is_member_visible(&self, visibility: &Visibility, class_name: &str) -> bool {
@@ -505,7 +649,7 @@ impl<'a> TypeChecker<'a> {
                 self.symtable.lookup_type(name).is_some()
                     && args.iter().all(|arg| self.type_exists(arg))
             }
-            TypeKind::Reference(inner) | TypeKind::Pointer(inner) | TypeKind::MutRef(inner) => {
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => {
                 // Check if the inner type exists
                 self.type_exists(inner)
             }
@@ -613,15 +757,11 @@ fn get_token(expr: &Expr) -> Token {
         | Expr::Variable { name: op }
         | Expr::Assignment { name: op, .. }
         | Expr::IndexAssignment { op, .. }
-        | Expr::PtrAssignment { op, .. }
         | Expr::MemberAssignment { name: op, .. }
         | Expr::MemberAccess { name: op, .. }
         | Expr::Call { paren: op, ..} => op.clone(),
         Expr::Grouping { expression } => get_token(expression),
-        Expr::Array { elements } => elements
-            .first()
-            .map(|expr| get_token(expr))
-            .unwrap_or_else(|| Token::dummy("[]")),
+        Expr::Array { token, .. } => token.clone(),
         Expr::Tuple { elements } => elements
             .first()
             .map(|expr| get_token(expr))
@@ -752,21 +892,6 @@ impl<'a> Visitor for TypeChecker<'a> {
                         )
                     }
                 }
-                TokenKind::Mul => {
-                    // dereference
-                    if let TypeKind::Pointer(inner) = right_ty.kind {
-                        *inner.clone()
-                    } else {
-                        self.error_token(
-                            &op,
-                            &format!("Cannot dereference non-pointer `{}`", right_ty.kind),
-                        );
-                        Type::new(
-                            op.clone(),
-                            TypeKind::User("error".to_string()),
-                        )
-                    }
-                }
                 _ => right_ty.clone(),
             };
 
@@ -869,10 +994,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                             TypeKind::User(name.lexeme.clone()),
                         ),
                     );
-                } else if let Some(_) = self.symtable.lookup_function(&name.lexeme) {
-                    // It's a function
+                } else if let Some(symbol) = self.symtable.lookup_function(&name.lexeme) {
                     if self.in_call {
-                        // Allow function references in call expressions
+                        // In callee position the name is resolved by `visit_call`, which
+                        // looks the function up again to report better diagnostics.
                         self.set_expr_type(
                             expr,
                             Type::new(
@@ -880,18 +1005,17 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 TypeKind::User(name.lexeme.clone()),
                             ),
                         );
-                    } else {
-                        self.error_token(
+                    } else if let Symbol::Function { params, return_type, .. } = symbol {
+                        // Used as a value, a function has its own function type, so it
+                        // can be stored in a variable or passed to another function.
+                        let function_ty = self.function_type(
                             name,
-                            &format!("`{}` is a function, not a variable", name.lexeme),
+                            params.clone(),
+                            return_type.clone(),
                         );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                name.clone(),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
+                        self.set_expr_type(expr, function_ty);
+                    } else {
+                        self.set_expr_type(expr, self.error_type(name));
                     }
                 } else {
                     self.error_token(
@@ -942,6 +1066,10 @@ impl<'a> Visitor for TypeChecker<'a> {
             // Check if the variable being assigned exists
             if let Some(sym) = self.symtable.lookup_symbol(&name.lexeme) {
                 if let Symbol::Variable(_, _, var_ty, ..) = sym {
+                    // Writing through an immutable borrow is not allowed; the generated
+                    // `const T&` would reject it too.
+                    self.check_assignable(var_ty, name, &format!("`{}`", name.lexeme));
+
                     // Check if the type of the variable exists
                     if !self.type_exists(var_ty) {
                         self.error_token(
@@ -1030,6 +1158,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                 .get_expr_type(value)
                 .cloned()
                 .unwrap_or_else(|| Type::new(name.clone(), TypeKind::User("error".to_string())));
+
+            let obj_ty = Self::without_borrows(&obj_ty);
 
             if let TypeKind::User(ref class_name) = obj_ty.kind {
                 if let Some(Symbol::Class { fields, .. }) = self.symtable.lookup_class(class_name)
@@ -1321,6 +1451,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 .get_expr_type(value)
                 .cloned()
                 .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
+            let obj_ty = Self::without_borrows(&obj_ty);
 
             if let TypeKind::Array(elem_ty, _) = obj_ty.kind {
                 // index must be int
@@ -1368,55 +1499,28 @@ impl<'a> Visitor for TypeChecker<'a> {
         }
     }
 
-    fn visit_ptr_assignment(&mut self, expr: &Expr) {
-        if let Expr::PtrAssignment { object, value, op } = expr {
-            object.accept(self);
-            value.accept(self);
-
-            let token = get_token(object);
-
-            let obj_ty = self
-                .get_expr_type(object)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-            let rhs_ty = self
-                .get_expr_type(value)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-
-            if let TypeKind::Pointer(inner_ty) = obj_ty.kind {
-                if !rhs_ty.is_compatible_with(&inner_ty) {
-                    self.error_token(
-                        &op,
-                        &format!(
-                            "Pointer assignment mismatch. Expected `{}`, got `{}`",
-                            inner_ty.kind, rhs_ty.kind
-                        ),
-                    );
-                }
-                self.set_expr_type(expr, *inner_ty.clone());
-            } else {
-                self.error_token(
-                    &op,
-                    "Cannot pointer-assign to non-pointer type",
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(token.clone(), TypeKind::User("error".to_string())),
-                );
-            }
-        }
-    }
-
     fn visit_call(&mut self, expr: &Expr) {
         if let Expr::Call { callee, arguments, paren } = expr {
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
+
+            // Knowing the parameter types up front lets each argument be checked against
+            // what it is expected to be, so `f([])` can infer the empty literal.
+            let expected_params = self.callee_param_types(callee);
+
             let arg_tys: Vec<Type> = arguments
                 .iter()
-                .map(|a| {
-                    a.accept(self);
+                .enumerate()
+                .map(|(i, a)| {
+                    let expected = expected_params
+                        .as_ref()
+                        .and_then(|params| params.get(i).cloned());
+
+                    self.with_expected_type(expected, |checker| {
+                        a.accept(checker);
+                    });
+
                     self.get_expr_type(a).cloned().unwrap_or_else(|| {
                         Type::new(
                             paren.clone(),
@@ -1464,7 +1568,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                     } else {
                         // Create a substitution map for monomorphization
                         let mut subs: HashMap<String, TypeKind> = HashMap::new();
-                        for (expected, actual) in param_tys.iter().zip(arg_tys.iter()) {
+                        for (i, (expected, actual)) in param_tys.iter().zip(arg_tys.iter()).enumerate() {
+                            if let Some(argument) = arguments.get(i) {
+                                self.check_mutable_borrow(expected, argument, actual);
+                            }
+
                             if !actual.is_compatible_with(expected) {
                                 self.error_with_notes(
                                     actual.name.clone(),
@@ -1505,12 +1613,33 @@ impl<'a> Visitor for TypeChecker<'a> {
                                     ),
                                 );
                             } else {
-                                for (expected, actual) in params.iter().zip(arg_tys.iter()) {
+                                for (i, (expected, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
+                                    if let Some(argument) = arguments.get(i) {
+                                        self.check_mutable_borrow(expected, argument, actual);
+                                    }
+
                                     if !actual.is_compatible_with(expected) {
-                                        self.error_token(&expected.name, &format!(
-                                            "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
-                                            name, expected.kind, actual.kind
-                                        ));
+                                        // Point at the offending argument, not at the
+                                        // parameter it failed to match.
+                                        let token = arguments
+                                            .get(i)
+                                            .map(|argument| get_token(argument))
+                                            .unwrap_or_else(|| paren.clone());
+
+                                        self.error_with_notes(
+                                            token,
+                                            &format!(
+                                                "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
+                                                name, expected.kind, actual.kind
+                                            ),
+                                            vec![Note::new(
+                                                format!("Parameter declared as `{}`", expected.kind),
+                                                expected.name.line,
+                                                expected.name.span.clone(),
+                                                self.filename.clone(),
+                                            )],
+                                            vec![],
+                                        );
                                     }
                                 }
                                 self.set_expr_type(expr, return_type.clone());
@@ -1707,6 +1836,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
                 Type::new(name.clone(), TypeKind::User("error".to_string()))
             });
+            let obj_ty = Self::without_borrows(&obj_ty);
 
             match &obj_ty.kind {
                 TypeKind::Module(module_name) => {
@@ -1931,6 +2061,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             let idx_ty = self.get_expr_type(index).cloned().unwrap_or_else(|| {
                 Type::new(name.clone(), TypeKind::User("error".to_string()))
             });
+            let obj_ty = Self::without_borrows(&obj_ty);
 
             if let TypeKind::Array(elem_ty, _) = obj_ty.kind {
                 if idx_ty.kind != TypeKind::Int {
@@ -2064,39 +2195,6 @@ impl<'a> Visitor for TypeChecker<'a> {
         }
     }    
 
-    fn visit_dereference(&mut self, expr: &Expr) {
-        // Similar to unary star
-        if let Expr::Dereference { object } = expr {
-            object.accept(self);
-
-            let name = get_token(object);
-            let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(
-                    name.clone(),
-                    TypeKind::User("error".to_string()),
-                )
-            });
-
-            obj_ty.derived.push(Derived::Ptr);
-
-            if let TypeKind::Pointer(inner) = obj_ty.kind {
-                self.set_expr_type(expr, *inner.clone());
-            } else {
-                self.error_token(&name,&format!(
-                    "Cannot dereference non-pointer type `{}`",
-                    obj_ty.kind
-                ));
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
-                );
-            }
-        }
-    }
-
     fn visit_reference(&mut self, expr: &Expr) {
         if let Expr::Reference { object } = expr {
             object.accept(self);
@@ -2167,18 +2265,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             // If we are, then we can lookup the variable we are assigning to
             // and check if the type of the closure matches the expected type
             // If we are not in an assignment, then we should expect type annotations on each parameter.
-            let expected_type: Option<Type> = match &self.current_assignment {
-                Some(Expr::Assignment { name, .. })
-                | Some(Expr::MemberAssignment { name, .. }) => {
-                    match self.symtable.lookup_symbol(&name.lexeme) {
-                        // Only variables carry a declared type we can infer from; a closure
-                        // assigned to anything else simply has no expected type.
-                        Some(Symbol::Variable(_, _, ty, ..)) => Some(ty.clone()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
+            let expected_type: Option<Type> = self.expected_type();
 
             // Work out the type of every closure parameter.
             //
@@ -2302,12 +2389,23 @@ impl<'a> Visitor for TypeChecker<'a> {
     }    
 
     fn visit_array(&mut self, expr: &Expr) {
-        if let Expr::Array { elements } = expr {
-            let mut elem_tys = Vec::new();
-
+        if let Expr::Array { elements, .. } = expr {
             let name = get_token(expr);
+
+            // If we know what the array is expected to be, its element type tells the
+            // elements what they should be. That is what lets `[[], []]` work when the
+            // declared type is `int[][]`.
+            let expected = self.expected_type();
+            let expected_element = match expected.as_ref().map(|t| &t.kind) {
+                Some(TypeKind::Array(element, _)) => Some((**element).clone()),
+                _ => None,
+            };
+
+            let mut elem_tys = Vec::new();
             for e in elements {
-                e.accept(self);
+                self.with_expected_type(expected_element.clone(), |checker| {
+                    e.accept(checker);
+                });
 
                 let ty = self.get_expr_type(e).cloned().unwrap_or_else(|| {
                     Type::new(name.clone(), TypeKind::User("error".to_string()))
@@ -2316,11 +2414,35 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
 
             if elem_tys.is_empty() {
-                self.error_token(&name, "Cannot infer the type of an empty array literal");
-                self.set_expr_type(
-                    expr,
-                    Type::new(name, TypeKind::User("error".to_string())),
-                );
+                // An empty literal carries no element type, so it can only be checked
+                // against an expected one.
+                match expected {
+                    Some(expected) if matches!(expected.kind, TypeKind::Array(..)) => {
+                        self.set_expr_type(expr, expected);
+                    }
+                    _ => {
+                        self.error_with_notes(
+                            name.clone(),
+                            "Cannot infer the type of an empty array literal",
+                            vec![Note::new(
+                                "There are no elements to infer an element type from".to_string(),
+                                name.line,
+                                name.span.clone(),
+                                self.filename.clone(),
+                            )],
+                            vec![Help::new(
+                                "Annotate the target, e.g. `let xs: int[] = [];`".to_string(),
+                                name.line,
+                                name.span.clone(),
+                                self.filename.clone(),
+                            )],
+                        );
+                        self.set_expr_type(
+                            expr,
+                            Type::new(name, TypeKind::User("error".to_string())),
+                        );
+                    }
+                }
             } else {
                 let first_ty = &elem_tys[0];
 
@@ -2621,7 +2743,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                 // an unrelated expression later on cannot pick up a stale expectation.
                 let old_assignment = self.current_assignment.take();
                 self.current_assignment = Some(Expr::Assignment { name: name.clone(), value: init.clone(), op: Token::dummy("=") });
-                init.accept(self);
+                self.with_expected_type(Some(type_.clone()), |checker| {
+                    init.accept(checker);
+                });
                 self.current_assignment = old_assignment;
                 self.current_initialiser = None;
                 self.symtable.end_scope();

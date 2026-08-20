@@ -1,0 +1,28 @@
+import io;
+import str;
+
+public class C(private n: int) {
+    public pure() -> int {
+        return this.n;
+    }
+
+    public mutating() -> int {
+        this.n += 1;
+        return this.n;
+    }
+
+    // Calls a mutating method, so it is not const either.
+    public callsMutating() -> int {
+        return this.mutating();
+    }
+
+    public callsPure() -> int {
+        return this.pure();
+    }
+}
+
+fn main() {
+    let c: C = new C(1);
+    io.println(str.fromInt(c.callsMutating()));
+    io.println(str.fromInt(c.callsPure()));
+}

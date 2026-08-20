@@ -237,15 +237,14 @@ impl<'a> CallCollector<'a> {
             }
             Expr::Unary { right, .. } => self.walk_expr(right),
             Expr::Grouping { expression } => self.walk_expr(expression),
-            Expr::Array { elements } | Expr::Tuple { elements } => {
+            Expr::Array { elements, .. } | Expr::Tuple { elements } => {
                 for element in elements {
                     self.walk_expr(element);
                 }
             }
             Expr::Assignment { value, .. }
             | Expr::MemberAssignment { value, .. }
-            | Expr::StaticAssignment { value, .. }
-            | Expr::PtrAssignment { value, .. } => self.walk_expr(value),
+            | Expr::StaticAssignment { value, .. } => self.walk_expr(value),
             Expr::IndexAssignment { object, index, value, .. } => {
                 self.walk_expr(object);
                 self.walk_expr(index);
@@ -259,7 +258,6 @@ impl<'a> CallCollector<'a> {
                 self.walk_expr(index);
             }
             Expr::Cast { object, .. }
-            | Expr::Dereference { object }
             | Expr::Reference { object }
             | Expr::MutReference { object } => self.walk_expr(object),
             Expr::ClassInit { arguments, .. } => {
