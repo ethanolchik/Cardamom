@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::token::{Token, TokenKind};
-use crate::ty::{Type, TypeKind, MonomorphSignature, MonomorphTable};
+use crate::ty::{Type, TypeKind};
 use crate::utils::symtable::{SymbolTable, Symbol, Visibility};
 use crate::errors::{Error, Note, Help};
 
@@ -17,7 +17,6 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 /// - Stores an `ExprTypeMap` so we know each expression's resulting `Type`.
 /// - Tracks the current filename and source code for better error messages.
 /// - Also tracks the current class or function context (for `this`, access checks, etc.).
-/// - Contains a `MonomorphTable` for storing specialized generic types.
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
@@ -67,7 +66,6 @@ pub struct TypeChecker<'a> {
     /// relaxes the requirement to have a `main`.
     is_library: bool,
 
-    pub monomorph_table: MonomorphTable,
 }
 
 /// A generic call appearing inside a generic function.
@@ -137,7 +135,6 @@ impl<'a> TypeChecker<'a> {
             module_name: "main".to_string(),
             is_library: false,
 
-            monomorph_table: MonomorphTable::new(),
         }
     }
 
@@ -347,9 +344,10 @@ impl<'a> TypeChecker<'a> {
     fn collect_declarations(&mut self, module: &Module) {
         for stmt in &module.statements {
             match &**stmt {
-                Stmt::Class { name, .. } => {
+                Stmt::Class { name, generics, .. } => {
                     let class_name = name.lexeme.clone();
-                    let sym = Symbol::new_class(name.clone());
+                    let generic_names = generics.iter().map(|g| g.lexeme.clone()).collect();
+                    let sym = Symbol::new_generic_class(name.clone(), generic_names);
                     self.symtable.declare_class(&class_name, sym);
                 }
                 Stmt::Function {
@@ -389,8 +387,10 @@ impl<'a> TypeChecker<'a> {
     // Class fields & methods
     fn define_class_members(&mut self, module: &Module) {
         for stmt in &module.statements {
-            if let Stmt::Class { name, fields, methods, .. } = &**stmt {
+            if let Stmt::Class { name, generics, fields, methods, .. } = &**stmt {
                 let class_name = name.lexeme.clone();
+                let class_generics: Vec<String> =
+                    generics.iter().map(|g| g.lexeme.clone()).collect();
 
                 // Visibility and `static` are read off each member's own modifiers, so
                 // any combination (e.g. `private static`) is representable.
@@ -399,7 +399,7 @@ impl<'a> TypeChecker<'a> {
                     if let Stmt::Variable { name: field_name, type_, modifiers, .. } = &**f {
                         field_declarations.push((
                             field_name.clone(),
-                            type_.clone(),
+                            Self::generalise(type_, &class_generics),
                             self.visibility_of(modifiers),
                             is_static_member(modifiers),
                         ));
@@ -412,13 +412,13 @@ impl<'a> TypeChecker<'a> {
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
+                                param_types.push(Self::generalise(type_, &class_generics));
                             }
                         }
                         method_declarations.push((
                             method_name.clone(),
                             param_types,
-                            return_type.clone(),
+                            Self::generalise(return_type, &class_generics),
                             self.visibility_of(modifiers),
                             is_static_member(modifiers),
                         ));
@@ -426,9 +426,31 @@ impl<'a> TypeChecker<'a> {
                 }
 
                 // Now update the class symbol with all collected declarations
+                // Constructor parameters are the header fields, in source order.
+                let constructor_param_types: Vec<Type> = fields
+                    .iter()
+                    .filter_map(|f| match &**f {
+                        Stmt::Variable { type_, modifiers, .. }
+                            if modifiers.contains(&Modifier::Constructor) =>
+                        {
+                            Some(Self::generalise(type_, &class_generics))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
                 let mut symbol_declarations = Vec::new();
                 if let Some(class_sym) = self.symtable.lookup_class_mut(&class_name) {
-                    if let Symbol::Class { fields, methods, fully_defined, .. } = class_sym {
+                    if let Symbol::Class {
+                        fields,
+                        methods,
+                        fully_defined,
+                        constructor_params,
+                        constructor_param_count,
+                        ..
+                    } = class_sym {
+                        *constructor_param_count = constructor_param_types.len();
+                        *constructor_params = constructor_param_types;
                         for (field_name, field_type, visibility, is_static) in field_declarations {
                             fields.insert(
                                 field_name.lexeme.clone(),
@@ -633,6 +655,97 @@ impl<'a> TypeChecker<'a> {
         subs
     }
 
+    /// Generalises explicitly written type arguments against the enclosing function or
+    /// class, so that `new Box<T>(..)` inside `wrap<T>` refers to `wrap`'s `T` rather
+    /// than to a class called `T`.
+    fn generalise_explicit(&self, types: &[Type]) -> Vec<Type> {
+        types
+            .iter()
+            .map(|ty| Self::generalise(ty, &self.current_function_generics))
+            .collect()
+    }
+
+    /// Binds a class's type parameters to the arguments of one of its instantiations.
+    fn class_substitution(
+        &self,
+        class_name: &str,
+        arguments: &[Type],
+    ) -> HashMap<String, TypeKind> {
+        let Some(Symbol::Class { generics, .. }) = self.symtable.lookup_class(class_name) else {
+            return HashMap::new();
+        };
+
+        generics
+            .iter()
+            .cloned()
+            .zip(arguments.iter().map(|argument| argument.kind.clone()))
+            .collect()
+    }
+
+    /// Key under which a class's instantiations are recorded.
+    ///
+    /// Functions and classes share one instantiation graph so that transitive uses are
+    /// resolved together, so class entries are namespaced to keep them distinct.
+    fn class_key(name: &str) -> String {
+        format!("class {}", name)
+    }
+
+    /// Key under which a function's instantiations are recorded.
+    fn function_key(name: &str) -> String {
+        name.to_string()
+    }
+
+    /// Records that a generic class is used at a particular instantiation.
+    fn record_class_instantiation(
+        &mut self,
+        name: &str,
+        generics: &[String],
+        subs: &HashMap<String, TypeKind>,
+    ) {
+        if generics.is_empty() {
+            return;
+        }
+
+        let arguments: Vec<TypeKind> = generics
+            .iter()
+            .map(|parameter| {
+                subs.get(parameter)
+                    .cloned()
+                    .unwrap_or(TypeKind::User("error".to_string()))
+            })
+            .collect();
+
+        // A use inside a generic function is not concrete yet; the fixpoint resolves it
+        // once the enclosing function's own instantiations are known.
+        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+            if let Some(caller) = self.current_function.clone() {
+                let site = GenericCallSite {
+                    caller_module: self.module_name.clone(),
+                    caller: Self::function_key(&caller),
+                    callee_module: self.module_name.clone(),
+                    callee: Self::class_key(name),
+                    arguments,
+                };
+
+                if !self.generic_call_sites.contains(&site) {
+                    self.generic_call_sites.push(site);
+                }
+            }
+            return;
+        }
+
+        let instantiations = self
+            .instantiations
+            .entry(self.module_name.clone())
+            .or_default()
+            .entry(Self::class_key(name))
+            .or_default();
+
+        if !instantiations.contains(&arguments) {
+            instantiations.push(arguments);
+        }
+    }
+
     /// Records that `expr` calls a generic function at a particular instantiation, so
     /// code generation knows which specialisation to emit and to call.
     fn record_instantiation(
@@ -694,12 +807,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Applies a type parameter substitution to a bare `TypeKind`.
-    fn substitute_kind(kind: &TypeKind, subs: &HashMap<String, TypeKind>) -> TypeKind {
-        Type::new(Token::dummy("<type>"), kind.clone())
-            .apply_substitution(subs)
-            .kind
-    }
 
     /// Whether a type argument is still generic or came from an earlier error.
     fn is_unresolved(&self, kind: &TypeKind) -> bool {
@@ -719,6 +826,9 @@ impl<'a> TypeChecker<'a> {
                     || self.is_unresolved(&ret.kind)
             }
             TypeKind::Tuple(elements) => elements.iter().any(|e| self.is_unresolved(&e.kind)),
+            TypeKind::GenericInstance(_, args) => {
+                args.iter().any(|a| self.is_unresolved(&a.kind))
+            }
             _ => false,
         }
     }
@@ -749,6 +859,11 @@ impl<'a> TypeChecker<'a> {
             ),
             TypeKind::Tuple(elements) => TypeKind::Tuple(
                 elements.iter().map(|e| Self::generalise(e, generics)).collect(),
+            ),
+            // `Box<T>` mentions the type parameter in its arguments.
+            TypeKind::GenericInstance(name, args) => TypeKind::GenericInstance(
+                name.clone(),
+                args.iter().map(|a| Self::generalise(a, generics)).collect(),
             ),
             other => other.clone(),
         };
@@ -793,6 +908,15 @@ impl<'a> TypeChecker<'a> {
             }
             (TypeKind::Tuple(p_elements), TypeKind::Tuple(a_elements)) => {
                 for (p, a) in p_elements.iter().zip(a_elements.iter()) {
+                    Self::infer_substitution(p, a, subs);
+                }
+            }
+            // `Box<T>` matched against `Box<int>` infers `T = int`.
+            (
+                TypeKind::GenericInstance(p_name, p_args),
+                TypeKind::GenericInstance(a_name, a_args),
+            ) if p_name == a_name => {
+                for (p, a) in p_args.iter().zip(a_args.iter()) {
                     Self::infer_substitution(p, a, subs);
                 }
             }
@@ -962,25 +1086,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Given a generic type like `Vec<T>` plus a substitution map T->int,
-    /// produce a specialized type `Vec<int>`, and record it in the monomorph table.
-    fn instantiate_generic_type(&mut self, original: &Type, subs: &HashMap<String, TypeKind>) -> Type {
-        // 1) Apply the substitution e.g. `Vec<T>` => `Vec<int>`.
-        let specialized = original.apply_substitution(subs);
-
-        // 2) If specialized is a GenericInstance("Vec", [int]), store it in monomorph_table
-        if let TypeKind::GenericInstance(ref base, ref args) = specialized.kind {
-            let sig = MonomorphSignature {
-                name: base.clone(),
-                arg_types: args.clone(),
-            };
-            return self.monomorph_table.get_or_insert(sig, specialized);
-        }
-
-        // If it's not actually a generic instance (like T -> int but original was T),
-        // just return the substituted type.
-        specialized
-    }
 
     /// Creates an `Error` object based on a `Token` (for line/col info) and appends it to `self.errors`.
     fn error_token(&self, token: &Token, message: &str) {
@@ -2103,10 +2208,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                 } else {
                     generics
                 };
+                let explicit = self.generalise_explicit(explicit);
 
                 let result = self.check_call_signature(
                     expr, &token, &module, &name, &function.generics, &function.params,
-                    &function.return_type, explicit, arguments, &arg_tys,
+                    &function.return_type, &explicit, arguments, &arg_tys,
                 );
                 self.set_expr_type(expr, result);
                 return;
@@ -2184,10 +2290,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                             } else {
                                 generics
                             };
+                            let explicit = self.generalise_explicit(explicit);
 
                             let result = self.check_call_signature(
                                 expr, &token, &module, name, &fn_generics, &params,
-                                &return_type, explicit, arguments, &arg_tys,
+                                &return_type, &explicit, arguments, &arg_tys,
                             );
                             self.set_expr_type(expr, result);
                         } else {
@@ -2241,6 +2348,19 @@ impl<'a> Visitor for TypeChecker<'a> {
                 Type::new(name.clone(), TypeKind::User("error".to_string()))
             });
             let obj_ty = Self::without_borrows(&obj_ty);
+
+            // A member of `Box<int>` is a member of `Box` with `T` bound to `int`, so
+            // reduce to the class and remember the substitution to apply.
+            let (obj_ty, class_subs) = match &obj_ty.kind {
+                TypeKind::GenericInstance(class_name, arguments) => {
+                    let subs = self.class_substitution(class_name, arguments);
+                    (
+                        Type::new(obj_ty.name.clone(), TypeKind::User(class_name.clone())),
+                        subs,
+                    )
+                }
+                _ => (obj_ty, HashMap::new()),
+            };
 
             match &obj_ty.kind {
                 TypeKind::Module(module_name) => {
@@ -2399,7 +2519,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                             );
                         }
 
-                        self.set_expr_type(expr, field_ty.clone());
+                        self.set_expr_type(expr, field_ty.apply_substitution(&class_subs));
                     } else if let Some(method) = methods.get(&name.lexeme) {
                         if let Symbol::Function {
                             params,
@@ -2425,7 +2545,13 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                             let fn_ty = Type::new(
                                 name.clone(),
-                                TypeKind::Function(params.clone(), Box::new(return_type.clone())),
+                                TypeKind::Function(
+                                    params
+                                        .iter()
+                                        .map(|p| p.apply_substitution(&class_subs))
+                                        .collect(),
+                                    Box::new(return_type.apply_substitution(&class_subs)),
+                                ),
                             );
                             self.set_expr_type(expr, fn_ty);
                         }
@@ -2543,64 +2669,110 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_class_init(&mut self, expr: &Expr) {
-        if let Expr::ClassInit { name, arguments } = expr {
-            // Look up the class
-            if let Some(Symbol::Class { fields, fully_defined, .. }) =
-                self.symtable.lookup_class(&name.lexeme)
-            {
-                // If not fully defined => error
-                if !fully_defined {
-                    self.error_token(
-                        name,
-                        &format!("Class `{}` is not fully defined yet", name.lexeme),
-                    );
-                }
-    
-                // Check argument count
-                // If we stored `constructor_param_count`, do:
-                //   if arguments.len() != constructor_param_count => error
-                //
-                // But if you're just using the length of `fields`,
-                // we can do:
-                let expected_args = fields.iter().filter(|(_, ty)| ty.0.is_constructor).count();
-                let actual_args = arguments.len();
-                if actual_args != expected_args {
-                    self.error_token(
-                        name,
-                        &format!(
-                            "Constructor for `{}` expects {} arguments, but {} provided",
-                            name.lexeme, expected_args, actual_args
-                        ),
-                    );
-                }
-    
-                // Type check each argument
-                for arg in arguments {
-                    arg.accept(self);
-                }
-    
-                // Finally, set the expression type to the class type
-                let class_ty = Type::new(
-                    name.clone(),
-                    TypeKind::User(name.lexeme.clone()),
-                );
-                self.set_expr_type(expr, class_ty);
-    
-            } else {
+        if let Expr::ClassInit { name, generics, arguments } = expr {
+            for arg in arguments {
+                arg.accept(self);
+            }
+
+            let arg_tys: Vec<Type> = arguments
+                .iter()
+                .map(|a| {
+                    self.get_expr_type(a)
+                        .cloned()
+                        .unwrap_or_else(|| self.error_type(&get_token(a)))
+                })
+                .collect();
+
+            let Some(Symbol::Class {
+                generics: class_generics,
+                constructor_params,
+                fully_defined,
+                ..
+            }) = self.symtable.lookup_class(&name.lexeme)
+            else {
+                self.error_token(name, &format!("Unknown class `{}`", name.lexeme));
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            };
+
+            if !fully_defined {
                 self.error_token(
                     name,
-                    &format!("Unknown class `{}`", name.lexeme),
-                );
-                self.set_expr_type(
-                    expr,
-                    Type::new(
-                        name.clone(),
-                        TypeKind::User("error".to_string()),
-                    ),
+                    &format!("Class `{}` is not fully defined yet", name.lexeme),
                 );
             }
+
+            let class_generics = class_generics.clone();
+
+            let constructor_params = constructor_params.clone();
+
+            if arg_tys.len() != constructor_params.len() {
+                self.error_token(
+                    name,
+                    &format!(
+                        "Constructor for `{}` expects {} argument(s), but {} provided",
+                        name.lexeme,
+                        constructor_params.len(),
+                        arg_tys.len()
+                    ),
+                );
+                self.set_expr_type(expr, self.error_type(name));
+                return;
+            }
+
+            // Type arguments are either written out or deduced from the constructor
+            // arguments, exactly as for a generic function call.
+            let explicit = self.generalise_explicit(generics);
+            let subs = self.resolve_generics(
+                name,
+                &name.lexeme,
+                &class_generics,
+                &constructor_params,
+                &explicit,
+                &arg_tys,
+            );
+
+            for (i, (expected, actual)) in constructor_params.iter().zip(arg_tys.iter()).enumerate() {
+                let expected = expected.apply_substitution(&subs);
+
+                if !actual.is_compatible_with(&expected) {
+                    let token = arguments
+                        .get(i)
+                        .map(|argument| get_token(argument))
+                        .unwrap_or_else(|| name.clone());
+
+                    self.error_token(&token, &format!(
+                        "Constructor argument mismatch for `{}`: expected `{}`, got `{}`",
+                        name.lexeme, expected.kind, actual.kind
+                    ));
+                }
+            }
+
+            let class_ty = if class_generics.is_empty() {
+                Type::new(name.clone(), TypeKind::User(name.lexeme.clone()))
+            } else {
+                let arguments: Vec<Type> = class_generics
+                    .iter()
+                    .map(|parameter| {
+                        Type::new(
+                            name.clone(),
+                            subs.get(parameter)
+                                .cloned()
+                                .unwrap_or(TypeKind::User("error".to_string())),
+                        )
+                    })
+                    .collect();
+
+                Type::new(
+                    name.clone(),
+                    TypeKind::GenericInstance(name.lexeme.clone(), arguments),
+                )
+            };
+
+            self.record_class_instantiation(&name.lexeme, &class_generics, &subs);
+            self.set_expr_type(expr, class_ty);
         }
-    }    
+    }
 
     fn visit_reference(&mut self, expr: &Expr) {
         if let Expr::Reference { object } = expr {
@@ -3030,8 +3202,14 @@ impl<'a> Visitor for TypeChecker<'a> {
             // We'll track if we ever see a matching return
             self.function_has_valid_return = false;
 
-            // Insert generics
-            let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+            // Insert generics. A method also sees the type parameters of the class it
+            // belongs to, which are already in `current_function_generics`.
+            let mut generic_names: Vec<String> = self.current_function_generics.clone();
+            for g in generics {
+                if !generic_names.contains(&g.lexeme) {
+                    generic_names.push(g.lexeme.clone());
+                }
+            }
 
             // The body is checked with type parameters marked as such, so the return
             // type has to be generalised the same way for `return` to match.
@@ -3152,6 +3330,11 @@ impl<'a> Visitor for TypeChecker<'a> {
             ..
         } = stmt
         {
+            // Inside a generic function or class, a declared type may name one of the
+            // type parameters in scope, so mark those before anything compares against
+            // it.
+            let type_ = &Self::generalise(type_, &self.current_function_generics);
+
             if let Some(init) = initialiser {
                 // Temporarily define the variable
                 self.symtable.begin_scope();
@@ -3312,13 +3495,26 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_class(&mut self, stmt: &Stmt) {
-        if let Stmt::Class { name, fields, methods, .. } = stmt
+        if let Stmt::Class { name, generics, fields, methods, .. } = stmt
         {
             // Set the current_class so we know which class we're in
             let class_name = name.lexeme.clone();
             self.current_class = Some(class_name.clone());
             self.class_stack.push(class_name.clone());
-    
+
+            // The class's type parameters are in scope throughout its body, so `T` is a
+            // usable type name in fields and methods.
+            let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+            self.symtable.begin_scope();
+            for g in generics {
+                self.symtable
+                    .declare_symbol(&g.lexeme, Symbol::new_generic_param(g.clone()));
+            }
+            let old_generics = std::mem::replace(
+                &mut self.current_function_generics,
+                generic_names.clone(),
+            );
+
             for field in fields {
                 field.accept(self); 
             }
@@ -3341,6 +3537,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                 self.symtable.end_scope();
             }
 
+            self.current_function_generics = old_generics;
+            self.symtable.end_scope();
             self.class_stack.pop();
             self.current_class = self.class_stack.last().cloned();
         }

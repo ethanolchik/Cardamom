@@ -1,0 +1,6 @@
+public class Plain(private n: int) {}
+
+fn main() {
+    // Constructor argument has the wrong type.
+    new Plain("bad");
+}

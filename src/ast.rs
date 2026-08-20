@@ -148,6 +148,9 @@ pub enum Expr {
     },
     ClassInit {
         name: Token,
+        /// Explicit type arguments, as in `new Box<int>(..)`. Empty when they are to be
+        /// inferred from the constructor arguments.
+        generics: Vec<Type>,
         arguments: Vec<Box<Expr>>,
     },
     Reference {

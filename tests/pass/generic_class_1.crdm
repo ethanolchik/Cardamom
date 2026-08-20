@@ -1,0 +1,42 @@
+import io;
+import str;
+
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+
+    public orElse(fallback: T) -> T {
+        return this.value;
+    }
+}
+
+public class Pair<A, B>(private left: A, private right: B) {
+    public first() -> A {
+        return this.left;
+    }
+
+    public second() -> B {
+        return this.right;
+    }
+}
+
+// A generic function over a generic class.
+fn unwrap<T>(b: Box<T>) -> T {
+    return b.get();
+}
+
+fn main() {
+    let bi: Box<int> = new Box<int>(5);
+    let bs: Box<string> = new Box("inferred");   // type argument inferred
+
+    io.println(str.fromInt(bi.get()));
+    io.println(bs.get());
+    io.println(bs.orElse("fallback"));
+
+    let p: Pair<int, string> = new Pair(1, "two");
+    io.println(str.fromInt(p.first()));
+    io.println(p.second());
+
+    io.println(str.fromInt(unwrap(bi)));
+}

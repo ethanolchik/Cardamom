@@ -1,0 +1,8 @@
+public class Box<T>(private value: T) {
+    public get() -> T { return this.value; }
+}
+
+fn main() {
+    // Too many type arguments.
+    new Box<int, string>(1);
+}

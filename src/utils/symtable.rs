@@ -38,10 +38,15 @@ pub enum Symbol {
     Class {
         id: SymbolId,
         name: Token,
+        /// Names of the class's type parameters, in declaration order.
+        generics: Vec<String>,
         fields: HashMap<String, (Type, Visibility, bool)>,
         methods: HashMap<String, Symbol>,
         fully_defined: bool,
         constructor_param_count: usize,
+        /// Constructor parameter types in declaration order. `fields` is a map, so it
+        /// cannot preserve the order the constructor needs.
+        constructor_params: Vec<Type>,
     },
 }
 
@@ -84,14 +89,21 @@ impl Symbol {
     }
 
     pub fn new_class(name: Token) -> Self {
+        Self::new_generic_class(name, Vec::new())
+    }
+
+    /// A class declaration together with its type parameter names.
+    pub fn new_generic_class(name: Token, generics: Vec<String>) -> Self {
         let id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::SeqCst);
         Symbol::Class {
             id,
             name,
+            generics,
             fields: HashMap::new(),
             methods: HashMap::new(),
             fully_defined: false,
             constructor_param_count: 0,
+            constructor_params: Vec::new(),
         }
     }
 

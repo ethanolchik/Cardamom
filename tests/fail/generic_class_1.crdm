@@ -1,0 +1,8 @@
+public class Box<T>(private value: T) {
+    public get() -> T { return this.value; }
+}
+
+fn main() {
+    // The argument does not match the given type argument.
+    new Box<int>("wrong");
+}

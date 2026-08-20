@@ -146,8 +146,37 @@ Generics are monomorphised: each distinct set of type arguments produces its own
 specialised function, so the generated C++ contains no templates and type errors are
 reported by Cardamom rather than by the C++ compiler.
 
-Instantiation is transitive and crosses module boundaries, and only the instantiations a
-program actually uses are emitted.
+Classes take type parameters too:
+
+```cpp
+public class Option<T>(private value: T, private present: int) {
+    public unwrapOr(fallback: T) -> T {
+        if (this.present == 1) {
+            return this.value;
+        }
+        return fallback;
+    }
+}
+
+fn some<T>(v: T) -> Option<T> {
+    return new Option<T>(v, 1);
+}
+
+fn main() {
+    let a: Option<int> = some(41);
+    let b: Option<string> = new Option("", 0);   // type argument inferred
+
+    a.unwrapOr(0);
+    b.unwrapOr("empty");
+}
+```
+
+Instantiation is transitive and only the instantiations a program actually uses are
+emitted, so `Box<T>` used inside `wrap<T>` produces exactly the specialisations `wrap`
+is called at.
+
+Generic functions cross module boundaries; classes do not yet, since only functions are
+exported.
 
 ## Functions as values
 

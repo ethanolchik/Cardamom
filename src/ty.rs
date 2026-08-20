@@ -49,37 +49,8 @@ impl Display for TypeKind {
     }
 }
 
-/// A unique “signature” that identifies a single instantiation, e.g. "Vec<int>".
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
-pub struct MonomorphSignature {
-    pub name: String,       // "Vec"
-    pub arg_types: Vec<Type>, // [int]
-}
 
-/// Tracks each known instantiation of a generic type.
-/// For classes, you'd store Symbol::Class; for functions, Symbol::Function, etc.
-#[derive(Clone, Debug)]
-pub struct MonomorphTable {
-    pub instances: HashMap<MonomorphSignature, Type>,
-}
 
-impl MonomorphTable {
-    pub fn new() -> Self {
-        MonomorphTable {
-            instances: HashMap::new(),
-        }
-    }
-
-    /// Insert or retrieve a generic instantiation.
-    pub fn get_or_insert(&mut self, sig: MonomorphSignature, specialized_type: Type) -> Type {
-        if let Some(existing) = self.instances.get(&sig) {
-            existing.clone()
-        } else {
-            self.instances.insert(sig.clone(), specialized_type.clone());
-            specialized_type
-        }
-    }
-}
 
 impl TypeKind {
     pub fn inner_type(&self) -> Option<&Type> {
@@ -299,6 +270,14 @@ impl Type {
         match (&self.kind, &other.kind) {
             (TypeKind::User(u1), TypeKind::User(u2)) => {
                 return u1 == u2;
+            }
+            // Two instantiations of a generic class agree if they are the same class
+            // with matching type arguments. Structural comparison is required because
+            // `Type` equality includes the token a type was written at.
+            (TypeKind::GenericInstance(n1, a1), TypeKind::GenericInstance(n2, a2)) => {
+                return n1 == n2
+                    && a1.len() == a2.len()
+                    && a1.iter().zip(a2.iter()).all(|(x, y)| x.is_compatible_with(y));
             }
             _ => {}
         }

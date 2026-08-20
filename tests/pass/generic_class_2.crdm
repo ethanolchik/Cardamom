@@ -1,0 +1,42 @@
+import io;
+import str;
+
+public class Option<T>(private value: T, private present: int) {
+    public isSome() -> int {
+        return this.present;
+    }
+
+    public unwrapOr(fallback: T) -> T {
+        if (this.present == 1) {
+            return this.value;
+        }
+        return fallback;
+    }
+}
+
+fn some<T>(v: T) -> Option<T> {
+    return new Option<T>(v, 1);
+}
+
+// `Box<T>` here is only concrete once `wrap` is instantiated.
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+}
+
+fn wrap<T>(x: T) -> T {
+    let b: Box<T> = new Box<T>(x);
+    return b.get();
+}
+
+fn main() {
+    let a: Option<int> = some(41);
+    io.println(str.fromInt(a.unwrapOr(0)));
+
+    let b: Option<string> = new Option<string>("", 0);
+    io.println(b.unwrapOr("empty"));
+
+    io.println(str.fromInt(wrap(42)));
+    io.println(wrap("transitive"));
+}

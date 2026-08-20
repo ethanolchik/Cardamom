@@ -623,6 +623,9 @@ impl Parser {
 
                 self.consume(TokenKind::Gt, "Expected '>' after type generics.")?;
                 attributes.push(Attribute::Class);
+
+                // `Foo<int>` is a particular instantiation, distinct from `Foo` itself.
+                kind = TypeKind::GenericInstance(name.lexeme.clone(), generics.clone());
             }
         }
 
@@ -1063,6 +1066,21 @@ impl Parser {
 
     pub fn class_init(&mut self) -> Result<Expr, Error> {
         let name = self.consume(TokenKind::Identifier, "Expected class name.")?;
+
+        // `new Box<int>(..)`; without them the type arguments are inferred.
+        let mut generics = Vec::new();
+        if self.match_token(TokenKind::Lt) {
+            loop {
+                generics.push(self.type_expression()?);
+
+                if !self.match_token(TokenKind::Comma) {
+                    break;
+                }
+            }
+
+            self.consume(TokenKind::Gt, "Expected '>' after type arguments.")?;
+        }
+
         self.consume(TokenKind::LParen, "Expected '(' after class name.")?;
         let mut arguments = Vec::new();
 
@@ -1077,7 +1095,7 @@ impl Parser {
         }
 
         self.consume(TokenKind::RParen, "Expected ')' after arguments.")?;
-        Ok(Expr::ClassInit { name, arguments: arguments.into_iter().map(Box::new).collect() })
+        Ok(Expr::ClassInit { name, generics, arguments: arguments.into_iter().map(Box::new).collect() })
     }
 
     pub fn closure(&mut self, fields: bool) -> Result<Expr, Error> {

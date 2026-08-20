@@ -184,6 +184,16 @@ impl CppCodeGenerator {
         matches!(bound, TypeKind::GenericParam(other) | TypeKind::User(other) if other == name)
     }
 
+    /// The C++ name of one specialisation of a generic class.
+    fn mangled_class(name: &str, arguments: &[TypeKind]) -> String {
+        let mut mangled = Self::ident(name);
+        for argument in arguments {
+            mangled.push('_');
+            mangled.push_str(&Self::type_tag(argument));
+        }
+        mangled
+    }
+
     /// A short identifier-safe spelling of a type, for use in a mangled name.
     fn type_tag(kind: &TypeKind) -> String {
         match kind {
@@ -424,8 +434,47 @@ impl CppCodeGenerator {
 
     /// Emits the `class X { .. };` block: fields, method prototypes, constructor.
     pub fn write_class_declaration(&mut self, stmt: &Stmt) {
-        if let Stmt::Class { name, generics: _, modifier: _, fields, methods } = stmt {
-            let class_name = &Self::ident(&name.lexeme);
+        self.for_each_class_specialisation(stmt, Self::write_class_declaration_body);
+    }
+
+    /// Emits everything that must follow the class body, for every specialisation.
+    pub fn write_class_definitions(&mut self, stmt: &Stmt) {
+        self.for_each_class_specialisation(stmt, Self::write_class_definitions_body);
+    }
+
+    /// Runs `write` once per instantiation of a generic class, with its type parameters
+    /// bound; a non-generic class is written once with no substitution.
+    fn for_each_class_specialisation(
+        &mut self,
+        stmt: &Stmt,
+        write: fn(&mut Self, &Stmt, &str),
+    ) {
+        let Stmt::Class { name, generics, .. } = stmt else {
+            return;
+        };
+
+        if generics.is_empty() {
+            let class_name = Self::ident(&name.lexeme);
+            write(self, stmt, &class_name);
+            return;
+        }
+
+        for arguments in self.instantiations_of(&format!("class {}", name.lexeme)) {
+            let substitution: HashMap<String, TypeKind> = generics
+                .iter()
+                .map(|g| g.lexeme.clone())
+                .zip(arguments.iter().cloned())
+                .collect();
+
+            let previous = std::mem::replace(&mut self.current_substitution, substitution);
+            let class_name = Self::mangled_class(&name.lexeme, &arguments);
+            write(self, stmt, &class_name);
+            self.current_substitution = previous;
+        }
+    }
+
+    fn write_class_declaration_body(&mut self, stmt: &Stmt, class_name: &str) {
+        if let Stmt::Class { generics: _, modifier: _, fields, methods, .. } = stmt {
             let const_methods = Self::const_methods(methods);
 
             self.writeln(&format!("class {} {{", class_name));
@@ -538,11 +587,9 @@ impl CppCodeGenerator {
         }
     }
 
-    /// Emits everything that must follow the class body: static data members and
-    /// out-of-line method definitions.
-    pub fn write_class_definitions(&mut self, stmt: &Stmt) {
-        if let Stmt::Class { name, fields, methods, .. } = stmt {
-            let class_name = &Self::ident(&name.lexeme);
+    /// Static data members and out-of-line method definitions.
+    fn write_class_definitions_body(&mut self, stmt: &Stmt, class_name: &str) {
+        if let Stmt::Class { fields, methods, .. } = stmt {
             let const_methods = Self::const_methods(methods);
 
             // Static data members need a definition outside the class body.
@@ -762,13 +809,14 @@ impl CppCodeGenerator {
                     .join(", ");
                 format!("std::tuple<{}>", elements_str)
             }
+            // A generic class is monomorphised, so `Box<int>` names the specialised
+            // class `Box_int` rather than a C++ template instantiation.
             TypeKind::GenericInstance(name, args) => {
-                let args_str = args
+                let arguments: Vec<TypeKind> = args
                     .iter()
-                    .map(|a| self.translate_type(a))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{}<{}>", name, args_str)
+                    .map(|a| self.resolve_type_argument(&a.kind))
+                    .collect();
+                Self::mangled_class(name, &arguments)
             }
             // Inside a specialisation, a type parameter stands for its bound type.
             TypeKind::GenericParam(name) => match self.current_substitution.get(name) {
@@ -1259,9 +1307,18 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_class_init(&mut self, expr: &Expr) {
-        if let Expr::ClassInit { name, arguments } = expr {
+        if let Expr::ClassInit { name, arguments, .. } = expr {
             // Classes have value semantics, so `new Person(..)` is a constructor call.
-            self.output.push_str(&Self::ident(&name.lexeme));
+            // A generic class resolves to whichever specialisation was inferred here.
+            let class_name = match self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind) {
+                Some(TypeKind::GenericInstance(base, arguments)) => {
+                    let kinds: Vec<TypeKind> =
+                        arguments.iter().map(|a| self.resolve_type_argument(&a.kind)).collect();
+                    Self::mangled_class(base, &kinds)
+                }
+                _ => Self::ident(&name.lexeme),
+            };
+            self.output.push_str(&class_name);
             self.output.push('(');
             for (i, arg) in arguments.iter().enumerate() {
                 arg.accept(self);
