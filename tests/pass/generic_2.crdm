@@ -1,0 +1,18 @@
+import io;
+import str;
+
+// Instantiation is transitive: instantiating `level3` must pull in everything it
+// calls, at the same type arguments.
+fn identity<T>(x: T) -> T { return x; }
+fn level2<T>(x: T) -> T { return identity(x); }
+fn level3<T>(x: T) -> T { return level2(x); }
+
+fn secondOf<A, B>(a: A, b: B) -> B {
+    return identity(b);
+}
+
+fn main() {
+    io.println(str.fromInt(level3(1)));
+    io.println(level3("deep"));
+    io.println(secondOf<int, string>(1, "s"));
+}

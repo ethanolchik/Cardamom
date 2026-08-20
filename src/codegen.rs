@@ -14,6 +14,12 @@ use std::fmt::Write;
 /// closure parameter types, which are not written anywhere in the AST).
 pub type ExprTypes = HashMap<*const Expr, Type>;
 
+/// The type arguments each generic call site resolved to, keyed by AST node.
+pub type CallInstantiations = HashMap<*const Expr, Vec<TypeKind>>;
+
+/// Every distinct instantiation of each generic function, keyed by module then name.
+pub use crate::typecheck::Instantiations;
+
 /// The CppCodeGenerator traverses the AST and produces C++ source code.
 pub struct CppCodeGenerator {
     output: String,
@@ -31,6 +37,13 @@ pub struct CppCodeGenerator {
     local_functions: HashSet<String>,
     /// Headers requested by `@include("..")`, gathered across every module.
     extra_includes: BTreeSet<String>,
+    /// Type arguments resolved at each generic call site.
+    call_instantiations: CallInstantiations,
+    /// Which specialisations of each generic function need emitting.
+    instantiations: Instantiations,
+    /// Type parameter bindings for the specialisation currently being emitted, applied
+    /// by `translate_type` so every type position in the body is substituted at once.
+    current_substitution: HashMap<String, TypeKind>,
     /// Functions reachable from the program's own code. Anything in an imported module
     /// that is not in here is skipped, so importing a module only costs what you use.
     /// Empty means "emit everything", which is what single-module generation does.
@@ -45,6 +58,9 @@ impl CppCodeGenerator {
             indent_level: 0,
             expr_types: ExprTypes::new(),
             in_synthesised_int_main: false,
+            call_instantiations: CallInstantiations::new(),
+            instantiations: Instantiations::new(),
+            current_substitution: HashMap::new(),
             imports: HashMap::new(),
             current_module: "main".to_string(),
             local_functions: HashSet::new(),
@@ -58,6 +74,139 @@ impl CppCodeGenerator {
         Self {
             expr_types,
             ..Self::new()
+        }
+    }
+
+    /// Supplies the generic instantiations worked out by the type checker.
+    pub fn set_instantiations(
+        &mut self,
+        call_instantiations: CallInstantiations,
+        instantiations: Instantiations,
+    ) {
+        self.call_instantiations = call_instantiations;
+        self.instantiations = instantiations;
+    }
+
+    /// The C++ symbol for one specialisation of a generic function.
+    ///
+    /// The type arguments are folded into the name, so `identity<int>` and
+    /// `identity<string>` become separate functions.
+    fn mangled_generic(module: &str, name: &str, arguments: &[TypeKind]) -> String {
+        let mut mangled = Self::mangled(module, name);
+        for argument in arguments {
+            mangled.push('_');
+            mangled.push_str(&Self::type_tag(argument));
+        }
+        mangled
+    }
+
+    /// The C++ name to call for `expr`, accounting for any generic specialisation the
+    /// type checker resolved at this call site.
+    fn call_name(&self, expr: &Expr, module: &str, name: &str) -> String {
+        match self.call_instantiations.get(&(expr as *const Expr)) {
+            Some(arguments) => {
+                // Inside a specialisation the recorded type arguments may still mention
+                // the enclosing function's type parameters, so resolve them first: the
+                // `identity(x)` in `wrapper<int>` must call `identity_int`.
+                let resolved: Vec<TypeKind> = arguments
+                    .iter()
+                    .map(|argument| self.resolve_type_argument(argument))
+                    .collect();
+
+                Self::mangled_generic(module, name, &resolved)
+            }
+            None => Self::mangled(module, name),
+        }
+    }
+
+    /// Applies the active specialisation to a type argument.
+    fn resolve_type_argument(&self, kind: &TypeKind) -> TypeKind {
+        match kind {
+            TypeKind::GenericParam(name) | TypeKind::User(name) => {
+                match self.current_substitution.get(name) {
+                    Some(bound) if !Self::names_itself(name, bound) => bound.clone(),
+                    _ => kind.clone(),
+                }
+            }
+            _ => kind.clone(),
+        }
+    }
+
+    /// Every instantiation of `name` needed in the module being generated.
+    fn instantiations_of(&self, name: &str) -> Vec<Vec<TypeKind>> {
+        self.instantiations
+            .get(&self.current_module)
+            .and_then(|module| module.get(name))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Writes one function definition under an already-decided C++ name.
+    fn write_function(
+        &mut self,
+        cpp_name: &str,
+        params: &[Box<Stmt>],
+        body: &[Box<Stmt>],
+        return_type: &Type,
+        is_main: bool,
+    ) {
+        // C++ requires `main` to return `int`. Cardamom allows `fn main()` (a `void`
+        // return), so synthesise the `int` and the trailing `return 0;` for that case.
+        let void_main = is_main && return_type.kind == TypeKind::Void;
+        let ret_type = if void_main {
+            "int".to_string()
+        } else {
+            self.translate_type(return_type)
+        };
+        let param_str = self.translate_params(params);
+
+        self.writeln(&format!("{} {}({})", ret_type, cpp_name, param_str));
+        self.output.push_str(&self.indent());
+        self.output.push_str("{\n");
+        self.indent_level += 1;
+
+        let old_in_main = self.in_synthesised_int_main;
+        self.in_synthesised_int_main = void_main;
+        for s in body {
+            s.accept(self);
+        }
+        if void_main {
+            self.writeln("return 0;");
+        }
+        self.in_synthesised_int_main = old_in_main;
+
+        self.indent_level -= 1;
+        self.writeln("}");
+    }
+
+    /// Whether a substitution binds `name` to a type that is just `name` again.
+    fn names_itself(name: &str, bound: &TypeKind) -> bool {
+        matches!(bound, TypeKind::GenericParam(other) | TypeKind::User(other) if other == name)
+    }
+
+    /// A short identifier-safe spelling of a type, for use in a mangled name.
+    fn type_tag(kind: &TypeKind) -> String {
+        match kind {
+            TypeKind::Int => "int".to_string(),
+            TypeKind::Float => "float".to_string(),
+            TypeKind::String => "string".to_string(),
+            TypeKind::Void => "void".to_string(),
+            TypeKind::User(name) => name.clone(),
+            TypeKind::GenericParam(name) => name.clone(),
+            TypeKind::Array(inner, _) => format!("{}arr", Self::type_tag(&inner.kind)),
+            TypeKind::Reference(inner) => format!("ref{}", Self::type_tag(&inner.kind)),
+            TypeKind::MutRef(inner) => format!("mut{}", Self::type_tag(&inner.kind)),
+            TypeKind::Tuple(elements) => {
+                let parts: Vec<String> =
+                    elements.iter().map(|e| Self::type_tag(&e.kind)).collect();
+                format!("tup{}", parts.join("_"))
+            }
+            TypeKind::Function(params, ret) => {
+                let parts: Vec<String> =
+                    params.iter().map(|p| Self::type_tag(&p.kind)).collect();
+                format!("fn{}_to_{}", parts.join("_"), Self::type_tag(&ret.kind))
+            }
+            TypeKind::GenericInstance(name, _) | TypeKind::Module(name) => name.clone(),
         }
     }
 
@@ -466,13 +615,13 @@ impl CppCodeGenerator {
     }
 
     /// If `object` is an imported module, returns the C++ symbol for `name` in it.
-    fn resolve_module_function(&self, object: &Expr, name: &Token) -> Option<String> {
+    fn resolve_module_function(&self, object: &Expr, name: &Token) -> Option<(String, String)> {
         let Expr::Variable { name: object_name } = object else {
             return None;
         };
 
         let module_name = self.imports.get(&object_name.lexeme)?;
-        Some(Self::mangled(module_name, &name.lexeme))
+        Some((module_name.clone(), name.lexeme.clone()))
     }
 
     fn has_main(module: &Module) -> bool {
@@ -489,11 +638,38 @@ impl CppCodeGenerator {
                 // user, and generic functions have no single concrete signature.
                 if name.lexeme == "main"
                     || modifiers.contains(&Modifier::Extern)
-                    || !generics.is_empty()
                     || !self.is_live(&name.lexeme)
                 {
                     continue;
                 }
+
+                // A generic function needs one prototype per specialisation, each with
+                // its type parameters bound.
+                if !generics.is_empty() {
+                    for arguments in self.instantiations_of(&name.lexeme) {
+                        let substitution = generics
+                            .iter()
+                            .map(|g| g.lexeme.clone())
+                            .zip(arguments.iter().cloned())
+                            .collect();
+
+                        let previous =
+                            std::mem::replace(&mut self.current_substitution, substitution);
+                        let ret_type = self.translate_type(return_type);
+                        let param_str = self.translate_params(params);
+                        self.current_substitution = previous;
+
+                        let cpp_name = Self::mangled_generic(
+                            &self.current_module,
+                            &name.lexeme,
+                            &arguments,
+                        );
+                        self.writeln(&format!("{} {}({});", ret_type, cpp_name, param_str));
+                        wrote_any = true;
+                    }
+                    continue;
+                }
+
                 let ret_type = self.translate_type(return_type);
                 let param_str = self.translate_params(params);
                 let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
@@ -547,7 +723,15 @@ impl CppCodeGenerator {
             TypeKind::Float => "float".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
-            TypeKind::User(name) => Self::ident(name), // assume user types become class names
+            // A type parameter reaches codegen as a plain user type, because the parser
+            // cannot tell `T` from a class name. Inside a specialisation the active
+            // substitution is what distinguishes them.
+            TypeKind::User(name) => match self.current_substitution.get(name) {
+                Some(bound) if !Self::names_itself(name, bound) => {
+                    self.translate_type(&Type::new(ty.name.clone(), bound.clone()))
+                }
+                _ => Self::ident(name), // user types become class names
+            },
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
                 for _ in 0..*depth {
@@ -586,7 +770,11 @@ impl CppCodeGenerator {
                     .join(", ");
                 format!("{}<{}>", name, args_str)
             }
-            TypeKind::GenericParam(name) => name.clone(),
+            // Inside a specialisation, a type parameter stands for its bound type.
+            TypeKind::GenericParam(name) => match self.current_substitution.get(name) {
+                Some(bound) => self.translate_type(&Type::new(ty.name.clone(), bound.clone())),
+                None => name.clone(),
+            },
             // Modules are namespaces rather than values, so this is unreachable for a
             // well-typed program; the type checker rejects using a module as a value.
             TypeKind::Module(name) => format!("/* module {} */ void", name),
@@ -612,9 +800,18 @@ impl CppCodeGenerator {
         }
     }
 
-    fn visit_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+    /// `call` is the enclosing call expression, needed to resolve a generic
+    /// specialisation at this site.
+    fn visit_member_call(
+        &mut self,
+        call: &Expr,
+        object: &Expr,
+        name: &Token,
+        arguments: &[Box<Expr>],
+    ) {
         // `io.println(x)` is a free function call in the generated C++, not a method.
-        if let Some(cpp_name) = self.resolve_module_function(object, name) {
+        if let Some((module, function)) = self.resolve_module_function(object, name) {
+            let cpp_name = self.call_name(call, &module, &function);
             self.output.push_str(&cpp_name);
             self.output.push('(');
             self.write_call_arguments(arguments);
@@ -820,7 +1017,7 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_function(&mut self, stmt: &Stmt) {
-        if let Stmt::Function { name, params, body, return_type, modifiers, generics: _ } = stmt {
+        if let Stmt::Function { name, params, body, return_type, modifiers, generics } = stmt {
             if modifiers.contains(&Modifier::Extern) {
                 // `fn extern` declares a function implemented outside Cardamom; the user
                 // supplies the definition, so emit nothing here.
@@ -831,37 +1028,33 @@ impl Visitor for CppCodeGenerator {
             if name.lexeme != "main" && !self.is_live(&name.lexeme) {
                 return;
             }
+
+            // A generic function has no code of its own: it is emitted once per
+            // instantiation, with its type parameters bound to concrete types.
+            if !generics.is_empty() {
+                for arguments in self.instantiations_of(&name.lexeme) {
+                    let substitution = generics
+                        .iter()
+                        .map(|g| g.lexeme.clone())
+                        .zip(arguments.iter().cloned())
+                        .collect();
+
+                    let previous =
+                        std::mem::replace(&mut self.current_substitution, substitution);
+                    let cpp_name =
+                        Self::mangled_generic(&self.current_module, &name.lexeme, &arguments);
+                    self.write_function(&cpp_name, params, body, return_type, false);
+                    self.current_substitution = previous;
+                }
+                return;
+            }
             
             // C++ requires `main` to return `int`. Cardamom allows `fn main()` (i.e. a
             // `void` return), so synthesise the `int` return type and the trailing
             // `return 0;` for that case.
-            let is_main = name.lexeme == "main";
-            let void_main = is_main && return_type.kind == TypeKind::Void;
-            let ret_type = if void_main {
-                "int".to_string()
-            } else {
-                self.translate_type(return_type)
-            };
-            let param_str = self.translate_params(params);
             let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
-
-            self.writeln(&format!("{} {}({})", ret_type, cpp_name, param_str));
-            self.output.push_str(&self.indent());
-            self.output.push_str("{\n");
-            self.indent_level += 1;
-
-            let old_in_main = self.in_synthesised_int_main;
-            self.in_synthesised_int_main = void_main;
-            for s in body {
-                s.accept(self);
-            }
-            if void_main {
-                self.writeln("return 0;");
-            }
-            self.in_synthesised_int_main = old_in_main;
-
-            self.indent_level -= 1;
-            self.writeln("}");
+            let is_main = name.lexeme == "main";
+            self.write_function(&cpp_name, params, body, return_type, is_main);
         }
     }
 
@@ -975,15 +1168,15 @@ impl Visitor for CppCodeGenerator {
     fn visit_call(&mut self, expr: &Expr) {
         if let Expr::Call { callee, paren: _, arguments } = expr {
             if let Expr::MemberAccess { object, name } = &**callee {
-                self.visit_member_call(object, name, arguments);
+                self.visit_member_call(expr, object, name, arguments);
                 return;
             }
 
             // A call to a function of the module being generated has to use the same
-            // mangled name its definition was given.
+            // mangled name its definition was given, including any specialisation.
             if let Expr::Variable { name } = &**callee {
                 if self.local_functions.contains(&name.lexeme) {
-                    let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
+                    let cpp_name = self.call_name(expr, &self.current_module, &name.lexeme);
                     self.output.push_str(&cpp_name);
                     self.output.push('(');
                     self.write_call_arguments(arguments);
@@ -1001,7 +1194,24 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_generic_call(&mut self, expr: &Expr) {
         if let Expr::GenericCall { callee, paren: _, arguments, generics: _ } = expr {
-            // In C++ generics (templates) are handled differently; ignore generic arguments here.
+            // The type arguments are already baked into the specialisation's name, so
+            // nothing of them survives into the generated C++.
+            if let Expr::MemberAccess { object, name } = &**callee {
+                self.visit_member_call(expr, object, name, arguments);
+                return;
+            }
+
+            if let Expr::Variable { name } = &**callee {
+                if self.local_functions.contains(&name.lexeme) {
+                    let cpp_name = self.call_name(expr, &self.current_module, &name.lexeme);
+                    self.output.push_str(&cpp_name);
+                    self.output.push('(');
+                    self.write_call_arguments(arguments);
+                    self.output.push(')');
+                    return;
+                }
+            }
+
             callee.accept(self);
             self.output.push('(');
             for (i, arg) in arguments.iter().enumerate() {
@@ -1251,6 +1461,10 @@ mod tests {
         let root = program.root().name.clone();
         let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
         let mut expr_types = ExprTypes::new();
+        let mut call_instantiations = CallInstantiations::new();
+        let mut instantiations = Instantiations::new();
+        let mut generic_call_sites: Vec<crate::typecheck::GenericCallSite> = Vec::new();
+        let mut function_generics = crate::typecheck::FunctionGenerics::new();
 
         for module in &program.modules {
             let mut symtable = SymbolTable::new();
@@ -1260,6 +1474,7 @@ mod tests {
                 module.source.clone(),
             );
             checker.set_module_exports(exports.clone());
+            checker.set_module_name(module.name.clone());
             checker.set_is_library(module.name != root);
             checker.check_module(&module.ast);
             assert_eq!(
@@ -1272,9 +1487,25 @@ mod tests {
 
             exports.insert(module.name.clone(), checker.exports(&module.ast));
             expr_types.extend(checker.expr_types.clone());
+            call_instantiations.extend(checker.call_instantiations.clone());
+            generic_call_sites.extend(checker.generic_call_sites.clone());
+
+            for (module_name, functions) in checker.instantiations.clone() {
+                instantiations.entry(module_name).or_default().extend(functions);
+            }
+            for (module_name, functions) in checker.function_generics.clone() {
+                function_generics.entry(module_name).or_default().extend(functions);
+            }
         }
 
+        crate::typecheck::expand_instantiations(
+            &mut instantiations,
+            &generic_call_sites,
+            &function_generics,
+        );
+
         let mut generator = CppCodeGenerator::with_types(expr_types);
+        generator.set_instantiations(call_instantiations, instantiations);
         generator.generate_program(&program)
     }
 
@@ -1351,6 +1582,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(bin_path);
+    }
+
+    /// A generic function is emitted once per instantiation actually used, and not at
+    /// all for type arguments the program never asks for.
+    #[test]
+    fn generics_emit_only_the_instantiations_used() {
+        let code = generate_fixture("tests/pass/generic_3.crdm");
+
+        assert!(
+            code.contains("cardamom_util_firstOr_int"),
+            "an int instantiation should be emitted"
+        );
+        assert!(
+            code.contains("cardamom_util_firstOr_string"),
+            "a string instantiation should be emitted"
+        );
+
+        // `identity` is only ever reached through `echo<string>`.
+        assert!(
+            code.contains("cardamom_util_identity_string"),
+            "a transitively required instantiation should be emitted:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("cardamom_util_identity_int"),
+            "an unused instantiation should not be emitted:\n{}",
+            code
+        );
+
+        // Nothing generic should survive into the generated C++.
+        assert!(
+            !code.contains("template"),
+            "monomorphisation should leave no templates:\n{}",
+            code
+        );
     }
 
     /// Importing a module must not drag in the functions the program never calls.

@@ -1,0 +1,8 @@
+fn makeDefault<T>() -> T {
+    @cpp("return T();");
+}
+
+fn main() {
+    // `T` appears in no parameter, so it cannot be inferred.
+    makeDefault();
+}

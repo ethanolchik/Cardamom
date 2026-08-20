@@ -115,6 +115,40 @@ public fn repeat(s: string, times: int) -> string {
 
 `fn extern name(..) -> T {}` remains available to declare a function you link yourself.
 
+## Generics
+
+Functions can take type parameters. Type arguments are inferred from the call, or given
+explicitly:
+
+```cpp
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn firstOr<T>(xs: T[], fallback: T) -> T {
+    if (xs.len() > 0) {
+        return xs[0];
+    }
+    return fallback;
+}
+
+fn main() {
+    identity(5);            // T inferred as int
+    identity("hello");      // a second instantiation
+    identity<int>(7);       // explicit, reuses the first
+
+    let xs: int[] = [1, 2];
+    firstOr(xs, 0);
+}
+```
+
+Generics are monomorphised: each distinct set of type arguments produces its own
+specialised function, so the generated C++ contains no templates and type errors are
+reported by Cardamom rather than by the C++ compiler.
+
+Instantiation is transitive and crosses module boundaries, and only the instantiations a
+program actually uses are emitted.
+
 ## Functions as values
 
 A named function can be used wherever a `fn` type is expected:

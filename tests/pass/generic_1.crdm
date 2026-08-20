@@ -1,0 +1,36 @@
+import io;
+import str;
+
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+fn pair<A, B>(a: A, b: B) -> A {
+    return a;
+}
+
+fn first<T>(xs: T[]) -> T {
+    return xs[0];
+}
+
+fn applyTwice<T>(f: fn(T) -> T, v: T) -> T {
+    return f(f(v));
+}
+
+fn twice(x: int) -> int {
+    return x * 2;
+}
+
+fn main() {
+    io.println(str.fromInt(identity(5)));       // inferred
+    io.println(identity("inferred"));           // a second instantiation
+    io.println(str.fromInt(identity<int>(7)));  // explicit, reuses the first
+
+    io.println(str.fromInt(pair<int, string>(1, "x")));
+    io.println(str.fromInt(pair(2, 3)));
+
+    let xs: int[] = [9, 8];
+    io.println(str.fromInt(first(xs)));
+
+    io.println(str.fromInt(applyTwice(twice, 3)));
+}

@@ -1,0 +1,15 @@
+import io;
+import str;
+import util;
+
+fn main() {
+    let xs: int[] = [7];
+    let empty: int[] = [];
+
+    io.println(str.fromInt(util.firstOr(xs, 0)));
+    io.println(str.fromInt(util.firstOr(empty, 0 - 1)));
+    io.println(util.firstOr<string>(["a"], "z"));
+
+    // Instantiation crosses the module boundary transitively.
+    io.println(util.echo("echoed"));
+}

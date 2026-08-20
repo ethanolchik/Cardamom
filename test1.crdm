@@ -40,7 +40,7 @@ fn main() {
 
     let a: int[] = [1, 2, 3];
 
-    let b: &(fn(int) -> int)[];
+    let b: (fn(int) -> int)[] = [];
 
     let increment: fn(&mut int) -> void = |x| void -> { x += 1; };
     

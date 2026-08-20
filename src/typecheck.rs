@@ -40,10 +40,29 @@ pub struct TypeChecker<'a> {
     current_expected_type: Option<Type>,
     in_static_context: bool,
     in_call: bool,
+    /// The name of the function being checked, for attributing generic call sites.
+    current_function: Option<String>,
+    /// Type parameters of the function being checked. A call made inside a generic
+    /// function is not a concrete instantiation, so these names mark types that are
+    /// still standing in for something else.
+    current_function_generics: Vec<String>,
 
     /// Public functions of every module compiled so far, keyed by module name. This is
     /// what `io.println` resolves against.
     pub module_exports: HashMap<String, ModuleExports>,
+    /// The type arguments each generic call site resolved to, keyed by AST node.
+    pub call_instantiations: HashMap<*const Expr, Vec<TypeKind>>,
+    /// Every distinct instantiation of each generic function, in first-use order so the
+    /// generated code is deterministic.
+    pub instantiations: HashMap<String, HashMap<String, Vec<Vec<TypeKind>>>>,
+    /// Generic calls made from inside a generic function, with their type arguments
+    /// still expressed in terms of the caller's type parameters. Expanding these is
+    /// what makes instantiation transitive.
+    pub generic_call_sites: Vec<GenericCallSite>,
+    /// Type parameter names of each generic function, keyed by module then name.
+    pub function_generics: HashMap<String, HashMap<String, Vec<String>>>,
+    /// The name of the module being checked.
+    module_name: String,
     /// True when checking an imported module rather than the program itself, which
     /// relaxes the requirement to have a `main`.
     is_library: bool,
@@ -51,11 +70,32 @@ pub struct TypeChecker<'a> {
     pub monomorph_table: MonomorphTable,
 }
 
+/// A generic call appearing inside a generic function.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenericCallSite {
+    pub caller_module: String,
+    /// The generic function containing the call.
+    pub caller: String,
+    pub callee_module: String,
+    /// The generic function being called.
+    pub callee: String,
+    /// The callee's type arguments, which may mention the caller's type parameters.
+    pub arguments: Vec<TypeKind>,
+}
+
 /// The names a module makes available to anything that imports it.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleExports {
-    /// Exported function name -> (parameter types, return type).
-    pub functions: HashMap<String, (Vec<Type>, Type)>,
+    pub functions: HashMap<String, ExportedFunction>,
+}
+
+/// The signature an importing module sees.
+#[derive(Clone, Debug)]
+pub struct ExportedFunction {
+    pub params: Vec<Type>,
+    pub return_type: Type,
+    /// Names of the function's type parameters, in declaration order.
+    pub generics: Vec<String>,
 }
 
 impl ModuleExports {
@@ -86,8 +126,15 @@ impl<'a> TypeChecker<'a> {
             current_expected_type: None,
             in_static_context: false,
             in_call: false,
+            current_function: None,
+            current_function_generics: Vec::new(),
 
             module_exports: HashMap::new(),
+            call_instantiations: HashMap::new(),
+            instantiations: HashMap::new(),
+            generic_call_sites: Vec::new(),
+            function_generics: HashMap::new(),
+            module_name: "main".to_string(),
             is_library: false,
 
             monomorph_table: MonomorphTable::new(),
@@ -97,6 +144,11 @@ impl<'a> TypeChecker<'a> {
     /// Makes the exports of already-compiled modules visible to this one.
     pub fn set_module_exports(&mut self, exports: HashMap<String, ModuleExports>) {
         self.module_exports = exports;
+    }
+
+    /// Sets the name of the module being checked, used to attribute instantiations.
+    pub fn set_module_name(&mut self, name: String) {
+        self.module_name = name;
     }
 
     /// Marks this as an imported module, which is not required to define `main`.
@@ -122,7 +174,7 @@ impl<'a> TypeChecker<'a> {
         let mut exports = ModuleExports::default();
 
         for stmt in &module.statements {
-            let Stmt::Function { name, params, return_type, modifiers, .. } = &**stmt else {
+            let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt else {
                 continue;
             };
 
@@ -131,17 +183,26 @@ impl<'a> TypeChecker<'a> {
                 continue;
             }
 
+            let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+
             let param_types = params
                 .iter()
                 .filter_map(|p| match &**p {
-                    Stmt::Variable { type_, .. } => Some(type_.clone()),
+                    Stmt::Variable { type_, .. } => {
+                        Some(Self::generalise(type_, &generic_names))
+                    }
                     _ => None,
                 })
                 .collect();
 
-            exports
-                .functions
-                .insert(name.lexeme.clone(), (param_types, return_type.clone()));
+            exports.functions.insert(
+                name.lexeme.clone(),
+                ExportedFunction {
+                    params: param_types,
+                    return_type: Self::generalise(return_type, &generic_names),
+                    generics: generic_names,
+                },
+            );
         }
 
         exports
@@ -295,20 +356,28 @@ impl<'a> TypeChecker<'a> {
                     name,
                     params,
                     return_type,
+                    generics,
                     ..
                 } => {
                     let fn_name = name.lexeme.clone();
+                    let generic_names: Vec<String> =
+                        generics.iter().map(|g| g.lexeme.clone()).collect();
+
+                    // A parameter written `x: T` parses as the user type `T`; knowing
+                    // the function's type parameters is what turns it into a generic.
                     let mut param_types = Vec::new();
                     for p in params {
                         if let Stmt::Variable { type_, .. } = &**p {
-                            param_types.push(type_.clone());
+                            param_types.push(Self::generalise(type_, &generic_names));
                         }
                     }
-                    let sym = Symbol::new_function(
+
+                    let sym = Symbol::new_generic_function(
                         name.clone(),
                         param_types,
-                        return_type.clone(),
+                        Self::generalise(return_type, &generic_names),
                         false,
+                        generic_names,
                     );
                     self.symtable.declare_function(&fn_name, sym);
                 }
@@ -400,6 +469,334 @@ impl<'a> TypeChecker<'a> {
                     self.symtable.declare_symbol(&name, symbol);
                 }
             }
+        }
+    }
+
+    /// Resolves a call against a known signature, reporting any mismatch and returning
+    /// the result type.
+    ///
+    /// Shared by every call form (bare name or module member, with or without explicit
+    /// type arguments) so they all check and instantiate generics the same way.
+    fn check_call_signature(
+        &mut self,
+        expr: &Expr,
+        token: &Token,
+        module: &str,
+        name: &str,
+        generics: &[String],
+        params: &[Type],
+        return_type: &Type,
+        explicit: &[Type],
+        arguments: &[Box<Expr>],
+        arg_tys: &[Type],
+    ) -> Type {
+        if params.len() != arg_tys.len() {
+            self.error_with_notes(
+                token.clone(),
+                &format!(
+                    "Function `{}` expects {} args, got {}",
+                    name,
+                    params.len(),
+                    arg_tys.len()
+                ),
+                vec![Note::new(
+                    format!("`{}` takes {} parameter(s)", name, params.len()),
+                    token.line,
+                    token.span.clone(),
+                    self.filename.clone(),
+                )],
+                vec![],
+            );
+            return return_type.clone();
+        }
+
+        let subs = self.resolve_generics(token, name, generics, params, explicit, arg_tys);
+
+        for (i, (expected, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
+            let expected = expected.apply_substitution(&subs);
+
+            if let Some(argument) = arguments.get(i) {
+                self.check_mutable_borrow(&expected, argument, actual);
+            }
+
+            if !actual.is_compatible_with(&expected) {
+                let argument_token = arguments
+                    .get(i)
+                    .map(|argument| get_token(argument))
+                    .unwrap_or_else(|| token.clone());
+
+                self.error_with_notes(
+                    argument_token,
+                    &format!(
+                        "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
+                        name, expected.kind, actual.kind
+                    ),
+                    vec![Note::new(
+                        format!("Parameter declared as `{}`", expected.kind),
+                        token.line,
+                        token.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![],
+                );
+            }
+        }
+
+        self.record_instantiation(expr, module, name, generics, &subs);
+        return_type.apply_substitution(&subs)
+    }
+
+    /// If `callee` names a function of an imported module, returns its module and
+    /// exported signature.
+    fn module_callee(&self, callee: &Expr) -> Option<(String, String, ExportedFunction)> {
+        let Expr::MemberAccess { object, name } = callee else {
+            return None;
+        };
+        let object_ty = self.get_expr_type(object)?;
+        let TypeKind::Module(module) = &object_ty.kind else {
+            return None;
+        };
+
+        let function = self.module_exports.get(module)?.functions.get(&name.lexeme)?;
+        Some((module.clone(), name.lexeme.clone(), function.clone()))
+    }
+
+    /// Resolves a call to a generic function, reporting any problem with its type
+    /// arguments and returning the substitution to use.
+    ///
+    /// Type arguments are either written out (`identity<int>(5)`) or inferred from the
+    /// arguments (`identity(5)`).
+    fn resolve_generics(
+        &self,
+        token: &Token,
+        name: &str,
+        generics: &[String],
+        params: &[Type],
+        explicit: &[Type],
+        arg_tys: &[Type],
+    ) -> HashMap<String, TypeKind> {
+        let mut subs: HashMap<String, TypeKind> = HashMap::new();
+
+        if !explicit.is_empty() {
+            if explicit.len() != generics.len() {
+                self.error_with_notes(
+                    token.clone(),
+                    &format!(
+                        "`{}` takes {} type argument(s), but {} were given",
+                        name,
+                        generics.len(),
+                        explicit.len()
+                    ),
+                    vec![Note::new(
+                        format!("`{}` is declared as `{}<{}>`", name, name, generics.join(", ")),
+                        token.line,
+                        token.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![],
+                );
+            }
+
+            for (parameter, argument) in generics.iter().zip(explicit.iter()) {
+                subs.insert(parameter.clone(), argument.kind.clone());
+            }
+        } else {
+            for (param, actual) in params.iter().zip(arg_tys.iter()) {
+                Self::infer_substitution(param, actual, &mut subs);
+            }
+        }
+
+        // Anything still unbound could not be worked out from the call.
+        for parameter in generics {
+            if !subs.contains_key(parameter) {
+                self.error_with_notes(
+                    token.clone(),
+                    &format!("Cannot infer type parameter `{}` of `{}`", parameter, name),
+                    vec![Note::new(
+                        "It does not appear in any parameter, so it cannot be deduced from the arguments".to_string(),
+                        token.line,
+                        token.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        format!("Give it explicitly, e.g. `{}<int>(..)`", name),
+                        token.line,
+                        token.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+
+                subs.insert(parameter.clone(), TypeKind::User("error".to_string()));
+            }
+        }
+
+        subs
+    }
+
+    /// Records that `expr` calls a generic function at a particular instantiation, so
+    /// code generation knows which specialisation to emit and to call.
+    fn record_instantiation(
+        &mut self,
+        expr: &Expr,
+        module: &str,
+        name: &str,
+        generics: &[String],
+        subs: &HashMap<String, TypeKind>,
+    ) {
+        if generics.is_empty() {
+            return;
+        }
+
+        let arguments: Vec<TypeKind> = generics
+            .iter()
+            .map(|parameter| {
+                subs.get(parameter)
+                    .cloned()
+                    .unwrap_or(TypeKind::User("error".to_string()))
+            })
+            .collect();
+
+        // Code generation needs the type arguments at every generic call site, even
+        // ones that are still symbolic: when the enclosing generic function is emitted
+        // for a particular instantiation, they get substituted then.
+        self.call_instantiations
+            .insert(expr as *const Expr, arguments.clone());
+
+        // A call inside a generic function is not a concrete instantiation yet. Record
+        // it so `expand_instantiations` can resolve it once the caller's own
+        // instantiations are known.
+        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+            if let Some(caller) = self.current_function.clone() {
+                let site = GenericCallSite {
+                    caller_module: self.module_name.clone(),
+                    caller,
+                    callee_module: module.to_string(),
+                    callee: name.to_string(),
+                    arguments,
+                };
+
+                if !self.generic_call_sites.contains(&site) {
+                    self.generic_call_sites.push(site);
+                }
+            }
+            return;
+        }
+
+        let instantiations = self
+            .instantiations
+            .entry(module.to_string())
+            .or_default()
+            .entry(name.to_string())
+            .or_default();
+
+        if !instantiations.contains(&arguments) {
+            instantiations.push(arguments);
+        }
+    }
+
+    /// Applies a type parameter substitution to a bare `TypeKind`.
+    fn substitute_kind(kind: &TypeKind, subs: &HashMap<String, TypeKind>) -> TypeKind {
+        Type::new(Token::dummy("<type>"), kind.clone())
+            .apply_substitution(subs)
+            .kind
+    }
+
+    /// Whether a type argument is still generic or came from an earlier error.
+    fn is_unresolved(&self, kind: &TypeKind) -> bool {
+        match kind {
+            TypeKind::GenericParam(_) => true,
+            // A user type named after an enclosing type parameter is that parameter,
+            // not a concrete type: the call is inside a generic function.
+            TypeKind::User(name) => {
+                name == "error" || self.current_function_generics.contains(name)
+            }
+            TypeKind::Array(inner, _) => self.is_unresolved(&inner.kind),
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => {
+                self.is_unresolved(&inner.kind)
+            }
+            TypeKind::Function(params, ret) => {
+                params.iter().any(|p| self.is_unresolved(&p.kind))
+                    || self.is_unresolved(&ret.kind)
+            }
+            TypeKind::Tuple(elements) => elements.iter().any(|e| self.is_unresolved(&e.kind)),
+            _ => false,
+        }
+    }
+
+    /// Rewrites the named types that refer to a function's type parameters into
+    /// `GenericParam`s.
+    ///
+    /// A parameter written `x: T` parses as the ordinary user type `T`, because the
+    /// parser has no idea which names are type parameters. Substitution only acts on
+    /// `GenericParam`, so this conversion is what makes a signature actually generic.
+    fn generalise(ty: &Type, generics: &[String]) -> Type {
+        let kind = match &ty.kind {
+            TypeKind::User(name) if generics.contains(name) => {
+                TypeKind::GenericParam(name.clone())
+            }
+            TypeKind::Array(inner, depth) => {
+                TypeKind::Array(Box::new(Self::generalise(inner, generics)), *depth)
+            }
+            TypeKind::Reference(inner) => {
+                TypeKind::Reference(Box::new(Self::generalise(inner, generics)))
+            }
+            TypeKind::MutRef(inner) => {
+                TypeKind::MutRef(Box::new(Self::generalise(inner, generics)))
+            }
+            TypeKind::Function(params, ret) => TypeKind::Function(
+                params.iter().map(|p| Self::generalise(p, generics)).collect(),
+                Box::new(Self::generalise(ret, generics)),
+            ),
+            TypeKind::Tuple(elements) => TypeKind::Tuple(
+                elements.iter().map(|e| Self::generalise(e, generics)).collect(),
+            ),
+            other => other.clone(),
+        };
+
+        Type { kind, ..ty.clone() }
+    }
+
+    /// Matches a parameter type against the type of the argument supplied for it,
+    /// recording what each type parameter must be.
+    ///
+    /// The first binding for a parameter wins; a later conflicting one is reported by
+    /// the ordinary argument check once the substitution has been applied.
+    fn infer_substitution(
+        param: &Type,
+        argument: &Type,
+        subs: &mut HashMap<String, TypeKind>,
+    ) {
+        match (&param.kind, &argument.kind) {
+            (TypeKind::GenericParam(name), _) => {
+                // Borrows are transparent for inference: passing an `int` to a `&T`
+                // should infer `T = int`, not `T = &int`.
+                let resolved = Self::without_borrows(argument);
+                subs.entry(name.clone()).or_insert(resolved.kind);
+            }
+            (TypeKind::Array(p, _), TypeKind::Array(a, _)) => {
+                Self::infer_substitution(p, a, subs)
+            }
+            (TypeKind::Reference(p), TypeKind::Reference(a))
+            | (TypeKind::MutRef(p), TypeKind::MutRef(a))
+            | (TypeKind::Reference(p), TypeKind::MutRef(a)) => {
+                Self::infer_substitution(p, a, subs)
+            }
+            // A borrowed parameter matched against a plain value: look through it.
+            (TypeKind::Reference(p), _) | (TypeKind::MutRef(p), _) => {
+                Self::infer_substitution(p, argument, subs)
+            }
+            (TypeKind::Function(p_params, p_ret), TypeKind::Function(a_params, a_ret)) => {
+                for (p, a) in p_params.iter().zip(a_params.iter()) {
+                    Self::infer_substitution(p, a, subs);
+                }
+                Self::infer_substitution(p_ret, a_ret, subs);
+            }
+            (TypeKind::Tuple(p_elements), TypeKind::Tuple(a_elements)) => {
+                for (p, a) in p_elements.iter().zip(a_elements.iter()) {
+                    Self::infer_substitution(p, a, subs);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1530,6 +1927,17 @@ impl<'a> Visitor for TypeChecker<'a> {
                 })
                 .collect();
 
+            // A call through an imported module is resolved against that module's
+            // exported signature, so its type parameters are still known here.
+            if let Some((module, name, function)) = self.module_callee(callee) {
+                let result = self.check_call_signature(
+                    expr, &paren, &module, &name, &function.generics, &function.params,
+                    &function.return_type, &[], arguments, &arg_tys,
+                );
+                self.set_expr_type(expr, result);
+                return;
+            }
+
             let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
                 Type::new(
                     paren.clone(),
@@ -1603,47 +2011,16 @@ impl<'a> Visitor for TypeChecker<'a> {
                 }
                 TypeKind::User(ref name) => {
                     if let Some(sym) = self.symtable.lookup_function(name) {
-                        if let Symbol::Function { params, return_type, .. } = sym {
-                            if params.len() != arg_tys.len() {
-                                self.error_token(
-                                    &paren,
-                                    &format!(
-                                        "Function `{}` expects {} args, got {}",
-                                        name, params.len(), arg_tys.len()
-                                    ),
-                                );
-                            } else {
-                                for (i, (expected, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
-                                    if let Some(argument) = arguments.get(i) {
-                                        self.check_mutable_borrow(expected, argument, actual);
-                                    }
+                        if let Symbol::Function { params, return_type, generics, .. } = sym {
+                            let (params, return_type, generics) =
+                                (params.clone(), return_type.clone(), generics.clone());
+                            let module = self.module_name.clone();
 
-                                    if !actual.is_compatible_with(expected) {
-                                        // Point at the offending argument, not at the
-                                        // parameter it failed to match.
-                                        let token = arguments
-                                            .get(i)
-                                            .map(|argument| get_token(argument))
-                                            .unwrap_or_else(|| paren.clone());
-
-                                        self.error_with_notes(
-                                            token,
-                                            &format!(
-                                                "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
-                                                name, expected.kind, actual.kind
-                                            ),
-                                            vec![Note::new(
-                                                format!("Parameter declared as `{}`", expected.kind),
-                                                expected.name.line,
-                                                expected.name.span.clone(),
-                                                self.filename.clone(),
-                                            )],
-                                            vec![],
-                                        );
-                                    }
-                                }
-                                self.set_expr_type(expr, return_type.clone());
-                            }
+                            let result = self.check_call_signature(
+                                expr, &paren, &module, name, &generics, &params,
+                                &return_type, &[], arguments, &arg_tys,
+                            );
+                            self.set_expr_type(expr, result);
                         } else {
                             self.error_token(
                                 &paren,
@@ -1714,6 +2091,27 @@ impl<'a> Visitor for TypeChecker<'a> {
                 })
                 .collect();
 
+            // `mod.generic<int>(..)` resolves against the module's exported signature.
+            if let Some((module, name, function)) = self.module_callee(callee) {
+                let token = get_token(callee);
+                let explicit: &[Type] = if function.generics.is_empty() {
+                    self.error_token(
+                        &token,
+                        &format!("`{}` is not generic, so it takes no type arguments", name),
+                    );
+                    &[]
+                } else {
+                    generics
+                };
+
+                let result = self.check_call_signature(
+                    expr, &token, &module, &name, &function.generics, &function.params,
+                    &function.return_type, explicit, arguments, &arg_tys,
+                );
+                self.set_expr_type(expr, result);
+                return;
+            }
+
             let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
                 Type::new(
                     get_token(callee),
@@ -1766,26 +2164,32 @@ impl<'a> Visitor for TypeChecker<'a> {
                 }
                 TypeKind::User(ref name) => {
                     if let Some(sym) = self.symtable.lookup_function(name) {
-                        if let Symbol::Function { params, return_type, .. } = sym {
-                            if params.len() != arg_tys.len() {
+                        // `generics` here is the *call's* explicit type arguments; the
+                        // function's own type parameter names come from the symbol.
+                        if let Symbol::Function { params, return_type, generics: declared, .. } = sym {
+                            let (params, return_type, fn_generics) =
+                                (params.clone(), return_type.clone(), declared.clone());
+                            let token = get_token(callee);
+                            let module = self.module_name.clone();
+
+                            // Reporting "not generic" is clearer than an arity
+                            // complaint about a list of no type parameters, so the
+                            // explicit arguments are dropped in that case.
+                            let explicit: &[Type] = if fn_generics.is_empty() {
                                 self.error_token(
-                                    &get_token(callee),
-                                    &format!(
-                                        "Function `{}` expects {} args, got {}",
-                                        name, params.len(), arg_tys.len()
-                                    ),
+                                    &token,
+                                    &format!("`{}` is not generic, so it takes no type arguments", name),
                                 );
+                                &[]
                             } else {
-                                for (i, (_, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
-                                    if !actual.is_compatible_with(&generics[i]) {
-                                        self.error_token(&generics[i].name, &format!(
-                                            "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
-                                            name, generics[i].kind, actual.kind
-                                        ));
-                                    }
-                                }
-                                self.set_expr_type(expr, return_type.clone());
-                            }
+                                generics
+                            };
+
+                            let result = self.check_call_signature(
+                                expr, &token, &module, name, &fn_generics, &params,
+                                &return_type, explicit, arguments, &arg_tys,
+                            );
+                            self.set_expr_type(expr, result);
                         } else {
                             self.error_token(
                                 &get_token(callee),
@@ -1848,9 +2252,12 @@ impl<'a> Visitor for TypeChecker<'a> {
                         .unwrap_or_default();
 
                     match exports.functions.get(&name.lexeme) {
-                        Some((params, returns)) => {
-                            let member_ty =
-                                self.function_type(name, params.clone(), returns.clone());
+                        Some(function) => {
+                            let member_ty = self.function_type(
+                                name,
+                                function.params.clone(),
+                                function.return_type.clone(),
+                            );
                             self.set_expr_type(expr, member_ty);
                         }
                         None => {
@@ -2619,25 +3026,50 @@ impl<'a> Visitor for TypeChecker<'a> {
     
             let old_ret = self.current_function_return_type.take();
             let old_has_valid_return = self.function_has_valid_return;
-            self.current_function_return_type = Some(return_type.clone());
-    
+
             // We'll track if we ever see a matching return
             self.function_has_valid_return = false;
 
             // Insert generics
+            let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+
+            // The body is checked with type parameters marked as such, so the return
+            // type has to be generalised the same way for `return` to match.
+            self.current_function_return_type =
+                Some(Self::generalise(return_type, &generic_names));
             for g in generics {
                 self.symtable.declare_symbol(
                     &g.lexeme,
                     Symbol::new_generic_param(g.clone())
                 );
             }
-    
-            // Insert parameters
+
+            let old_generics = std::mem::replace(
+                &mut self.current_function_generics,
+                generic_names.clone(),
+            );
+            let old_function =
+                std::mem::replace(&mut self.current_function, Some(name.lexeme.clone()));
+
+            if !generic_names.is_empty() {
+                let module = self.module_name.clone();
+                self.function_generics
+                    .entry(module)
+                    .or_default()
+                    .insert(name.lexeme.clone(), generic_names.clone());
+            }
+
+            // Insert parameters. Their declared types are generalised so that a type
+            // parameter is recognised as such inside the body, rather than looking like
+            // an ordinary user type named `T`.
             for p in params {
                 if let Stmt::Variable { name: param_name, type_, .. } = &**p {
                     self.symtable.declare_symbol(
                         &param_name.lexeme,
-                        Symbol::new_variable(param_name.clone(), type_.clone()),
+                        Symbol::new_variable(
+                            param_name.clone(),
+                            Self::generalise(type_, &generic_names),
+                        ),
                     );
                 }
             }
@@ -2648,6 +3080,8 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
     
             // End scope
+            self.current_function_generics = old_generics;
+            self.current_function = old_function;
             self.symtable.end_scope();
     
             // restore old function return
@@ -2777,6 +3211,27 @@ impl<'a> Visitor for TypeChecker<'a> {
                         )]
                     );
                 }
+            }
+
+            // A borrow has to refer to something from the moment it exists, so it
+            // cannot be declared and assigned later.
+            if initialiser.is_none() && matches!(type_.kind, TypeKind::Reference(_) | TypeKind::MutRef(_)) {
+                self.error_with_notes(
+                    name.clone(),
+                    &format!("Borrow `{}` must be initialised when declared", name.lexeme),
+                    vec![Note::new(
+                        format!("`{}` borrows, so it needs something to borrow from", type_.kind),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        format!("Give it a value, e.g. `let {}: {} = &other;`", name.lexeme, type_.kind),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
             }
 
             // check if the type exists
@@ -2997,6 +3452,95 @@ mod tests {
                 "`{}` should report at least one error",
                 fixture
             );
+        }
+    }
+}
+
+/// Instantiations of generic functions, keyed by module then function name.
+pub type Instantiations = HashMap<String, HashMap<String, Vec<Vec<TypeKind>>>>;
+
+/// Type parameter names of generic functions, keyed by module then function name.
+pub type FunctionGenerics = HashMap<String, HashMap<String, Vec<String>>>;
+
+/// Closes the set of instantiations under calls between generic functions.
+///
+/// Instantiating `wrapper<int>` requires whatever `wrapper` calls, instantiated the
+/// same way. Each round substitutes a caller's type arguments into the calls it makes,
+/// which may reveal further instantiations, so this repeats until nothing new appears.
+///
+/// This runs once over the whole program rather than per module, because a module can
+/// be instantiated by something compiled after it.
+pub fn expand_instantiations(
+    instantiations: &mut Instantiations,
+    call_sites: &[GenericCallSite],
+    function_generics: &FunctionGenerics,
+) {
+    loop {
+        let mut discovered: Vec<(String, String, Vec<TypeKind>)> = Vec::new();
+
+        for site in call_sites {
+            let Some(caller_generics) = function_generics
+                .get(&site.caller_module)
+                .and_then(|module| module.get(&site.caller))
+            else {
+                continue;
+            };
+
+            let Some(caller_instantiations) = instantiations
+                .get(&site.caller_module)
+                .and_then(|module| module.get(&site.caller))
+            else {
+                continue;
+            };
+
+            for caller_arguments in caller_instantiations {
+                let subs: HashMap<String, TypeKind> = caller_generics
+                    .iter()
+                    .cloned()
+                    .zip(caller_arguments.iter().cloned())
+                    .collect();
+
+                let resolved: Vec<TypeKind> = site
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        Type::new(Token::dummy("<type>"), argument.clone())
+                            .apply_substitution(&subs)
+                            .kind
+                    })
+                    .collect();
+
+                // Still symbolic: the caller is itself only used generically so far.
+                if resolved
+                    .iter()
+                    .any(|argument| matches!(argument, TypeKind::GenericParam(_)))
+                {
+                    continue;
+                }
+
+                let already = instantiations
+                    .get(&site.callee_module)
+                    .and_then(|module| module.get(&site.callee))
+                    .map_or(false, |existing| existing.contains(&resolved));
+
+                let entry = (site.callee_module.clone(), site.callee.clone(), resolved);
+                if !already && !discovered.contains(&entry) {
+                    discovered.push(entry);
+                }
+            }
+        }
+
+        if discovered.is_empty() {
+            return;
+        }
+
+        for (module, callee, arguments) in discovered {
+            instantiations
+                .entry(module)
+                .or_default()
+                .entry(callee)
+                .or_default()
+                .push(arguments);
         }
     }
 }

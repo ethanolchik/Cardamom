@@ -1,0 +1,16 @@
+// A generic function exported across a module boundary.
+public fn firstOr<T>(xs: T[], fallback: T) -> T {
+    if (xs.len() > 0) {
+        return xs[0];
+    }
+    return fallback;
+}
+
+public fn identity<T>(x: T) -> T {
+    return x;
+}
+
+// Generic calling generic, instantiated only from another module.
+public fn echo<T>(x: T) -> T {
+    return identity(x);
+}

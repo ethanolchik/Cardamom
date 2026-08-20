@@ -1,0 +1,6 @@
+fn identity<T>(x: T) -> T { return x; }
+
+fn main() {
+    // Wrong number of type arguments.
+    identity<int, string>(1);
+}

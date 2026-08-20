@@ -62,6 +62,10 @@ fn run_file(filename: String) -> bool {
     // a module imports has already been checked and its exports recorded.
     let mut exports: HashMap<String, ModuleExports> = HashMap::new();
     let mut expr_types = codegen::ExprTypes::new();
+    let mut call_instantiations = codegen::CallInstantiations::new();
+    let mut instantiations = typecheck::Instantiations::new();
+    let mut generic_call_sites: Vec<typecheck::GenericCallSite> = Vec::new();
+    let mut function_generics = typecheck::FunctionGenerics::new();
     let mut error_count = 0;
 
     let root_name = program.root().name.clone();
@@ -74,6 +78,7 @@ fn run_file(filename: String) -> bool {
             module.source.clone(),
         );
         tc.set_module_exports(exports.clone());
+        tc.set_module_name(module.name.clone());
         tc.set_is_library(module.name != root_name);
         tc.check_module(&module.ast);
 
@@ -86,7 +91,24 @@ fn run_file(filename: String) -> bool {
         // Expression types are keyed by AST node address, and every module's AST is
         // kept alive by `program`, so the maps can simply be merged.
         expr_types.extend(tc.expr_types.clone());
+        call_instantiations.extend(tc.call_instantiations.clone());
+        generic_call_sites.extend(tc.generic_call_sites.clone());
+
+        for (module_name, functions) in tc.instantiations.clone() {
+            instantiations.entry(module_name).or_default().extend(functions);
+        }
+        for (module_name, functions) in tc.function_generics.clone() {
+            function_generics.entry(module_name).or_default().extend(functions);
+        }
     }
+
+    // Instantiation is transitive and can cross module boundaries, so the set is
+    // closed once every module has been checked.
+    typecheck::expand_instantiations(
+        &mut instantiations,
+        &generic_call_sites,
+        &function_generics,
+    );
 
     if error_count > 0 {
         eprintln!("Program exited with {} error(s).", error_count);
@@ -94,6 +116,7 @@ fn run_file(filename: String) -> bool {
     }
 
     let mut cg = CppCodeGenerator::with_types(expr_types);
+    cg.set_instantiations(call_instantiations, instantiations);
     let code = cg.generate_program(&program);
 
     let mut output = File::create("output.cpp").unwrap();

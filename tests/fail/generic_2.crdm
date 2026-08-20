@@ -1,0 +1,6 @@
+fn identity<T>(x: T) -> T { return x; }
+
+fn main() {
+    // The argument does not match the given type argument.
+    identity<string>(5);
+}

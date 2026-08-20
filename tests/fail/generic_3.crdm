@@ -1,0 +1,6 @@
+fn plain(x: int) -> int { return x; }
+
+fn main() {
+    // `plain` is not generic.
+    plain<int>(1);
+}

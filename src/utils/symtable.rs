@@ -31,6 +31,9 @@ pub enum Symbol {
         is_method: bool,
         visibility: Option<Visibility>,
         is_static: bool,
+        /// Names of the function's type parameters, in declaration order. Empty for a
+        /// non-generic function.
+        generics: Vec<String>,
     },
     Class {
         id: SymbolId,
@@ -62,6 +65,22 @@ impl Symbol {
 
     pub fn new_function(name: Token, params: Vec<Type>, return_type: Type, is_method: bool) -> Self {
         Self::new_function_with_visibility(name, params, return_type, is_method, None, false)
+    }
+
+    /// A generic function, carrying the names of its type parameters.
+    pub fn new_generic_function(
+        name: Token,
+        params: Vec<Type>,
+        return_type: Type,
+        is_method: bool,
+        generics: Vec<String>,
+    ) -> Self {
+        let mut symbol =
+            Self::new_function_with_visibility(name, params, return_type, is_method, None, false);
+        if let Symbol::Function { generics: slot, .. } = &mut symbol {
+            *slot = generics;
+        }
+        symbol
     }
 
     pub fn new_class(name: Token) -> Self {
@@ -116,6 +135,7 @@ impl Symbol {
         Symbol::Function {
             id,
             name,
+            generics: Vec::new(),
             params,
             return_type,
             is_method,

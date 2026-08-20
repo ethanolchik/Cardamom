@@ -1,0 +1,4 @@
+fn main() {
+    // A borrow must be initialised when declared.
+    let r: &int;
+}
