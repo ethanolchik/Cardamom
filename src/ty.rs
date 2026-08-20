@@ -157,7 +157,17 @@ impl TypeKind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
             TypeKind::String => "string".to_string(),
-            TypeKind::Array(ty, size) => format!("{}[{}]", ty.kind.to_string(), size),
+            // Arrays print in the same postfix form the parser accepts. Element types
+            // written with a prefix (`&T`, `#T`, `*T`) or a function type are
+            // parenthesised, so the result parses back to the same type: without this
+            // `(&int[])[]` would print as `&int[][]`, which means something else.
+            TypeKind::Array(ty, _) => match &ty.kind {
+                TypeKind::Function(..)
+                | TypeKind::Reference(_)
+                | TypeKind::MutRef(_)
+                | TypeKind::Pointer(_) => format!("({})[]", ty.kind.to_string()),
+                _ => format!("{}[]", ty.kind.to_string()),
+            },
             TypeKind::Function(params, ret) => {
                 let params_str = params
                     .iter()

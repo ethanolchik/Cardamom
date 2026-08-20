@@ -16,6 +16,33 @@ pub enum Modifier {
     None,
 }
 
+/// The visibility of a class member.
+///
+/// Visibility and storage (`static`) are orthogonal, so they are tracked separately:
+/// a member can be any combination of the two, e.g. `private static`.
+pub fn member_visibility(modifiers: &[Modifier]) -> Modifier {
+    modifiers
+        .iter()
+        .find(|m| matches!(m, Modifier::Public | Modifier::Private | Modifier::Protected))
+        .cloned()
+        // Members are private unless they say otherwise.
+        .unwrap_or(Modifier::Private)
+}
+
+/// Whether a class member was declared `static`.
+pub fn is_static_member(modifiers: &[Modifier]) -> bool {
+    modifiers.contains(&Modifier::Static)
+}
+
+/// The modifiers attached to a class member (`Stmt::Variable` or `Stmt::Function`).
+pub fn member_modifiers(stmt: &Stmt) -> &[Modifier] {
+    match stmt {
+        Stmt::Variable { modifiers, .. } => modifiers,
+        Stmt::Function { modifiers, .. } => modifiers,
+        _ => &[],
+    }
+}
+
 /// An attribute for a class
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Attribute {
@@ -201,14 +228,11 @@ pub enum Stmt {
         name: Token,
         generics: Vec<Token>,
         modifier: Vec<Modifier>,
-        public_methods: Vec<Box<Stmt>>,
-        private_methods: Vec<Box<Stmt>>,
-        protected_methods: Vec<Box<Stmt>>,
-        static_methods: Vec<Box<Stmt>>,
-        public_fields: Vec<Box<Stmt>>,
-        private_fields: Vec<Box<Stmt>>,
-        protected_fields: Vec<Box<Stmt>>,
-        static_fields: Vec<Box<Stmt>>,
+        /// Every field, in source order. Visibility and `static` live in each
+        /// field's own `modifiers`, because they are independent properties.
+        fields: Vec<Box<Stmt>>,
+        /// Every method, in source order, annotated the same way as `fields`.
+        methods: Vec<Box<Stmt>>,
     },
     Extension {
         target: Box<Type>,

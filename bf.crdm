@@ -6,11 +6,11 @@ fn extern toString(i: int) -> string {}
 fn extern fromASCII(i: int) -> string {}
 
 fn bf(code: string) {
-    let tape: [int] = [0];
+    let tape: int[] = [0];
     let ptr: int = 0;
     let code_len: int = len(code);
     let code_ptr: int = 0;
-    let loop_stack: [int] = [0];
+    let loop_stack: int[] = [0];
 
     while (code_ptr < code_len) {
         let command: string = charAt(code, code_ptr);

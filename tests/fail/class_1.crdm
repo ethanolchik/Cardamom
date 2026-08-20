@@ -1,0 +1,10 @@
+fn extern println(content: string) {}
+
+public class Person(private name: string) {
+    private secret: string = "hidden";
+}
+
+fn main() {
+    let p: Person = new Person("Ethan");
+    println(p.secret);
+}

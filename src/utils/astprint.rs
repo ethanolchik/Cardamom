@@ -391,7 +391,7 @@ impl Visitor for AstPrinter {
     fn visit_class(&mut self, stmt: &Stmt) {
         println!("{}Class: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Class { name, generics, modifier, public_methods, private_methods, protected_methods, static_methods, public_fields, private_fields, protected_fields, static_fields, .. } = stmt {
+        if let Stmt::Class { name, generics, modifier, fields, methods, .. } = stmt {
             println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
             for g in generics.iter() {
                 println!("{}Generic: {}", String::from("\t").repeat(self.indent), g.lexeme);
@@ -399,28 +399,10 @@ impl Visitor for AstPrinter {
             for modi in modifier.iter() {
                 println!("{}Modifier: {:?}", String::from("\t").repeat(self.indent), modi);
             }
-            for field in public_fields.iter() {
+            for field in fields.iter() {
                 field.accept(self);
             }
-            for field in private_fields.iter() {
-                field.accept(self);
-            }
-            for field in protected_fields.iter() {
-                field.accept(self);
-            }
-            for field in static_fields.iter() {
-                field.accept(self);
-            }
-            for method in public_methods.iter() {
-                method.accept(self);
-            }
-            for method in private_methods.iter() {
-                method.accept(self);
-            }
-            for method in protected_methods.iter() {
-                method.accept(self);
-            }
-            for method in static_methods.iter() {
+            for method in methods.iter() {
                 method.accept(self);
             }
         }

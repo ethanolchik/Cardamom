@@ -1,7 +1,7 @@
 use crate::ast::{Module, Node, Stmt, Expr, Visitor};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
-use crate::ast::Modifier;
+use crate::ast::{is_static_member, member_modifiers, member_visibility, Modifier};
 use std::collections::HashMap;
 use std::fmt::Write;
 
@@ -275,6 +275,16 @@ impl CppCodeGenerator {
         false
     }
 
+    /// Chooses `.` or `->` for a member access. `this` is a pointer in C++, and
+    /// references/pointers are dereferenced, so those all use `->`.
+    fn member_access_operator(object: &Expr) -> &'static str {
+        match object {
+            Expr::Reference { .. } | Expr::MutReference { .. } => "->",
+            Expr::Variable { name } if name.lexeme == "this" => "->",
+            _ => ".",
+        }
+    }
+
     fn write_call_arguments(&mut self, arguments: &[Box<Expr>]) {
         for (i, arg) in arguments.iter().enumerate() {
             arg.accept(self);
@@ -520,52 +530,139 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_class(&mut self, stmt: &Stmt) {
-        if let Stmt::Class { name, generics: _, modifier: _, public_methods, private_methods, protected_methods, static_methods, public_fields, private_fields, protected_fields, static_fields } = stmt {
-            // Generate a class definition.
-            self.writeln(&format!("class {} {{", name.lexeme));
+        if let Stmt::Class { name, generics: _, modifier: _, fields, methods } = stmt {
+            let class_name = &name.lexeme;
+
+            self.writeln(&format!("class {} {{", class_name));
             self.indent_level += 1;
+
+            // C++ still groups members by access specifier, so bucket the members here.
+            // Because visibility and `static` are independent in the AST, a `private
+            // static` member lands in the private block with a `static` prefix, which
+            // the old section-based representation could not express.
+            for visibility in [Modifier::Public, Modifier::Protected, Modifier::Private] {
+                let members: Vec<&Stmt> = fields
+                    .iter()
+                    .chain(methods.iter())
+                    .map(|m| &**m)
+                    .filter(|m| member_visibility(member_modifiers(m)) == visibility)
+                    .collect();
+
+                if members.is_empty() {
+                    continue;
+                }
+
+                self.writeln(match visibility {
+                    Modifier::Public => "public:",
+                    Modifier::Protected => "protected:",
+                    _ => "private:",
+                });
+                self.indent_level += 1;
+
+                for member in members {
+                    let prefix = if is_static_member(member_modifiers(member)) {
+                        "static "
+                    } else {
+                        ""
+                    };
+
+                    match member {
+                        Stmt::Variable { name: field_name, type_, .. } => {
+                            let cpp_type = self.translate_type(type_);
+                            self.writeln(&format!("{}{} {};", prefix, cpp_type, field_name.lexeme));
+                        }
+                        Stmt::Function { name: method_name, params, return_type, .. } => {
+                            let ret_type = self.translate_type(return_type);
+                            let param_str = self.translate_params(params);
+                            self.writeln(&format!(
+                                "{}{} {}({});",
+                                prefix, ret_type, method_name.lexeme, param_str
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+
+                self.indent_level -= 1;
+            }
+
+            // Constructor parameters are declared as fields, so the constructor takes
+            // them in declaration order and initialises the matching members.
+            let ctor_params: Vec<Box<Stmt>> = fields
+                .iter()
+                .filter(|f| member_modifiers(f).contains(&Modifier::Constructor))
+                .cloned()
+                .collect();
+
             self.writeln("public:");
             self.indent_level += 1;
-            // Combine all field declarations.
-            for field in public_fields.iter()
-                .chain(private_fields.iter())
-                .chain(protected_fields.iter())
-                .chain(static_fields.iter())
-            {
-                if let Stmt::Variable { name: field_name, type_, .. } = &**field {
-                    let cpp_type = self.translate_type(type_);
-                    self.writeln(&format!("{} {};", cpp_type, field_name.lexeme));
+            let ctor_param_str = self.translate_params(&ctor_params);
+            let mut init_list = String::new();
+            for param in &ctor_params {
+                if let Stmt::Variable { name: field_name, .. } = &**param {
+                    if !init_list.is_empty() {
+                        init_list.push_str(", ");
+                    }
+                    write!(&mut init_list, "{}({})", field_name.lexeme, field_name.lexeme).unwrap();
+                }
+            }
+            let separator = if init_list.is_empty() { "" } else { " : " };
+            self.writeln(&format!(
+                "{}({}){}{}",
+                class_name, ctor_param_str, separator, init_list
+            ));
+            self.writeln("{");
+            self.indent_level += 1;
+            // Non-constructor fields with an initialiser are assigned in the body so the
+            // generated code matches the declaration order in the source.
+            for field in fields {
+                if let Stmt::Variable { name: field_name, initialiser: Some(init), modifiers, .. } = &**field {
+                    if modifiers.contains(&Modifier::Constructor) || is_static_member(modifiers) {
+                        continue;
+                    }
+                    self.output.push_str(&self.indent());
+                    self.output.push_str(&format!("this->{} = ", field_name.lexeme));
+                    init.accept(self);
+                    self.output.push_str(";\n");
                 }
             }
             self.indent_level -= 1;
+            self.writeln("}");
+            self.indent_level -= 1;
+
+            self.indent_level -= 1;
             self.writeln("};");
-            // Generate methods as standalone functions.
-            let mut all_methods = Vec::new();
-            all_methods.extend(public_methods.iter());
-            all_methods.extend(private_methods.iter());
-            all_methods.extend(protected_methods.iter());
-            all_methods.extend(static_methods.iter());
-            for method in all_methods {
+
+            // Static data members need a definition outside the class body.
+            for field in fields {
+                if let Stmt::Variable { name: field_name, type_, initialiser, modifiers, .. } = &**field {
+                    if !is_static_member(modifiers) {
+                        continue;
+                    }
+                    let cpp_type = self.translate_type(type_);
+                    self.output.push_str(&self.indent());
+                    self.output.push_str(&format!(
+                        "{} {}::{}",
+                        cpp_type, class_name, field_name.lexeme
+                    ));
+                    if let Some(init) = initialiser {
+                        self.output.push_str(" = ");
+                        init.accept(self);
+                    }
+                    self.output.push_str(";\n");
+                }
+            }
+
+            // Method bodies are emitted out of line so they can refer to the whole class.
+            for method in methods {
                 if let Stmt::Function { name: method_name, params, body, return_type, .. } = &**method {
                     let ret_type = self.translate_type(return_type);
-                    let mut param_str = String::new();
-                    // For instance methods, include a reference to the object.
-                    param_str.push_str(&format!("{}& self", name.lexeme));
-                    if !params.is_empty() {
-                        param_str.push_str(", ");
-                    }
-                    for (i, param) in params.iter().enumerate() {
-                        if let Stmt::Variable { name: param_name, type_, .. } = &**param {
-                            let cpp_type = self.translate_type(type_);
-                            write!(&mut param_str, "{} {}", cpp_type, param_name.lexeme).unwrap();
-                            if i < params.len() - 1 {
-                                param_str.push_str(", ");
-                            }
-                        }
-                    }
-                    self.writeln(&format!("{} {}_{}({})", ret_type, name.lexeme, method_name.lexeme, param_str));
-                    self.output.push_str(&self.indent());
-                    self.output.push_str("{\n");
+                    let param_str = self.translate_params(params);
+                    self.writeln(&format!(
+                        "{} {}::{}({})",
+                        ret_type, class_name, method_name.lexeme, param_str
+                    ));
+                    self.writeln("{");
                     self.indent_level += 1;
                     for s in body {
                         s.accept(self);
@@ -659,11 +756,7 @@ impl Visitor for CppCodeGenerator {
     fn visit_member_access(&mut self, expr: &Expr) {
         if let Expr::MemberAccess { object, name } = expr {
             object.accept(self);
-            match *object.clone() {
-                Expr::Reference { object: _ } => self.output.push_str("->"),
-                Expr::MutReference { object: _ } => self.output.push_str("->"),
-                _ => self.output.push_str("."),
-            }
+            self.output.push_str(Self::member_access_operator(object));
             self.output.push_str(&name.lexeme);
         }
     }
@@ -696,9 +789,9 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_class_init(&mut self, expr: &Expr) {
         if let Expr::ClassInit { name, arguments } = expr {
-            // Map a class initialization to a call to its constructor.
+            // Classes have value semantics, so `new Person(..)` is a constructor call.
             self.output.push_str(&name.lexeme);
-            self.output.push_str("_init(");
+            self.output.push('(');
             for (i, arg) in arguments.iter().enumerate() {
                 arg.accept(self);
                 if i < arguments.len() - 1 {
@@ -815,12 +908,7 @@ impl Visitor for CppCodeGenerator {
     fn visit_member_assignment(&mut self, expr: &Expr) {
         if let Expr::MemberAssignment { object, name, value, op } = expr {
             object.accept(self);
-            match *object.clone() {
-                Expr::Reference { object: _ } | Expr::MutReference { object: _ } => {
-                    self.output.push_str("->")
-                }
-                _ => self.output.push('.'),
-            }
+            self.output.push_str(Self::member_access_operator(object));
             self.output.push_str(&name.lexeme);
             self.output.push(' ');
             self.output.push_str(&op.lexeme);

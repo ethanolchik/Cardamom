@@ -192,74 +192,26 @@ impl<'a> TypeChecker<'a> {
     // Class fields & methods
     fn define_class_members(&mut self, module: &Module) {
         for stmt in &module.statements {
-            if let Stmt::Class {
-                name,
-                public_fields,
-                private_fields,
-                protected_fields,
-                static_fields,
-                public_methods,
-                private_methods,
-                protected_methods,
-                static_methods,
-                ..
-            } = &**stmt
-            {
+            if let Stmt::Class { name, fields, methods, .. } = &**stmt {
                 let class_name = name.lexeme.clone();
 
-                // Collect all field declarations first
+                // Visibility and `static` are read off each member's own modifiers, so
+                // any combination (e.g. `private static`) is representable.
                 let mut field_declarations = Vec::new();
-                
-                // Process all fields and collect their declarations
-                for f in public_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
+                for f in fields {
+                    if let Stmt::Variable { name: field_name, type_, modifiers, .. } = &**f {
                         field_declarations.push((
                             field_name.clone(),
                             type_.clone(),
-                            Visibility::Public,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in private_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Private,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in protected_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Protected,
-                            false
-                        ));
-                    }
-                }
-                
-                for f in static_fields {
-                    if let Stmt::Variable { name: field_name, type_, .. } = &**f {
-                        field_declarations.push((
-                            field_name.clone(),
-                            type_.clone(),
-                            Visibility::Static,
-                            true
+                            self.visibility_of(modifiers),
+                            is_static_member(modifiers),
                         ));
                     }
                 }
 
-                // Now process all method declarations
                 let mut method_declarations = Vec::new();
-                
-                for m in public_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
+                for m in methods {
+                    if let Stmt::Function { name: method_name, params, return_type, modifiers, .. } = &**m {
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
@@ -270,62 +222,8 @@ impl<'a> TypeChecker<'a> {
                             method_name.clone(),
                             param_types,
                             return_type.clone(),
-                            Visibility::Public,
-                            false
-                        ));
-                    }
-                }
-
-                for m in private_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Private,
-                            false
-                        ));
-                    }
-                }
-
-                for m in protected_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Protected,
-                            false
-                        ));
-                    }
-                }
-
-                for m in static_methods {
-                    if let Stmt::Function { name: method_name, params, return_type, .. } = &**m {
-                        let mut param_types = Vec::new();
-                        for p in params {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
-                            }
-                        }
-                        method_declarations.push((
-                            method_name.clone(),
-                            param_types,
-                            return_type.clone(),
-                            Visibility::Static,
-                            true
+                            self.visibility_of(modifiers),
+                            is_static_member(modifiers),
                         ));
                     }
                 }
@@ -334,13 +232,12 @@ impl<'a> TypeChecker<'a> {
                 let mut symbol_declarations = Vec::new();
                 if let Some(class_sym) = self.symtable.lookup_class_mut(&class_name) {
                     if let Symbol::Class { fields, methods, fully_defined, .. } = class_sym {
-                        // Add all fields
                         for (field_name, field_type, visibility, is_static) in field_declarations {
                             fields.insert(
                                 field_name.lexeme.clone(),
                                 (field_type.clone(), visibility.clone(), is_static)
                             );
-                            
+
                             symbol_declarations.push((
                                 field_name.lexeme.clone(),
                                 Symbol::new_variable_with_visibility(
@@ -352,7 +249,6 @@ impl<'a> TypeChecker<'a> {
                             ));
                         }
 
-                        // Add all methods
                         for (method_name, param_types, return_type, visibility, is_static) in method_declarations {
                             methods.insert(
                                 method_name.lexeme.clone(),
@@ -376,6 +272,28 @@ impl<'a> TypeChecker<'a> {
                     self.symtable.declare_symbol(&name, symbol);
                 }
             }
+        }
+    }
+
+    /// Whether a member of `class_name` with the given visibility is reachable from the
+    /// code currently being checked.
+    fn is_member_visible(&self, visibility: &Visibility, class_name: &str) -> bool {
+        match visibility {
+            Visibility::Public => true,
+            Visibility::Private => Some(class_name) == self.current_class.as_deref(),
+            Visibility::Protected => {
+                // TODO: Add inheritance check once subclassing is implemented.
+                self.current_class.as_deref().map_or(false, |current| current == class_name)
+            }
+        }
+    }
+
+    /// Maps a member's modifiers onto its symbol-table visibility.
+    fn visibility_of(&self, modifiers: &[Modifier]) -> Visibility {
+        match member_visibility(modifiers) {
+            Modifier::Public => Visibility::Public,
+            Modifier::Protected => Visibility::Protected,
+            _ => Visibility::Private,
         }
     }
 
@@ -1065,7 +983,18 @@ impl<'a> Visitor for TypeChecker<'a> {
             // Look up the class and verify static member access
             if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
                 // Check static fields first
-                if let Some((field_ty, _, is_static)) = fields.get(&name.lexeme) {
+                if let Some((field_ty, visibility, is_static)) = fields.get(&name.lexeme) {
+                    if !self.is_member_visible(visibility, class_name) {
+                        self.error_token(
+                            name,
+                            &format!(
+                                "Cannot access {} static field `{}` of class `{}`",
+                                visibility.to_string().to_lowercase(),
+                                name.lexeme,
+                                class_name
+                            ),
+                        );
+                    }
                     if !is_static {
                         self.error_with_notes(
                             name.clone(),
@@ -1089,8 +1018,22 @@ impl<'a> Visitor for TypeChecker<'a> {
                     params,
                     return_type,
                     is_static,
+                    visibility,
                     ..
                 }) = methods.get(&name.lexeme) {
+                    if let Some(visibility) = visibility {
+                        if !self.is_member_visible(visibility, class_name) {
+                            self.error_token(
+                                name,
+                                &format!(
+                                    "Cannot access {} static method `{}` of class `{}`",
+                                    visibility.to_string().to_lowercase(),
+                                    name.lexeme,
+                                    class_name
+                                ),
+                            );
+                        }
+                    }
                     if !is_static {
                         self.error_with_notes(
                             name.clone(),
@@ -1162,7 +1105,18 @@ impl<'a> Visitor for TypeChecker<'a> {
             if let Some(Symbol::Class { fields, .. }) = 
                 self.symtable.lookup_class(&class_name)
             {
-                if let Some((field_ty, _, is_static)) = fields.get(&name.lexeme) {
+                if let Some((field_ty, visibility, is_static)) = fields.get(&name.lexeme) {
+                    if !self.is_member_visible(visibility, &class_name) {
+                        self.error_token(
+                            name,
+                            &format!(
+                                "Cannot assign to {} static field `{}` of class `{}`",
+                                visibility.to_string().to_lowercase(),
+                                name.lexeme,
+                                class_name
+                            ),
+                        );
+                    }
                     if !is_static {
                         self.error_token(
                             name,
@@ -1710,16 +1664,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     // Check fields
                     if let Some((field_ty, visibility, ..)) = fields.get(&name.lexeme) {
                         // Check visibility
-                        let is_visible = match visibility {
-                            Visibility::Public => true,
-                            Visibility::Static => true,
-                            Visibility::Private => Some(class_name.as_str()) == self.current_class.as_deref(),
-                            Visibility::Protected => {
-                                self.current_class.as_deref().map_or(false, |current| {
-                                    current == class_name // TODO: Add inheritance check
-                                })
-                            }
-                        };
+                        let is_visible = self.is_member_visible(visibility, &class_name);
 
                         if !is_visible {
                             self.error_token(
@@ -1741,17 +1686,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                             ..
                         } = method {
                             // Check method visibility
-                            let is_visible = match visibility {
-                                Some(Visibility::Public) => true,
-                                Some(Visibility::Static) => true,
-                                Some(Visibility::Private) => Some(class_name.as_str()) == self.current_class.as_deref(),
-                                Some(Visibility::Protected) => {
-                                    self.current_class.as_deref().map_or(false, |current| {
-                                        current == class_name // TODO: Add inheritance check
-                                    })
-                                },
-                                None => true,
-                            };
+                            let is_visible = visibility
+                                .as_ref()
+                                .map_or(true, |v| self.is_member_visible(v, &class_name));
 
                             if !is_visible {
                                 self.error_token(
@@ -2567,42 +2504,21 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_class(&mut self, stmt: &Stmt) {
-        if let Stmt::Class {
-            name,
-            public_fields,
-            private_fields,
-            protected_fields,
-            static_fields,
-            public_methods,
-            private_methods,
-            protected_methods,
-            static_methods,
-            ..
-        } = stmt
+        if let Stmt::Class { name, fields, methods, .. } = stmt
         {
             // Set the current_class so we know which class we're in
             let class_name = name.lexeme.clone();
             self.current_class = Some(class_name.clone());
             self.class_stack.push(class_name.clone());
     
-            for field in public_fields
-                .iter()
-                .chain(private_fields)
-                .chain(protected_fields)
-                .chain(static_fields)
-            {
+            for field in fields {
                 field.accept(self); 
             }
     
             // Construct a Type that represents this class, e.g. `User(className)`
             let class_type = Type::new(name.clone(), TypeKind::User(class_name.clone()));
     
-            for method in public_methods
-                .iter()
-                .chain(private_methods)
-                .chain(protected_methods)
-                .chain(static_methods)
-            {
+            for method in methods {
                 // Start a new scope for the method
                 self.symtable.begin_scope();
     
@@ -2634,7 +2550,6 @@ impl ToString for Visibility {
             Visibility::Public => "Public".to_string(),
             Visibility::Private => "Private".to_string(),
             Visibility::Protected => "Protected".to_string(),
-            Visibility::Static => "Static".to_string(),
         }
     }
 }
@@ -2674,41 +2589,46 @@ mod tests {
         checker.error_count()
     }
 
+    /// Collects every `.crdm` fixture in a directory, so new fixtures are picked up
+    /// automatically instead of needing to be listed by hand.
+    fn fixtures_in(directory: &str) -> Vec<String> {
+        let mut fixtures: Vec<String> = std::fs::read_dir(format!(
+            "{}/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            directory
+        ))
+        .expect("fixture directory should be readable")
+        .filter_map(|entry| {
+            let path = entry.expect("directory entry should be readable").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("crdm") {
+                return None;
+            }
+            Some(format!(
+                "{}/{}",
+                directory,
+                path.file_name().unwrap().to_string_lossy()
+            ))
+        })
+        .collect();
+
+        fixtures.sort();
+        assert!(!fixtures.is_empty(), "`{}` should contain fixtures", directory);
+        fixtures
+    }
+
     #[test]
     fn pass_fixtures_typecheck_cleanly() {
-        for fixture in [
-            "tests/pass/empty.crdm",
-            "tests/pass/function_1.crdm",
-            "tests/pass/function_2.crdm",
-            "tests/pass/function_3.crdm",
-            "tests/pass/function_4.crdm",
-            "tests/pass/comparison_1.crdm",
-            "tests/pass/variable_1.crdm",
-            "tests/pass/variable_2.crdm",
-            "tests/pass/array_1.crdm",
-            "tests/pass/array_2.crdm",
-            "tests/pass/array_3.crdm",
-            "tests/pass/closure_1.crdm",
-            "tests/pass/closure_2.crdm",
-        ] {
-            assert_eq!(typecheck_fixture(fixture), 0, "`{}` should pass", fixture);
+        for fixture in fixtures_in("tests/pass") {
+            assert_eq!(typecheck_fixture(&fixture), 0, "`{}` should pass", fixture);
         }
     }
 
     #[test]
     fn fail_fixtures_report_type_errors() {
-        for fixture in [
-            "tests/fail/function_1.crdm",
-            "tests/fail/function_2.crdm",
-            "tests/fail/closure_1.crdm",
-            "tests/fail/closure_2.crdm",
-            "tests/fail/closure_3.crdm",
-            "tests/fail/closure_4.crdm",
-            "tests/fail/closure_5.crdm",
-        ] {
+        for fixture in fixtures_in("tests/fail") {
             assert!(
-                typecheck_fixture(fixture) > 0,
-                "`{}` should report at least one type error",
+                typecheck_fixture(&fixture) > 0,
+                "`{}` should report at least one error",
                 fixture
             );
         }

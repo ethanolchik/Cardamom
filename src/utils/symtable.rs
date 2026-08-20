@@ -9,11 +9,14 @@ static NEXT_SYMBOL_ID: AtomicUsize = AtomicUsize::new(0);
 
 // Add visibility enum
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// How widely a class member is visible.
+///
+/// This is deliberately *only* about visibility: whether a member is `static` is an
+/// independent property, tracked by the `is_static` flag on `Symbol`.
 pub enum Visibility {
     Public,
     Private,
     Protected,
-    Static,
 }
 
 // Add ID field to Symbol
@@ -93,7 +96,6 @@ impl Symbol {
                             false
                         }
                     }
-                    Some(Visibility::Static) => true, // Static members are always visible
                     None => true, // No visibility = public
                 }
             }

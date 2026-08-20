@@ -1,0 +1,17 @@
+fn extern println(content: string) {}
+
+public class Counter(private start: int) {
+    public static species: string = "human";
+    private static hidden: string = "secret";
+
+    public reveal() -> string {
+        return Counter::hidden;
+    }
+}
+
+fn main() {
+    println(Counter::species);
+
+    let c: Counter = new Counter(1);
+    println(c.reveal());
+}

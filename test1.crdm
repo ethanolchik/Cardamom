@@ -1,26 +1,24 @@
 public class Person(private name: string, private age: int) {
-private:
-    address: string = "1 High Road";
+    private address: string = "1 High Road";
 
-public:
-    test: string = "hello";
+    public test: string = "hello";
 
-    getAddress() -> string {
+    public static hello: string = "Hello";
+    private static instances: int = 0;
+
+    public getAddress() -> string {
         return this.address;
     }
 
-    birthday() -> int {
+    public birthday() -> int {
         this.age += 1;
 
         return this.age;
     }
 
-    getName() -> string {
+    public getName() -> string {
         return this.name;
     }
-
-static:
-    hello: string = "Hello";
 }
 
 fn test<T>(x: T) -> T {
@@ -38,11 +36,11 @@ fn main() {
 
     let x: int = 1;
 
-    let z: &[int] = &[1, 2, 3];
+    let z: &int[] = &[1, 2, 3];
 
-    let a: [int] = [1, 2, 3];
+    let a: int[] = [1, 2, 3];
 
-    let b: &[fn(int) -> int];
+    let b: &(fn(int) -> int)[];
 
     let increment: fn(&int) -> void = |x| void -> { x += 1; };
     

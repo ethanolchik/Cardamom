@@ -1,0 +1,29 @@
+fn extern println(content: string) {}
+fn extern toString(num: int) -> string {}
+
+public class Person(private name: string, private age: int) {
+    private address: string = "1 High Road";
+    public static species: string = "human";
+    private static counter: int = 0;
+
+    public getName() -> string {
+        return this.name;
+    }
+
+    public getAddress() -> string {
+        return this.address;
+    }
+
+    public birthday() -> int {
+        this.age += 1;
+        return this.age;
+    }
+}
+
+fn main() {
+    let p: Person = new Person("Ethan", 17);
+
+    println(p.getName());
+    println(p.getAddress());
+    println(toString(p.birthday()));
+}

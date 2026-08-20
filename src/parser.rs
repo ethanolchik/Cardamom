@@ -342,334 +342,152 @@ impl Parser {
             self.consume(TokenKind::Gt, "Expected '>' after generics.")?;
         }
 
-        let mut public_methods: Vec<Box<Stmt>> = Vec::new();
-        let mut private_methods: Vec<Box<Stmt>> = Vec::new();
-        let mut protected_methods: Vec<Box<Stmt>> = Vec::new();
-        let mut static_methods: Vec<Box<Stmt>> = Vec::new();
-        let mut public_fields: Vec<Box<Stmt>> = Vec::new();
-        let mut private_fields: Vec<Box<Stmt>> = Vec::new();
-        let mut protected_fields: Vec<Box<Stmt>> = Vec::new();
-        let mut static_fields: Vec<Box<Stmt>> = Vec::new();
+        let mut fields: Vec<Box<Stmt>> = Vec::new();
+        let mut methods: Vec<Box<Stmt>> = Vec::new();
 
-        let derived = Vec::new();
-
+        // Constructor parameters double as field declarations, e.g.
+        // `class Person(private name: string)`.
         if self.match_token(TokenKind::LParen) {
             if !self.check(TokenKind::RParen) {
                 loop {
-                    if self.match_token(TokenKind::Public) {
-                        let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
-                        self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let mut type_ = self.type_expression()?;
-                        type_.is_constructor = true;
-                        let modifiers = vec![Modifier::Public, Modifier::Constructor];
-                        let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        public_fields.push(Box::new(param));
-                    } else if self.match_token(TokenKind::Private) {
-                        let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
-                        self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let mut type_ = self.type_expression()?;
-                        type_.is_constructor = true;
-                        let modifiers = vec![Modifier::Private, Modifier::Constructor];
-                        let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        private_fields.push(Box::new(param));
-                    } else if self.match_token(TokenKind::Protected) {
-                        let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
-                        self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let mut type_ = self.type_expression()?;
-                        type_.is_constructor = true;
-                        let modifiers = vec![Modifier::Protected, Modifier::Constructor];
-                        let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        protected_fields.push(Box::new(param));
-                    } else {
-                        let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
-                        self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                        let mut type_ = self.type_expression()?;
-                        type_.is_constructor = true;
-                        let modifiers = vec![Modifier::Private, Modifier::Constructor];
-                        let param = Stmt::Variable { name: param_name, type_, initialiser: None, derived: derived.clone(), modifiers };
-                        private_fields.push(Box::new(param));
-                    }
+                    let mut modifiers = self.member_modifiers()?;
+                    modifiers.push(Modifier::Constructor);
+
+                    let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
+                    self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
+                    let mut type_ = self.type_expression()?;
+                    type_.is_constructor = true;
+
+                    fields.push(Box::new(Stmt::Variable {
+                        name: param_name,
+                        type_,
+                        initialiser: None,
+                        derived: Vec::new(),
+                        modifiers,
+                    }));
 
                     if !self.match_token(TokenKind::Comma) {
                         break;
                     }
                 }
-
-                self.consume(TokenKind::RParen, "Expected ')' after parameters.")?;
-
-                self.consume(TokenKind::LBrace, "Expected '{' before class body.")?;
-
-                let mut accessors_defined: Vec<TokenKind> = vec![];
-                while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                    if self.match_token(TokenKind::Public)
-                        || self.match_token(TokenKind::Private)
-                        || self.match_token(TokenKind::Protected)
-                        || self.match_token(TokenKind::Static) {
-                        accessors_defined.clear();
-                        accessors_defined.push(self.previous().kind);
-
-                        self.consume(TokenKind::Colon, "Expected ':' after accessor.")?;
-
-                        while !self.check(TokenKind::RBrace) && !self.is_at_end()
-                            && !self.check(TokenKind::Public)
-                            && !self.check(TokenKind::Private)
-                            && !self.check(TokenKind::Protected)
-                            && !self.check(TokenKind::Static)
-                        {
-                            let name = self.consume(TokenKind::Identifier, "Expected field or function name.")?;
-
-                            if self.match_token(TokenKind::Colon) {
-                                let type_ = self.type_expression()?;
-                                
-                                if self.match_token(TokenKind::Eq) {
-                                    let initialiser = Some(self.expression()?);
-                                    self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
-
-                                    let mut field = Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived: derived.clone(), modifiers: vec![] };
-                                    if accessors_defined[0] == TokenKind::Public {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Public);
-                                        }
-                                        public_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Private {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Private);
-                                        }
-                                        private_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Protected {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Protected);
-                                        }
-                                        protected_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Static {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Static);
-                                            modifiers.push(Modifier::Public);
-                                        }
-                                        static_fields.push(Box::new(field));
-                                    }
-                                } else {
-                                    self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
-
-                                    let mut field = Stmt::Variable { name, type_, initialiser: None, derived: derived.clone(), modifiers: vec![] };
-
-                                    if accessors_defined[0] == TokenKind::Public {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Public);
-                                        }
-                                        public_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Private {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Private);
-                                        }
-                                        private_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Protected {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Protected);
-                                        }
-                                        protected_fields.push(Box::new(field));
-                                    } else if accessors_defined[0] == TokenKind::Static {
-                                        if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                            modifiers.push(Modifier::Static);
-                                            modifiers.push(Modifier::Public);
-                                        }
-                                        static_fields.push(Box::new(field));
-                                    }
-                                }
-                            } else {
-                                let mut method = self.function_declaration("method")?;
-                                
-                                if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
-                                    *n = name;
-
-                                    if accessors_defined[0] == TokenKind::Public {
-                                        modifiers.push(Modifier::Public);
-                                        public_methods.push(Box::new(method));
-                                    } else if accessors_defined[0] == TokenKind::Private {
-                                        modifiers.push(Modifier::Private);
-                                        private_methods.push(Box::new(method));
-                                    } else if accessors_defined[0] == TokenKind::Protected {
-                                        modifiers.push(Modifier::Protected);
-                                        protected_methods.push(Box::new(method));
-                                    } else if accessors_defined[0] == TokenKind::Static {
-                                        modifiers.push(Modifier::Static);
-                                        static_methods.push(Box::new(method));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                self.consume(TokenKind::RBrace, "Expected '}' after class body.")?;
-
-                return Ok(Stmt::Class {
-                    name,
-                    generics,
-                    modifier: class_modifier,
-                    public_methods,
-                    private_methods,
-                    protected_methods,
-                    static_methods,
-                    public_fields,
-                    private_fields,
-                    protected_fields,
-                    static_fields,
-                });
-            } else {
-                self.consume(TokenKind::RParen, "Expected ')' after parameters.")?;
             }
 
-            self.consume(TokenKind::LBrace, "Expected '{' before class body.")?;
-
-            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                if self.match_token(TokenKind::Public) || self.match_token(TokenKind::Private) || self.match_token(TokenKind::Protected) || self.match_token(TokenKind::Static) {
-                    let accessors_defined = vec![self.previous().kind];
-
-                    self.consume(TokenKind::Colon, "Expected ':' after accessor.")?;
-
-                    while !self.check(TokenKind::RBrace) && !self.is_at_end() && !self.match_token(TokenKind::Public) && !self.match_token(TokenKind::Private) && !self.match_token(TokenKind::Protected) && !self.match_token(TokenKind::Static) {
-                        let name = self.consume(TokenKind::Identifier, "Expected field or function name.")?;
-
-                        if self.match_token(TokenKind::Colon) {
-                            let type_ = self.type_expression()?;
-
-                            let initialiser = if self.match_token(TokenKind::Eq) {
-                                Some(self.expression()?)
-                            } else {
-                                None
-                            };
-
-                            self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
-
-                            let mut field = Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived: derived.clone(), modifiers: vec![] };
-
-                            if accessors_defined[0] == TokenKind::Public {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Public);
-                                }
-                                public_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Private {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Private);
-                                }
-                                private_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Protected {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Protected);
-                                }
-                                protected_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Static {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Static);
-                                    modifiers.push(Modifier::Public);
-                                }
-                                static_fields.push(Box::new(field));
-                            }
-                        } else {
-                            let mut method = self.function_declaration("method")?;
-                                    
-                            if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
-                                *n = name;
-
-                                if accessors_defined[0] == TokenKind::Public {
-                                    modifiers.push(Modifier::Public);
-                                    public_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Private {
-                                    modifiers.push(Modifier::Private);
-                                    private_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Protected {
-                                    modifiers.push(Modifier::Protected);
-                                    protected_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Static {
-                                    modifiers.push(Modifier::Static);
-                                    static_methods.push(Box::new(method));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            self.consume(TokenKind::RBrace, "Expected '}' after class body.")?;
-
-            return Ok(Stmt::Class { name, generics, modifier: class_modifier, public_methods, private_methods, protected_methods, static_methods, public_fields, private_fields, protected_fields, static_fields });
-        } else {
-            self.consume(TokenKind::LBrace, "Expected '{' before class body.")?;
-
-            while !self.check(TokenKind::RBrace) && !self.is_at_end() {
-                if self.match_token(TokenKind::Public) || self.match_token(TokenKind::Private) || self.match_token(TokenKind::Protected) || self.match_token(TokenKind::Static) {
-                    let accessors_defined = vec![self.previous().kind];
-
-                    self.consume(TokenKind::Colon, "Expected ':' after accessor.")?;
-
-                    while !self.check(TokenKind::RBrace) && !self.is_at_end() && !self.match_token(TokenKind::Public) && !self.match_token(TokenKind::Private) && !self.match_token(TokenKind::Protected) && !self.match_token(TokenKind::Static) {
-                        let name = self.consume(TokenKind::Identifier, "Expected field or function name.")?;
-
-                        if self.match_token(TokenKind::Colon) {
-                            let type_ = self.type_expression()?;
-
-                            let initialiser = if self.match_token(TokenKind::Eq) {
-                                Some(self.expression()?)
-                            } else {
-                                None
-                            };
-
-                            self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
-
-                            let mut field = Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived: derived.clone(), modifiers: vec![] };
-
-                            if accessors_defined[0] == TokenKind::Public {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Public);
-                                }
-                                public_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Private {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Private);
-                                }
-                                private_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Protected {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Protected);
-                                }
-                                protected_fields.push(Box::new(field));
-                            } else if accessors_defined[0] == TokenKind::Static {
-                                if let Stmt::Variable { ref mut modifiers, .. } = field {
-                                    modifiers.push(Modifier::Static);
-                                    modifiers.push(Modifier::Public);
-                                }
-                                static_fields.push(Box::new(field));
-                            }
-                        } else {
-                            let mut method = self.function_declaration("method")?;
-                                    
-                            if let Stmt::Function { name: ref mut n, ref mut modifiers, .. } = method {
-                                *n = name;
-
-                                if accessors_defined[0] == TokenKind::Public {
-                                    modifiers.push(Modifier::Public);
-                                    public_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Private {
-                                    modifiers.push(Modifier::Private);
-                                    private_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Protected {
-                                    modifiers.push(Modifier::Protected);
-                                    protected_methods.push(Box::new(method));
-                                } else if accessors_defined[0] == TokenKind::Static {
-                                    modifiers.push(Modifier::Static);
-                                    static_methods.push(Box::new(method));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            self.consume(TokenKind::RBrace, "Expected '}' after class body.")?;
-
-            return Ok(Stmt::Class { name, generics, modifier: class_modifier, public_methods, private_methods, protected_methods, static_methods, public_fields, private_fields, protected_fields, static_fields });
+            self.consume(TokenKind::RParen, "Expected ')' after parameters.")?;
         }
+
+        self.consume(TokenKind::LBrace, "Expected '{' before class body.")?;
+
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            self.class_member(&mut fields, &mut methods)?;
+        }
+
+        self.consume(TokenKind::RBrace, "Expected '}' after class body.")?;
+
+        Ok(Stmt::Class { name, generics, modifier: class_modifier, fields, methods })
+    }
+
+    /// Parses the modifiers in front of a class member.
+    ///
+    /// Visibility (`public`/`private`/`protected`) and `static` are independent, so they
+    /// may be combined in either order. A member with no visibility modifier is private.
+    fn member_modifiers(&mut self) -> Result<Vec<Modifier>, Error> {
+        let mut visibility: Option<Modifier> = None;
+        let mut is_static = false;
+
+        loop {
+            let modifier = if self.match_token(TokenKind::Public) {
+                Some(Modifier::Public)
+            } else if self.match_token(TokenKind::Private) {
+                Some(Modifier::Private)
+            } else if self.match_token(TokenKind::Protected) {
+                Some(Modifier::Protected)
+            } else if self.match_token(TokenKind::Static) {
+                let token = self.previous();
+                if is_static {
+                    return Err(self.error_at(&token, "Duplicate `static` modifier."));
+                }
+                is_static = true;
+                continue;
+            } else {
+                break;
+            };
+
+            let token = self.previous();
+
+            if visibility.is_some() {
+                return Err(self.error_at(
+                    &token,
+                    "A member can only have one visibility modifier.",
+                ));
+            }
+
+            visibility = modifier;
+        }
+
+        let mut modifiers = vec![visibility.unwrap_or(Modifier::Private)];
+        if is_static {
+            modifiers.push(Modifier::Static);
+        }
+
+        Ok(modifiers)
+    }
+
+    /// Builds an error anchored at `token` rather than at the current position.
+    fn error_at(&mut self, token: &Token, message: &str) -> Error {
+        self.had_error = true;
+        self.errors += 1;
+        let mut e = Error::new(
+            message.to_string(),
+            token.line,
+            token.span.clone(),
+            self.filename.clone(),
+        );
+        e.add_source(self.source.clone());
+        e
+    }
+
+    /// Parses a single field or method of a class body.
+    fn class_member(
+        &mut self,
+        fields: &mut Vec<Box<Stmt>>,
+        methods: &mut Vec<Box<Stmt>>,
+    ) -> Result<(), Error> {
+        let modifiers = self.member_modifiers()?;
+
+        let name = self.consume(TokenKind::Identifier, "Expected field or method name.")?;
+
+        // `name: Type` is a field; anything else is a method.
+        if self.match_token(TokenKind::Colon) {
+            let type_ = self.type_expression()?;
+
+            let initialiser = if self.match_token(TokenKind::Eq) {
+                Some(Box::new(self.expression()?))
+            } else {
+                None
+            };
+
+            self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
+
+            fields.push(Box::new(Stmt::Variable {
+                name,
+                type_,
+                initialiser,
+                derived: Vec::new(),
+                modifiers,
+            }));
+        } else {
+            let mut method = self.function_declaration("method")?;
+
+            if let Stmt::Function { name: ref mut n, modifiers: ref mut method_modifiers, .. } = method {
+                *n = name;
+                method_modifiers.extend(modifiers);
+                method_modifiers.push(Modifier::Method);
+            }
+
+            methods.push(Box::new(method));
+        }
+
+        Ok(())
     }
 
     pub fn extend_declaration(&mut self) -> Result<Stmt, Error> {
@@ -694,10 +512,13 @@ impl Parser {
     pub fn type_expression(&mut self) -> Result<Type, Error> {
         let mut attributes: Vec<Attribute> = Vec::new();
         let mut derived = Vec::new();
-        let mut generics = Vec::new();
+        let mut generics: Vec<Type> = Vec::new();
         let mut kind: TypeKind;
         let name: Token;
 
+        // Prefix modifiers: `&T`, `#T`, `*T`. These bind more loosely than a postfix
+        // `[]`, so `&int[]` is a reference to an array of ints. Use parentheses to get
+        // the other grouping: `(&int)[]` is an array of references.
         while self.match_token(TokenKind::Amp) || self.match_token(TokenKind::Hash) || self.match_token(TokenKind::Mul) {
             if self.previous().kind == TokenKind::Amp {
                 derived.push(Derived::Ref);
@@ -708,157 +529,56 @@ impl Parser {
             }
         }
 
-        // Array handling
-        if self.check(TokenKind::LBracket) {
-            let mut clone: Vec<Vec<Derived>> = vec![];
-            let mut depth: usize = 0;
-    
-            while self.match_token(TokenKind::LBracket) {
-                depth += 1;
-                clone.push(Vec::new());
-                clone[depth-1].push(Derived::Array);
-
-                while self.match_token(TokenKind::Amp) || self.match_token(TokenKind::Hash) || self.match_token(TokenKind::Mul) {
-                    if self.previous().kind == TokenKind::Amp {
-                        clone[depth-1].push(Derived::Ref);
-                    } else if self.previous().kind == TokenKind::Hash {
-                        clone[depth-1].push(Derived::MutRef);
-                    } else if self.previous().kind == TokenKind::Mul {
-                        clone[depth-1].push(Derived::Ptr);
-                    }
-                }
-            }
-
-            if self.match_token(TokenKind::Fn) {
-                let mut generics = Vec::new();
-    
-                if self.match_token(TokenKind::Lt) {
-                    loop {
-                        generics.push(self.type_expression()?);
-    
-                        if !self.match_token(TokenKind::Comma) {
-                            break;
-                        }
-                    }
-    
-                    self.consume(TokenKind::Gt, "Expected '>' after function generics.")?;
-                }
-    
-                self.consume(TokenKind::LParen, "Expected '(' before function parameters.")?;
-    
-                let mut parameters = Vec::new();
-    
-                if !self.check(TokenKind::RParen) {
-                    loop {
-                        parameters.push(self.type_expression()?);
-    
-                        if !self.match_token(TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                }
-    
-                self.consume(TokenKind::RParen, "Expected ')' after function parameters.")?;
-                self.consume(TokenKind::Arrow, "Expected '->' before function return type.")?;
-    
-                let return_type = self.type_expression()?;
-                let name = Token::new(TokenKind::Fn, "".to_string(), 0, Span::new(0, 0));
-    
-                kind = TypeKind::Function(parameters, Box::new(return_type));
-
-                for _ in 0..depth {
-                    self.consume(TokenKind::RBracket, "Unmatched ']' in type expression.")?;
-                }
-
-                for c in clone.iter().rev() {
-                    kind = self.apply_derived(kind, &c, &attributes, &name, depth);
-                }
-
-                kind = self.apply_derived(kind, &derived, &attributes, &name, depth);
-    
-                let function_type = Type {
-                    attributes: attributes.clone(),
-                    name: name.clone(),
-                    derived: derived.clone(),
-                    generics: generics.into_iter().map(Box::new).collect(),
-                    kind,
-                    is_constructor: false
-                };
-
-                return Ok(function_type);
-            } else {
-                name = self.consume(TokenKind::Identifier, "Expected type name.")?;
-    
-                let mut inner = TypeKind::from_name(&name.lexeme.clone());
-
-                for _ in 0..depth {
-                    self.consume(TokenKind::RBracket, "Unmatched ']' in type expression.")?;
-                }
-
-                for c in clone.iter().rev() {
-                    inner = self.apply_derived(inner, &c, &attributes, &name, depth);
-                }
-
-                kind = self.apply_derived(inner, &derived, &attributes, &name, depth);
-            }
-        } else if self.match_token(TokenKind::Fn) {
-            let mut generics = Vec::new();
-    
+        if self.match_token(TokenKind::Fn) {
             if self.match_token(TokenKind::Lt) {
                 loop {
                     generics.push(self.type_expression()?);
-    
+
                     if !self.match_token(TokenKind::Comma) {
                         break;
                     }
                 }
-    
+
                 self.consume(TokenKind::Gt, "Expected '>' after function generics.")?;
             }
-    
+
             self.consume(TokenKind::LParen, "Expected '(' before function parameters.")?;
-    
+
             let mut parameters = Vec::new();
-    
+
             if !self.check(TokenKind::RParen) {
                 loop {
                     parameters.push(self.type_expression()?);
-    
+
                     if !self.match_token(TokenKind::Comma) {
                         break;
                     }
                 }
             }
-    
+
             self.consume(TokenKind::RParen, "Expected ')' after function parameters.")?;
             self.consume(TokenKind::Arrow, "Expected '->' before function return type.")?;
-    
-            let return_type = self.type_expression()?;
-            let name = Token::new(TokenKind::Fn, "".to_string(), 0, Span::new(0, 0));
-    
-            kind = TypeKind::Function(parameters, Box::new(return_type));
-    
-            kind = self.apply_derived(kind, &derived, &attributes, &name, 0);
-    
-            let function_type = Type {
-                attributes: attributes.clone(),
-                name: name.clone(),
-                derived: derived.clone(),
-                generics: generics.into_iter().map(Box::new).collect(),
-                kind,
-                is_constructor: false,
-            };
 
-            return Ok(function_type); 
+            let return_type = self.type_expression()?;
+
+            name = Token::new(TokenKind::Fn, "".to_string(), 0, Span::new(0, 0));
+            kind = TypeKind::Function(parameters, Box::new(return_type));
         } else if self.match_token(TokenKind::LParen) {
-            // Tuple handling
-            let mut tuple = Vec::new();
+            // `(A, B)` is a tuple, but a single parenthesised type is just a grouping,
+            // which is how you attach a postfix `[]` to a function or reference type.
+            let mut elements = Vec::new();
+            let mut trailing_comma = false;
 
             if !self.check(TokenKind::RParen) {
                 loop {
-                    tuple.push(self.type_expression()?);
+                    elements.push(self.type_expression()?);
 
                     if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+
+                    if self.check(TokenKind::RParen) {
+                        trailing_comma = true;
                         break;
                     }
                 }
@@ -866,52 +586,74 @@ impl Parser {
 
             self.consume(TokenKind::RParen, "Expected ')' after tuple type.")?;
 
-            kind = TypeKind::Tuple(tuple.clone());
+            if elements.len() == 1 && !trailing_comma {
+                let inner = elements.pop().unwrap();
 
-            let mut lexeme = String::from("(");
+                name = inner.name;
+                kind = inner.kind;
+                attributes.extend(inner.attributes);
+                generics.extend(inner.generics.into_iter().map(|g| *g));
+            } else {
+                kind = TypeKind::Tuple(elements.clone());
 
-            for e in tuple.iter() {
-                lexeme.push_str(&e.name.lexeme);
-                lexeme.push_str(", ");
+                let mut lexeme = String::from("(");
+
+                for e in elements.iter() {
+                    lexeme.push_str(&e.name.lexeme);
+                    lexeme.push_str(", ");
+                }
+
+                lexeme = lexeme.trim_end_matches(", ").to_string() + ")";
+
+                let (line, span) = match elements.last() {
+                    Some(last) => (last.name.line, last.name.span.clone()),
+                    None => (self.previous().line, self.previous().span),
+                };
+
+                name = Token::new(TokenKind::Identifier, lexeme, line, span);
             }
-
-            lexeme = lexeme.trim_end_matches(", ").to_string() + ")";
-
-            name = Token::new(TokenKind::Identifier, lexeme, tuple.last().unwrap().name.line, tuple.last().unwrap().name.span.clone());
         } else {
-            // check if it is a reference, pointer, mutref
-            // if it is, set kind to be Ref(Pointer(MutRef(...))) etc...
             name = self.consume(TokenKind::Identifier, "Expected type name.")?;
             kind = TypeKind::from_name(&name.lexeme.clone());
-            kind = self.apply_derived(kind, &derived, &attributes, &name, 0);
+
+            if self.match_token(TokenKind::Lt) {
+                loop {
+                    generics.push(self.type_expression()?);
+
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+
+                self.consume(TokenKind::Gt, "Expected '>' after type generics.")?;
+                attributes.push(Attribute::Class);
+            }
         }
 
-        if self.match_token(TokenKind::Lt) {
-            loop {
-                generics.push(self.type_expression()?);
-    
-                if !self.match_token(TokenKind::Comma) {
-                    break;
-                }
-            }
-    
-            self.consume(TokenKind::Gt, "Expected '>' after type generics.")?;
-            attributes.push(Attribute::Class);
-    
-            return Ok(Type {
-                attributes,
-                name,
-                generics: generics.into_iter().map(Box::new).collect(),
-                derived,
-                kind,
-                is_constructor: false,
-            });
+        // Postfix `[]`, repeated for multiple dimensions: `int[][]` is an array of
+        // arrays of ints. Each `[]` wraps whatever has been built up so far.
+        while self.match_token(TokenKind::LBracket) {
+            self.consume(TokenKind::RBracket, "Expected ']' after '[' in array type.")?;
+
+            kind = TypeKind::Array(
+                Box::new(Type {
+                    attributes: attributes.clone(),
+                    name: name.clone(),
+                    derived: vec![Derived::Array],
+                    generics: Vec::new(),
+                    kind,
+                    is_constructor: false,
+                }),
+                1,
+            );
         }
-    
+
+        kind = self.apply_derived(kind, &derived, &attributes, &name, 0);
+
         Ok(Type {
             attributes,
             name,
-            generics: vec![],
+            generics: generics.into_iter().map(Box::new).collect(),
             derived,
             kind,
             is_constructor: false,

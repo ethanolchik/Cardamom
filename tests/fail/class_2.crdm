@@ -1,0 +1,9 @@
+fn extern println(content: string) {}
+
+public class Person(private name: string) {
+    private static counter: string = "secret";
+}
+
+fn main() {
+    println(Person::counter);
+}
