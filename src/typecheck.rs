@@ -72,6 +72,72 @@ impl<'a> TypeChecker<'a> {
         self.register_extensions(module);
 
         module.accept(self);
+
+        self.check_entry_point(module);
+    }
+
+    /// `main` is the program entry point, so it has a fixed shape: it takes no
+    /// parameters and returns either `int` or `void`. Anything else cannot be lowered
+    /// to a valid C++ `main`, so reject it here instead of emitting broken C++.
+    fn check_entry_point(&mut self, module: &Module) {
+        for stmt in &module.statements {
+            let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt else {
+                continue;
+            };
+
+            if name.lexeme != "main" {
+                continue;
+            }
+
+            if modifiers.contains(&Modifier::Extern) {
+                self.error_token(name, "`main` cannot be declared `extern`");
+            }
+
+            if !generics.is_empty() {
+                self.error_token(name, "`main` cannot be generic");
+            }
+
+            if !params.is_empty() {
+                self.error_with_notes(
+                    name.clone(),
+                    &format!("`main` must take no parameters, but takes {}", params.len()),
+                    vec![Note::new(
+                        "`main` is the entry point of the program".to_string(),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        "Remove the parameters from `main`".to_string(),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+            }
+
+            if return_type.kind != TypeKind::Int && return_type.kind != TypeKind::Void {
+                self.error_with_notes(
+                    return_type.name.clone(),
+                    &format!(
+                        "`main` must return `int` or `void`, but returns `{}`",
+                        return_type.kind
+                    ),
+                    vec![Note::new(
+                        "`main` is the entry point of the program".to_string(),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        "Change the return type of `main` to `int` or `void`".to_string(),
+                        return_type.name.line,
+                        return_type.name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+            }
+        }
     }
 
     pub fn has_errors(&self) -> bool {
@@ -1979,63 +2045,93 @@ impl<'a> Visitor for TypeChecker<'a> {
             // If we are, then we can lookup the variable we are assigning to
             // and check if the type of the closure matches the expected type
             // If we are not in an assignment, then we should expect type annotations on each parameter.
-            let expected_type: Option<Type>;
-            if let Some(expr) = &self.current_assignment {
-                expected_type = match expr {
-                    Expr::Assignment { name, .. } => {
-                        let sym = self.symtable.lookup_symbol(&name.lexeme);
-
-                        if let Some(x) = sym {
-                            match x {
-                                Symbol::Variable(_, _, ty, ..) => Some(ty.clone()),
-                                _ => unreachable!()
-                            }
-                        } else {
-                            None
-                        }
+            let expected_type: Option<Type> = match &self.current_assignment {
+                Some(Expr::Assignment { name, .. })
+                | Some(Expr::MemberAssignment { name, .. }) => {
+                    match self.symtable.lookup_symbol(&name.lexeme) {
+                        // Only variables carry a declared type we can infer from; a closure
+                        // assigned to anything else simply has no expected type.
+                        Some(Symbol::Variable(_, _, ty, ..)) => Some(ty.clone()),
+                        _ => None,
                     }
-                    Expr::MemberAssignment { name, ..} => {
-                        let sym = self.symtable.lookup_symbol(&name.lexeme);
-
-                        if let Some(x) = sym {
-                            match x {
-                                Symbol::Variable(_, _, ty, ..) => Some(ty.clone()),
-                                _ => unreachable!()
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None
                 }
-            } else {
-                expected_type = None;
+                _ => None,
+            };
+
+            // Work out the type of every closure parameter.
+            //
+            // A parameter is either annotated (`|x: int|`) or inferred from the type the
+            // closure is being assigned to (`let f: fn(int) -> void = |x| void -> {..}`).
+            // Codegen relies on these types to emit the C++ lambda signature, so a
+            // parameter we cannot resolve has to be a reported error, not a panic.
+            let expected_params: Option<Vec<Type>> = match expected_type.as_ref().map(|t| &t.kind) {
+                Some(TypeKind::Function(params, _)) => Some(params.clone()),
+                Some(other) => {
+                    self.error_token(
+                        name,
+                        &format!(
+                            "Cannot assign a closure to a value of non-function type `{}`",
+                            other
+                        ),
+                    );
+                    None
+                }
+                None => None,
+            };
+
+            if let Some(params) = expected_params.as_ref() {
+                if params.len() != parameters.len() {
+                    self.error_token(
+                        name,
+                        &format!(
+                            "Closure takes {} parameter(s) but `{}` expects {}",
+                            parameters.len(),
+                            expected_type.as_ref().map(|t| t.kind.to_string()).unwrap_or_default(),
+                            params.len()
+                        ),
+                    );
+                }
             }
 
+            // Declare each closure parameter in the symbol table.
             let mut tys: Vec<Type> = Vec::new();
-            // Declare each closure parameter in the symbol table
-            if let Some(ref ty) = expected_type {
-                tys = match ty.kind {
-                    TypeKind::Function(ref params, _) => params.clone(),
-                    _ => unreachable!()
+            for (i, param_token) in parameters.iter().enumerate() {
+                let resolved = expected_params
+                    .as_ref()
+                    .and_then(|params| params.get(i).cloned())
+                    .or_else(|| param_types.get(i).cloned());
+
+                let param_ty = match resolved {
+                    Some(ty) => ty,
+                    None => {
+                        self.error_with_notes(
+                            param_token.clone(),
+                            &format!(
+                                "Cannot infer the type of closure parameter `{}`",
+                                param_token.lexeme
+                            ),
+                            vec![Note::new(
+                                "Closure parameter types are only inferred when the closure is assigned to a variable with a declared function type".to_string(),
+                                param_token.line,
+                                param_token.span.clone(),
+                                self.filename.clone(),
+                            )],
+                            vec![Help::new(
+                                format!("Annotate the parameter, e.g. `|{}: int|`", param_token.lexeme),
+                                param_token.line,
+                                param_token.span.clone(),
+                                self.filename.clone(),
+                            )],
+                        );
+                        Type::new(param_token.clone(), TypeKind::User("error".to_string()))
+                    }
                 };
 
-                for (i, param_token) in parameters.iter().enumerate() {
-                    // Declare in the symbol table
-                    self.symtable.declare_symbol(
-                        &param_token.lexeme, 
-                        Symbol::new_variable(param_token.clone(), tys[i].clone())
-                    );
-                }
-            } else {
-                for (i, param_token) in parameters.iter().enumerate() {
-                    self.symtable.declare_symbol(
-                        &param_token.lexeme,
-                        Symbol::new_variable(param_token.clone(), param_types[i].clone())
-                    );
-
-                    // No need to push the type of the parameter anymore
-                }
+                self.symtable.declare_symbol(
+                    &param_token.lexeme,
+                    Symbol::new_variable(param_token.clone(), param_ty.clone()),
+                );
+                tys.push(param_ty);
             }
 
             // Visit the closure body statement (which can contain returns)
@@ -2073,19 +2169,12 @@ impl<'a> Visitor for TypeChecker<'a> {
     
             // Finally, set the closure's type. We treat the closure 
             // as a function with `param_types -> return_type`.
-            let closure_type: Type;
-            if expected_type.is_none() {
-                closure_type = Type::new(
-                    name.clone(),
-                    // The function type: (param_types) -> return_type
-                    TypeKind::Function(param_types.clone(), Box::new(return_type.clone())),
-                );
-            } else {
-                closure_type = Type::new(
-                    name.clone(),
-                    TypeKind::Function(tys, Box::new(return_type.clone()))
-                )
-            }
+            // `tys` already holds the resolved parameter types, whether they came from
+            // annotations or were inferred, so it is the single source of truth here.
+            let closure_type = Type::new(
+                name.clone(),
+                TypeKind::Function(tys, Box::new(return_type.clone())),
+            );
             self.set_expr_type(expr, closure_type);
         }
     }    
@@ -2405,8 +2494,13 @@ impl<'a> Visitor for TypeChecker<'a> {
                     );
                 }
 
+                // Give the initialiser the declared type as its expected type (this is how
+                // closure parameter types get inferred), then restore the previous context so
+                // an unrelated expression later on cannot pick up a stale expectation.
+                let old_assignment = self.current_assignment.take();
                 self.current_assignment = Some(Expr::Assignment { name: name.clone(), value: init.clone(), op: Token::dummy("=") });
                 init.accept(self);
+                self.current_assignment = old_assignment;
                 self.current_initialiser = None;
                 self.symtable.end_scope();
                 let init_ty = self.get_expr_type(init).cloned().unwrap_or_else(|| {

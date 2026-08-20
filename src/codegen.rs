@@ -2,12 +2,24 @@ use crate::ast::{Module, Node, Stmt, Expr, Visitor};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
 use crate::ast::Modifier;
+use std::collections::HashMap;
 use std::fmt::Write;
+
+/// Types inferred by the type checker, keyed by AST node address.
+///
+/// The type checker and the code generator both borrow the *same* `Module`, so these
+/// addresses stay valid and let codegen re-use inferred information (most importantly
+/// closure parameter types, which are not written anywhere in the AST).
+pub type ExprTypes = HashMap<*const Expr, Type>;
 
 /// The CppCodeGenerator traverses the AST and produces C++ source code.
 pub struct CppCodeGenerator {
     output: String,
     indent_level: usize,
+    expr_types: ExprTypes,
+    /// True while generating the body of a `main` that was declared as returning `void`,
+    /// so bare `return;` statements can be lowered to `return 0;`.
+    in_synthesised_int_main: bool,
 }
 
 impl CppCodeGenerator {
@@ -16,6 +28,16 @@ impl CppCodeGenerator {
         Self {
             output: String::new(),
             indent_level: 0,
+            expr_types: ExprTypes::new(),
+            in_synthesised_int_main: false,
+        }
+    }
+
+    /// Creates a code generator that can consult the types inferred by the type checker.
+    pub fn with_types(expr_types: ExprTypes) -> Self {
+        Self {
+            expr_types,
+            ..Self::new()
         }
     }
 
@@ -27,10 +49,71 @@ impl CppCodeGenerator {
         self.writeln("#include <string>");
         self.writeln("#include <sstream>");
         self.writeln("#include <cstdlib>");
+        self.writeln("#include <functional>");
+        self.writeln("#include <tuple>");
         self.writeln("#include \"std.hpp\"");
         self.writeln("");
+
+        // Cardamom does not require a function to be declared before it is used, but C++
+        // does, so emit prototypes for every top-level function up front.
+        self.write_function_prototypes(module);
+
         module.accept(self);
+
+        // C++ programs need an entry point even when the source module has no `main`.
+        if !Self::has_main(module) {
+            self.writeln("int main()");
+            self.writeln("{");
+            self.indent_level += 1;
+            self.writeln("return 0;");
+            self.indent_level -= 1;
+            self.writeln("}");
+        }
+
         self.output.clone()
+    }
+
+    fn has_main(module: &Module) -> bool {
+        module.statements.iter().any(|stmt| {
+            matches!(&**stmt, Stmt::Function { name, .. } if name.lexeme == "main")
+        })
+    }
+
+    fn write_function_prototypes(&mut self, module: &Module) {
+        let mut wrote_any = false;
+        for stmt in &module.statements {
+            if let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt {
+                // `main` is special-cased below, extern builtins are emitted in full, and
+                // generic functions have no single concrete signature to declare.
+                if name.lexeme == "main"
+                    || modifiers.contains(&Modifier::Extern)
+                    || !generics.is_empty()
+                {
+                    continue;
+                }
+                let ret_type = self.translate_type(return_type);
+                let param_str = self.translate_params(params);
+                self.writeln(&format!("{} {}({});", ret_type, name.lexeme, param_str));
+                wrote_any = true;
+            }
+        }
+        if wrote_any {
+            self.writeln("");
+        }
+    }
+
+    /// Renders a parameter list (`int a, std::string b`) for a function or method.
+    fn translate_params(&self, params: &[Box<Stmt>]) -> String {
+        let mut param_str = String::new();
+        for param in params.iter() {
+            if let Stmt::Variable { name, type_, .. } = &**param {
+                if !param_str.is_empty() {
+                    param_str.push_str(", ");
+                }
+                write!(&mut param_str, "{} {}", self.translate_type(type_), name.lexeme).unwrap();
+            }
+        }
+        param_str
     }
 
     /// Returns a string of indentation based on the current indent level.
@@ -68,7 +151,39 @@ impl CppCodeGenerator {
                 }
                 inner_type
             }
-            _ => "int".to_string(), // fallback
+            // Function values (closures and function pointers) become `std::function`, so
+            // they can hold both plain functions and capturing lambdas.
+            TypeKind::Function(params, ret) => {
+                let params_str = params
+                    .iter()
+                    .map(|p| self.translate_type(p))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("std::function<{}({})>", self.translate_type(ret), params_str)
+            }
+            TypeKind::Pointer(inner) => format!("{}*", self.translate_type(inner)),
+            // `&T` is a borrow that the type checker already treats as interchangeable with
+            // `T`, so it is lowered to a by-value parameter; `#T` is the mutable form and
+            // becomes a real C++ reference.
+            TypeKind::Reference(inner) => self.translate_type(inner),
+            TypeKind::MutRef(inner) => format!("{}&", self.translate_type(inner)),
+            TypeKind::Tuple(elements) => {
+                let elements_str = elements
+                    .iter()
+                    .map(|e| self.translate_type(e))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("std::tuple<{}>", elements_str)
+            }
+            TypeKind::GenericInstance(name, args) => {
+                let args_str = args
+                    .iter()
+                    .map(|a| self.translate_type(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}<{}>", name, args_str)
+            }
+            TypeKind::GenericParam(name) => name.clone(),
         }
     }
 
@@ -182,8 +297,11 @@ impl CppCodeGenerator {
                 self.output.push_str(".pop_back()");
             }
             "len" => {
+                // `.size()` is unsigned; cast so it can be mixed with `int` arithmetic and
+                // comparisons without signed/unsigned surprises.
+                self.output.push_str("static_cast<int>(");
                 object.accept(self);
-                self.output.push_str(".size()");
+                self.output.push_str(".size())");
             }
             "charAt" => {
                 self.output.push_str("std::string(1, ");
@@ -315,6 +433,9 @@ impl Visitor for CppCodeGenerator {
             if let Some(expr) = value {
                 self.output.push(' ');
                 expr.accept(self);
+            } else if self.in_synthesised_int_main {
+                // `return;` inside a `void` main becomes `return 0;` in the generated `int main`.
+                self.output.push_str(" 0");
             }
             self.output.push_str(";");
             self.output.push('\n');
@@ -357,24 +478,33 @@ impl Visitor for CppCodeGenerator {
                 }
             }
             
-            let ret_type = self.translate_type(return_type);
-            let mut param_str = String::new();
-            for (i, param) in params.iter().enumerate() {
-                if let Stmt::Variable { name: param_name, type_, .. } = &**param {
-                    let cpp_type = self.translate_type(type_);
-                    write!(&mut param_str, "{} {}", cpp_type, param_name.lexeme).unwrap();
-                    if i < params.len() - 1 {
-                        param_str.push_str(", ");
-                    }
-                }
-            }
+            // C++ requires `main` to return `int`. Cardamom allows `fn main()` (i.e. a
+            // `void` return), so synthesise the `int` return type and the trailing
+            // `return 0;` for that case.
+            let is_main = name.lexeme == "main";
+            let void_main = is_main && return_type.kind == TypeKind::Void;
+            let ret_type = if void_main {
+                "int".to_string()
+            } else {
+                self.translate_type(return_type)
+            };
+            let param_str = self.translate_params(params);
+
             self.writeln(&format!("{} {}({})", ret_type, name.lexeme, param_str));
             self.output.push_str(&self.indent());
             self.output.push_str("{\n");
             self.indent_level += 1;
+
+            let old_in_main = self.in_synthesised_int_main;
+            self.in_synthesised_int_main = void_main;
             for s in body {
                 s.accept(self);
             }
+            if void_main {
+                self.writeln("return 0;");
+            }
+            self.in_synthesised_int_main = old_in_main;
+
             self.indent_level -= 1;
             self.writeln("}");
         }
@@ -588,7 +718,8 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_reference(&mut self, expr: &Expr) {
         if let Expr::Reference { object } = expr {
-            self.output.push('&');
+            // `&T` is lowered to a by-value `T` (see `translate_type`), so there is nothing
+            // to take the address of here.
             object.accept(self);
         }
     }
@@ -601,25 +732,55 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_closure(&mut self, expr: &Expr) {
-        if let Expr::Closure { name, parameters, param_types, body, return_type } = expr {
-            // Generate a unique function name for the closure.
-            let func_name = format!("closure_{}", name.lexeme);
-            let ret_type = self.translate_type(return_type);
+        if let Expr::Closure { name: _, parameters, param_types, body, return_type } = expr {
+            // A closure is an *expression*, so it has to be emitted inline. Emitting a
+            // named function definition here produced C++ that could never compile;
+            // a lambda is both valid in expression position and able to capture.
+            //
+            // Parameter types are usually inferred from the closure's expected type, so
+            // prefer the type checker's result and fall back to any explicit annotations.
+            let inferred_params = match self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind) {
+                Some(TypeKind::Function(params, _)) => Some(params.clone()),
+                _ => None,
+            };
+
             let mut params_str = String::new();
             for (i, param) in parameters.iter().enumerate() {
-                let param_type = self.translate_type(&param_types[i]);
-                write!(&mut params_str, "{} {}", param_type, param.lexeme).unwrap();
-                if i < parameters.len() - 1 {
+                let param_type = inferred_params
+                    .as_ref()
+                    .and_then(|params| params.get(i))
+                    .or_else(|| param_types.get(i))
+                    .map(|ty| self.translate_type(ty))
+                    .unwrap_or_else(|| "auto".to_string());
+                if i > 0 {
                     params_str.push_str(", ");
                 }
+                write!(&mut params_str, "{} {}", param_type, param.lexeme).unwrap();
             }
-            self.writeln(&format!("static {} {}({}) {{", ret_type, func_name, params_str));
-            self.indent_level += 1;
-            body.accept(self);
-            self.indent_level -= 1;
-            self.writeln("}");
-            // In the closure expression, return the function pointer.
-            self.output.push_str(&func_name);
+
+            let ret_type = self.translate_type(return_type);
+            // Capture by value so the lambda stays valid after the enclosing scope ends
+            // (closures can be returned from functions).
+            self.output.push_str(&format!("[=]({}) -> {} ", params_str, ret_type));
+
+            let body_code = self.capture_output(|gen| {
+                match &**body {
+                    Stmt::Block { .. } => body.accept(gen),
+                    _ => {
+                        gen.writeln("{");
+                        gen.indent_level += 1;
+                        body.accept(gen);
+                        gen.indent_level -= 1;
+                        gen.writeln("}");
+                    }
+                }
+            });
+            // The body was rendered as statements, so drop the leading indent and the
+            // trailing newline to keep it inside the surrounding expression.
+            self.output.push_str(body_code.trim_start());
+            while self.output.ends_with('\n') {
+                self.output.pop();
+            }
         }
     }
 
@@ -751,6 +912,72 @@ mod tests {
     use crate::utils::symtable::SymbolTable;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    fn parse_and_check_with_types(relative_path: &str) -> (Module, ExprTypes) {
+        let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
+        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+
+        let mut lexer = Lexer::new(source.clone(), filename.clone());
+        lexer.scan_tokens();
+        assert!(!lexer.had_error, "`{}` should lex cleanly", relative_path);
+
+        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
+        let module = parser
+            .parse()
+            .unwrap_or_else(|err| panic!("`{}` should parse: {}", relative_path, err.to_string()));
+        assert!(!parser.had_error, "`{}` should parse cleanly", relative_path);
+
+        let mut symtable = SymbolTable::new();
+        let mut checker = TypeChecker::new(&mut symtable, filename, source);
+        checker.check_module(&module);
+        assert_eq!(checker.error_count(), 0, "`{}` should typecheck", relative_path);
+
+        let expr_types = checker.expr_types.clone();
+        (module, expr_types)
+    }
+
+    /// Every fixture in `tests/pass` must lower to C++ that actually compiles.
+    #[test]
+    fn pass_fixtures_generate_compilable_cpp() {
+        let fixtures = std::fs::read_dir(format!("{}/tests/pass", env!("CARGO_MANIFEST_DIR")))
+            .expect("tests/pass should be readable");
+
+        for entry in fixtures {
+            let path = entry.expect("directory entry should be readable").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("crdm") {
+                continue;
+            }
+            let relative = format!("tests/pass/{}", path.file_name().unwrap().to_string_lossy());
+
+            let (module, expr_types) = parse_and_check_with_types(&relative);
+            let mut generator = CppCodeGenerator::with_types(expr_types);
+            let code = generator.generate(&module);
+
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let cpp_path = format!("/tmp/cardamom_pass_{}_{}.cpp", std::process::id(), stem);
+            let bin_path = format!("/tmp/cardamom_pass_{}_{}", std::process::id(), stem);
+            std::fs::write(&cpp_path, code).expect("generated C++ should be writable");
+
+            let compile = Command::new("g++")
+                .arg(&cpp_path)
+                .arg("-I")
+                .arg(env!("CARGO_MANIFEST_DIR"))
+                .arg("-o")
+                .arg(&bin_path)
+                .output()
+                .expect("g++ should run");
+
+            assert!(
+                compile.status.success(),
+                "`{}` should generate compilable C++:\n{}",
+                relative,
+                String::from_utf8_lossy(&compile.stderr)
+            );
+
+            let _ = std::fs::remove_file(cpp_path);
+            let _ = std::fs::remove_file(bin_path);
+        }
+    }
 
     fn parse_and_check(relative_path: &str) -> Module {
         let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);

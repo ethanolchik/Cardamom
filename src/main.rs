@@ -77,7 +77,9 @@ fn run_file(filename: String) -> bool {
             return false;
         }
     
-        let mut cg = CppCodeGenerator::new();
+        // Hand the inferred expression types to codegen so it can emit things the AST
+        // alone does not describe, such as inferred closure parameter types.
+        let mut cg = CppCodeGenerator::with_types(tc.expr_types.clone());
         let code = cg.generate(module);
 
         let mut output = File::create("output.cpp").unwrap();

@@ -39,12 +39,16 @@ fn main() -> void {
 }
 ```
 
-## Progress
-- [x] Lexing
-- [x] Parsing
-- [ ] Symbol Table
-- [ ] Type Checking
-- [ ] Code Generation
-- [ ] Maybe GC?
-
 I am currently developing this programming language as a hobby
+
+## Building
+```sh
+cargo build --release
+cp ./target/release/cardamom ./cardamom
+```
+
+## Usage
+```sh
+./cardamom <file>       # compile the file and generate ./output
+./cardamom <file> -out  # compile the file and generate ./output and ./output.cpp
+```
