@@ -30,7 +30,7 @@ pub enum TokenKind {
     Bang, Question, Eq, Neq, Lt, Gt, Lte, Gte, EqEq, And, Or,
     PlusEq, MinusEq, MulEq, DivEq, ModEq, AmpEq, PipeEq, CaretEq,
     QuestionQuestion, Pow, PowEq, LShift, RShift, LShiftEq, RShiftEq,
-    Range, Arrow, Hash, StaticAccess,
+    Range, Arrow, Hash, StaticAccess, At,
 
     // Delimiters
     LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Dot, Colon, Semicolon,
@@ -110,6 +110,7 @@ impl TokenKind {
             TokenKind::Arrow => "Arrow".to_string(),
             TokenKind::Hash => "Hash".to_string(),
             TokenKind::StaticAccess => "StaticAccess".to_string(),
+            TokenKind::At => "At".to_string(),
             TokenKind::LParen => "LParen".to_string(),
             TokenKind::RParen => "RParen".to_string(),
             TokenKind::LBrace => "LBrace".to_string(),

@@ -32,6 +32,10 @@ pub enum TypeKind {
     User(String),
     GenericParam(String),
     GenericInstance(String, Vec<Type>),
+    /// An imported standard library module, e.g. the `io` in `io.println(..)`.
+    /// Modules are namespaces, not values, so this type only ever appears as the
+    /// type of the name to the left of a `.`.
+    Module(String),
 }
 
 impl Display for Type {
@@ -188,6 +192,7 @@ impl TypeKind {
                 format!("({})", types_str)
             },
             TypeKind::Void => "void".to_string(),
+            TypeKind::Module(name) => format!("module {}", name),
             TypeKind::User(name) => name.clone(),
             TypeKind::GenericParam(name) => name.clone(),
             TypeKind::GenericInstance(name, types) => {

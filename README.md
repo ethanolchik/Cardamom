@@ -4,7 +4,7 @@ Another programming language implementation (hopefully this time will be better)
 
 ## Example code
 ```cpp
-import "std.io" as io;
+import io;
 
 public class Person(private name: string, private age: int) {
     private address: string = "1 High Road";
@@ -37,47 +37,83 @@ fn main() -> void {
 }
 ```
 
-> Note: `import`, `Option` and `??` in the example above are parsed but not yet
-> implemented end to end.
+> Note: `Option` and `??` in the example above are parsed but not yet implemented
+> end to end.
 
-## Class members
+## Modules
 
-Visibility (`public`/`private`/`protected`) and `static` are independent properties, so
-members are annotated individually rather than grouped into `public:` style sections.
-That is what makes combinations like `private static` expressible:
+`import <name>;` looks for a module as `<name>.crdm` or `<name>/main.crdm`, searching
+next to the importing file first and then the standard library. Only `public` functions
+are visible to importers.
 
 ```cpp
-public class Registry(private name: string) {
-    private static instances: int = 0;  // private *and* static
-    public static limit: int = 10;
+// geometry/main.crdm
+import math;
 
-    public static describe() -> string {
-        return "registry";
-    }
+public fn clamped(v: int, lo: int, hi: int) -> int {
+    return math.min(math.max(v, lo), hi);
+}
+
+fn helper() -> int { return 1; }   // private to this module
+```
+
+```cpp
+// app.crdm
+import io;
+import str;
+import geometry;
+
+fn main() {
+    io.println(str.fromInt(geometry.clamped(99, 0, 10)));
 }
 ```
 
-Modifiers may appear in either order (`public static` or `static public`), and a member
-with no visibility modifier is `private`.
+Use `import <module> as <name>;` to bind a module to a different name. Import cycles are
+detected and reported with the full chain.
 
-## Array types
+## Standard library
 
-Array types are written postfix, and repeat for extra dimensions:
+The standard library is just a set of modules that happen to live on the search path.
+It is written in Cardamom, in `std/`:
+
+| Module | Provides |
+| --- | --- |
+| `io` | `print`, `println`, `input` |
+| `str` | `len`, `charAt`, `charCodeAt`, `fromASCII`, `fromInt`, `fromFloat`, `toInt`, `toFloat`, `substring`, `repeat`, `contains` |
+| `math` | `abs`, `min`, `max`, `pow`, `sqrt` |
+
+Adding a function means editing `std/<module>/main.crdm` — no compiler changes.
+
+Only the functions a program actually calls are emitted, so importing a module costs
+nothing for the parts you do not use.
+
+The search path is, in order: the importing file's directory, `$CARDAMOM_STD`, `std/`
+next to the compiler binary, and the source checkout.
+
+### Intrinsics
+
+Most of the library is ordinary Cardamom, but the leaves have to reach C++ eventually.
+`@cpp` splices code into the generated function body and `@include` adds a header:
 
 ```cpp
-let a: int[] = [1, 2, 3];
-let b: int[][] = [[1, 2], [3, 4]];
-let s: string[] = ["x", "y"];
+public fn println(content: string) {
+    @include("<iostream>");
+    @cpp("std::cout << content << std::endl;");
+}
+
+// Built on top, in plain Cardamom:
+public fn repeat(s: string, times: int) -> string {
+    let out: string = "";
+    let i: int = 0;
+    while (i < times) {
+        out += s;
+        i += 1;
+    }
+    return out;
+}
 ```
 
-A postfix `[]` binds tighter than the prefix modifiers `&`, `#` and `*`, so `&int[]` is a
-reference to an array. Parenthesise to group the other way:
-
-```cpp
-let a: &int[];              // reference to an array of int
-let b: (&int)[];            // array of references to int
-let f: (fn(int) -> int)[];  // array of functions
-```
+`fn extern name(..) -> T {}` remains available to declare a function you link yourself.
 
 I am currently developing this programming language as a hobby
 

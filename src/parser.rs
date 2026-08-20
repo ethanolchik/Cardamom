@@ -661,12 +661,17 @@ impl Parser {
     }
 
     pub fn import_declaration(&mut self) -> Result<Stmt, Error> {
-        let path = Expr::Literal { value: self.consume(TokenKind::String, "Expected string after 'import'.")? };
-        self.consume(TokenKind::As, "Expected 'as' after import path.")?;
-        let alias = self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?;
+        // `import io;`, or `import io as console;` to bind it to a different name.
+        let name = self.consume(TokenKind::Identifier, "Expected module name after 'import'.")?;
+
+        let alias = if self.match_token(TokenKind::As) {
+            self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?
+        } else {
+            name.clone()
+        };
 
         self.consume(TokenKind::Semicolon, "Expected ';' after import statement.")?;
-        Ok(Stmt::Import { path: Box::new(path), alias })
+        Ok(Stmt::Import { name, alias })
     }
 
     pub fn expression_statement(&mut self) -> Result<Stmt, Error> {
@@ -980,6 +985,26 @@ impl Parser {
     pub fn primary(&mut self) -> Result<Expr, Error> {
         if self.match_token(TokenKind::Integer) || self.match_token(TokenKind::Float) || self.match_token(TokenKind::String) {
             return Ok(Expr::Literal { value: self.previous().clone() });
+        }
+
+        // Compiler intrinsics: `@cpp("..")`, `@include("..")`.
+        if self.match_token(TokenKind::At) {
+            let name = self.consume(TokenKind::Identifier, "Expected intrinsic name after '@'.")?;
+            self.consume(TokenKind::LParen, "Expected '(' after intrinsic name.")?;
+
+            let mut arguments = Vec::new();
+            if !self.check(TokenKind::RParen) {
+                loop {
+                    arguments.push(Box::new(self.expression()?));
+
+                    if !self.match_token(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+
+            self.consume(TokenKind::RParen, "Expected ')' after intrinsic arguments.")?;
+            return Ok(Expr::Intrinsic { name, arguments });
         }
 
         if self.match_token(TokenKind::Identifier) {

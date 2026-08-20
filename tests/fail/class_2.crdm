@@ -1,9 +1,9 @@
-fn extern println(content: string) {}
+import io;
 
 public class Person(private name: string) {
     private static counter: string = "secret";
 }
 
 fn main() {
-    println(Person::counter);
+    io.println(Person::counter);
 }

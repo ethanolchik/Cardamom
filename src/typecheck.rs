@@ -38,7 +38,29 @@ pub struct TypeChecker<'a> {
     in_static_context: bool,
     in_call: bool,
 
+    /// Public functions of every module compiled so far, keyed by module name. This is
+    /// what `io.println` resolves against.
+    pub module_exports: HashMap<String, ModuleExports>,
+    /// True when checking an imported module rather than the program itself, which
+    /// relaxes the requirement to have a `main`.
+    is_library: bool,
+
     pub monomorph_table: MonomorphTable,
+}
+
+/// The names a module makes available to anything that imports it.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleExports {
+    /// Exported function name -> (parameter types, return type).
+    pub functions: HashMap<String, (Vec<Type>, Type)>,
+}
+
+impl ModuleExports {
+    pub fn function_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.functions.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 impl<'a> TypeChecker<'a> {
@@ -61,12 +83,26 @@ impl<'a> TypeChecker<'a> {
             in_static_context: false,
             in_call: false,
 
+            module_exports: HashMap::new(),
+            is_library: false,
+
             monomorph_table: MonomorphTable::new(),
         }
     }
 
+    /// Makes the exports of already-compiled modules visible to this one.
+    pub fn set_module_exports(&mut self, exports: HashMap<String, ModuleExports>) {
+        self.module_exports = exports;
+    }
+
+    /// Marks this as an imported module, which is not required to define `main`.
+    pub fn set_is_library(&mut self, is_library: bool) {
+        self.is_library = is_library;
+    }
+
     /// Main entry point for type-checking a module.
     pub fn check_module(&mut self, module: &Module) {
+        self.resolve_imports(module);
         self.collect_declarations(module);
         self.define_class_members(module);
         self.register_extensions(module);
@@ -76,10 +112,46 @@ impl<'a> TypeChecker<'a> {
         self.check_entry_point(module);
     }
 
+    /// Collects the `public` functions of the module just checked, so importers can
+    /// resolve calls against them.
+    pub fn exports(&self, module: &Module) -> ModuleExports {
+        let mut exports = ModuleExports::default();
+
+        for stmt in &module.statements {
+            let Stmt::Function { name, params, return_type, modifiers, .. } = &**stmt else {
+                continue;
+            };
+
+            // Only `public fn` is exported; everything else is module-private.
+            if !modifiers.contains(&Modifier::Public) {
+                continue;
+            }
+
+            let param_types = params
+                .iter()
+                .filter_map(|p| match &**p {
+                    Stmt::Variable { type_, .. } => Some(type_.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            exports
+                .functions
+                .insert(name.lexeme.clone(), (param_types, return_type.clone()));
+        }
+
+        exports
+    }
+
     /// `main` is the program entry point, so it has a fixed shape: it takes no
     /// parameters and returns either `int` or `void`. Anything else cannot be lowered
     /// to a valid C++ `main`, so reject it here instead of emitting broken C++.
     fn check_entry_point(&mut self, module: &Module) {
+        // Imported modules are libraries; only the program itself needs an entry point.
+        if self.is_library {
+            return;
+        }
+
         for stmt in &module.statements {
             let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt else {
                 continue;
@@ -151,6 +223,58 @@ impl<'a> TypeChecker<'a> {
     pub fn emit_errors(&self) {
         for err in self.errors.borrow().iter() {
             eprintln!("{}", err.to_string());
+        }
+    }
+
+    /// Binds each `import <module>;` to a module that has already been type checked.
+    ///
+    /// The imported name becomes a symbol of module type, so `io.println` resolves
+    /// through the normal member-access path.
+    fn resolve_imports(&mut self, module: &Module) {
+        let mut imported: HashMap<String, Token> = HashMap::new();
+
+        for stmt in &module.statements {
+            let Stmt::Import { name, alias } = &**stmt else {
+                continue;
+            };
+
+            // The loader has already resolved and compiled every import, so a missing
+            // entry here means loading failed and has been reported already.
+            if !self.module_exports.contains_key(&name.lexeme) {
+                continue;
+            }
+
+            if let Some(previous) = imported.get(&alias.lexeme) {
+                self.error_with_notes(
+                    alias.clone(),
+                    &format!("`{}` is imported more than once", alias.lexeme),
+                    vec![Note::new(
+                        format!("`{}` was first imported here", alias.lexeme),
+                        previous.line,
+                        previous.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        "Use `import <module> as <name>;` to bind it to a different name".to_string(),
+                        alias.line,
+                        alias.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+                continue;
+            }
+
+            imported.insert(alias.lexeme.clone(), alias.clone());
+
+            let module_type = Type::new(
+                alias.clone(),
+                TypeKind::Module(name.lexeme.clone()),
+            );
+
+            self.symtable.declare_module(
+                &alias.lexeme,
+                Symbol::new_variable(alias.clone(), module_type),
+            );
         }
     }
 
@@ -363,6 +487,8 @@ impl<'a> TypeChecker<'a> {
     fn type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
             TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
+            // A module is a namespace, not something a variable can be declared as.
+            TypeKind::Module(_) => false,
             TypeKind::User(name) => {
                 // Keep cascaded diagnostics readable once an earlier expression has failed.
                 let is_generic_param = matches!(
@@ -438,6 +564,12 @@ impl<'a> TypeChecker<'a> {
             } => {
                 self.statement_guarantees_return(then_branch)
                     && self.statement_guarantees_return(else_branch)
+            }
+            // `@cpp("..")` is opaque to the checker: the spliced C++ may well return, so
+            // treat it as satisfying the return requirement rather than reporting a
+            // false positive on every standard library primitive.
+            Stmt::Expression { expression } => {
+                matches!(&**expression, Expr::Intrinsic { name, .. } if name.lexeme == "cpp")
             }
             _ => false,
         }
@@ -675,6 +807,16 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_variable_expr(&mut self, expr: &Expr) {
         if let Expr::Variable { name } = expr {
+            // An imported module name shadows nothing and is resolved first, so that
+            // `io.println(..)` works anywhere in the file.
+            if let Some(Symbol::Variable(_, _, module_ty, ..)) =
+                self.symtable.lookup_module(&name.lexeme)
+            {
+                let module_ty = module_ty.clone();
+                self.set_expr_type(expr, module_ty);
+                return;
+            }
+
             // Look in local scopes
             if let Some(sym) = self.symtable.lookup_symbol(&name.lexeme) {
                 match sym {
@@ -1567,6 +1709,49 @@ impl<'a> Visitor for TypeChecker<'a> {
             });
 
             match &obj_ty.kind {
+                TypeKind::Module(module_name) => {
+                    // `io.println` and friends: resolve against the module's exports.
+                    let exports = self
+                        .module_exports
+                        .get(module_name)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    match exports.functions.get(&name.lexeme) {
+                        Some((params, returns)) => {
+                            let member_ty =
+                                self.function_type(name, params.clone(), returns.clone());
+                            self.set_expr_type(expr, member_ty);
+                        }
+                        None => {
+                            self.error_with_notes(
+                                name.clone(),
+                                &format!(
+                                    "No public function `{}` in module `{}`",
+                                    name.lexeme, module_name
+                                ),
+                                vec![Note::new(
+                                    format!(
+                                        "`{}` provides: {}",
+                                        module_name,
+                                        exports.function_names().join(", ")
+                                    ),
+                                    name.line,
+                                    name.span.clone(),
+                                    self.filename.clone(),
+                                )],
+                                vec![Help::new(
+                                    "Functions must be declared `public` to be importable".to_string(),
+                                    name.line,
+                                    name.span.clone(),
+                                    self.filename.clone(),
+                                )],
+                            );
+                            self.set_expr_type(expr, self.error_type(name));
+                        }
+                    }
+                    return;
+                }
                 TypeKind::String => {
                     let member_ty = match name.lexeme.as_str() {
                         "len" => Some(self.function_type(name, vec![], self.int_type(name))),
@@ -2491,6 +2676,50 @@ impl<'a> Visitor for TypeChecker<'a> {
         }
     }
 
+    fn visit_intrinsic(&mut self, expr: &Expr) {
+        if let Expr::Intrinsic { name, arguments } = expr {
+            // Intrinsics are the compiler's own escape hatch, so their arguments must be
+            // literals it can act on at compile time rather than arbitrary expressions.
+            let literal_argument = |arg: &Expr| {
+                matches!(arg, Expr::Literal { value } if value.kind == TokenKind::String)
+            };
+
+            match name.lexeme.as_str() {
+                "cpp" | "include" => {
+                    if arguments.len() != 1 || !literal_argument(&arguments[0]) {
+                        self.error_with_notes(
+                            name.clone(),
+                            &format!("`@{}` takes exactly one string literal", name.lexeme),
+                            vec![Note::new(
+                                format!("For example: `@{}(\"...\");`", name.lexeme),
+                                name.line,
+                                name.span.clone(),
+                                self.filename.clone(),
+                            )],
+                            vec![],
+                        );
+                    }
+                }
+                _ => {
+                    self.error_with_notes(
+                        name.clone(),
+                        &format!("Unknown intrinsic `@{}`", name.lexeme),
+                        vec![Note::new(
+                            "Available intrinsics: @cpp, @include".to_string(),
+                            name.line,
+                            name.span.clone(),
+                            self.filename.clone(),
+                        )],
+                        vec![],
+                    );
+                }
+            }
+
+            // An intrinsic is a statement-like escape hatch, so it has no useful type.
+            self.set_expr_type(expr, Type::new(name.clone(), TypeKind::Void));
+        }
+    }
+
     fn visit_import(&mut self, _stmt: &Stmt) {
         // Not doing anything special with imports here
     }
@@ -2560,33 +2789,46 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
 
+    /// Type checks a fixture and everything it imports, returning the error count.
     fn typecheck_fixture(relative_path: &str) -> usize {
         let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
-        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
 
-        let mut lexer = Lexer::new(source.clone(), filename.clone());
-        lexer.scan_tokens();
-        assert!(
-            !lexer.had_error,
-            "fixture `{}` should lex cleanly",
-            relative_path
-        );
-
-        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
-        let module = match parser.parse() {
-            Ok(module) => module,
-            Err(err) => panic!("fixture `{}` should parse: {}", relative_path, err.to_string()),
+        let program = match crate::modules::load(std::path::Path::new(&filename)) {
+            Ok(program) => program,
+            // A module that fails to load (unknown import, cycle) is itself an error.
+            Err(errors) => return errors.len().max(1),
         };
-        assert!(
-            !parser.had_error,
-            "fixture `{}` should parse cleanly",
-            relative_path
-        );
 
-        let mut symtable = SymbolTable::new();
-        let mut checker = TypeChecker::new(&mut symtable, filename, source);
-        checker.check_module(&module);
-        checker.error_count()
+        let root = program.root().name.clone();
+        let mut exports: HashMap<String, ModuleExports> = HashMap::new();
+        let mut errors = 0;
+
+        for module in &program.modules {
+            let mut symtable = SymbolTable::new();
+            let mut checker = TypeChecker::new(
+                &mut symtable,
+                module.path.to_string_lossy().to_string(),
+                module.source.clone(),
+            );
+            checker.set_module_exports(exports.clone());
+            checker.set_is_library(module.name != root);
+            checker.check_module(&module.ast);
+
+            // The standard library must always be clean, whatever the fixture does.
+            if module.name != root {
+                assert_eq!(
+                    checker.error_count(),
+                    0,
+                    "standard library module `{}` should type check cleanly",
+                    module.name
+                );
+            }
+
+            errors += checker.error_count();
+            exports.insert(module.name.clone(), checker.exports(&module.ast));
+        }
+
+        errors
     }
 
     /// Collects every `.crdm` fixture in a directory, so new fixtures are picked up

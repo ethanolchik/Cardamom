@@ -1,4 +1,4 @@
-fn extern println(content: string) {}
+import io;
 
 public class Person(private name: string) {
     private secret: string = "hidden";
@@ -6,5 +6,5 @@ public class Person(private name: string) {
 
 fn main() {
     let p: Person = new Person("Ethan");
-    println(p.secret);
+    io.println(p.secret);
 }

@@ -1,5 +1,5 @@
-fn extern println(content: string) {}
-fn extern toString(num: int) -> string {}
+import io;
+import str;
 
 public class Person(private name: string, private age: int) {
     private address: string = "1 High Road";
@@ -23,7 +23,7 @@ public class Person(private name: string, private age: int) {
 fn main() {
     let p: Person = new Person("Ethan", 17);
 
-    println(p.getName());
-    println(p.getAddress());
-    println(toString(p.birthday()));
+    io.println(p.getName());
+    io.println(p.getAddress());
+    io.println(str.fromInt(p.birthday()));
 }

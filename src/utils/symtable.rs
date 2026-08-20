@@ -149,6 +149,9 @@ pub struct SymbolTable {
     pub classes: HashMap<String, Symbol>,
     /// Global functions by name
     pub functions: HashMap<String, Symbol>,
+    /// Imported modules, by the name they were bound to. Imports are file-global, so
+    /// they live here rather than in the function-local `scopes` stack.
+    pub modules: HashMap<String, Symbol>,
 }
 
 impl SymbolTable {
@@ -157,7 +160,18 @@ impl SymbolTable {
             scopes: Vec::new(),
             classes: HashMap::new(),
             functions: HashMap::new(),
+            modules: HashMap::new(),
         }
+    }
+
+    /// Bind an imported module to a name.
+    pub fn declare_module(&mut self, name: &str, sym: Symbol) {
+        self.modules.insert(name.to_string(), sym);
+    }
+
+    /// Look up an imported module by the name it was bound to.
+    pub fn lookup_module(&self, name: &str) -> Option<&Symbol> {
+        self.modules.get(name)
     }
 
     /// Enter a new lexical scope

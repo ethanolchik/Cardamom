@@ -1,15 +1,16 @@
-fn extern println(content: string) {}
-fn extern toString(num: int) -> string {}
+import io;
+import str;
+
 fn fizzbuzz(n: int) {
     for (let i: int = 0; i <= n; i+=1) {
         if ((i % 3 == 0) && (i % 5 == 0)) {
-            println("FizzBuzz");
+            io.println("FizzBuzz");
         } else if (i % 3 == 0) {
-            println("Fizz");
+            io.println("Fizz");
         } else if (i % 5 == 0) {
-            println("Buzz");
+            io.println("Buzz");
         } else {
-            println(toString(i));
+            io.println(str.fromInt(i));
         }
     }
 }

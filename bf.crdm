@@ -1,19 +1,15 @@
-fn extern println(content: string) {}
-fn extern input() -> string {}
-fn extern len(s: string) -> int {}
-fn extern charAt(s: string, i: int) -> string {}
-fn extern toString(i: int) -> string {}
-fn extern fromASCII(i: int) -> string {}
+import io;
+import str;
 
 fn bf(code: string) {
     let tape: int[] = [0];
     let ptr: int = 0;
-    let code_len: int = len(code);
+    let code_len: int = str.len(code);
     let code_ptr: int = 0;
     let loop_stack: int[] = [0];
 
     while (code_ptr < code_len) {
-        let command: string = charAt(code, code_ptr);
+        let command: string = str.charAt(code, code_ptr);
         if (command == ">") {
             ptr += 1;
             if (ptr == tape.len()) {
@@ -28,31 +24,31 @@ fn bf(code: string) {
         } else if (command == "-") {
             tape[ptr] -= 1;
         } else if (command == ".") {
-            println(fromASCII(tape[ptr]));
+            io.print(str.fromASCII(tape[ptr]));
         } else if (command == ",") {
-            let input_char: string = input();
-            if (len(input_char) > 0) {
-            tape[ptr] = input_char.charCodeAt(0);
+            let input_char: string = io.input();
+            if (str.len(input_char) > 0) {
+                tape[ptr] = str.charCodeAt(input_char, 0);
             }
         } else if (command == "[") {
             if (tape[ptr] == 0) {
-            let open_brackets: int = 1;
-            while (open_brackets > 0) {
-                code_ptr += 1;
-                if (charAt(code, code_ptr) == "[") {
-                open_brackets += 1;
-                } else if (charAt(code, code_ptr) == "]") {
-                open_brackets -= 1;
+                let open_brackets: int = 1;
+                while (open_brackets > 0) {
+                    code_ptr += 1;
+                    if (str.charAt(code, code_ptr) == "[") {
+                        open_brackets += 1;
+                    } else if (str.charAt(code, code_ptr) == "]") {
+                        open_brackets -= 1;
+                    }
                 }
-            }
             } else {
-            loop_stack.push(code_ptr);
+                loop_stack.push(code_ptr);
             }
         } else if (command == "]") {
             if (tape[ptr] != 0) {
-            code_ptr = loop_stack[loop_stack.len() - 1];
+                code_ptr = loop_stack[loop_stack.len() - 1];
             } else {
-            loop_stack.pop();
+                loop_stack.pop();
             }
         }
         code_ptr += 1;
@@ -60,8 +56,8 @@ fn bf(code: string) {
 }
 
 fn main() -> int {
-    println("Enter bf code: ");
-    let x: string = input();
+    io.println("Enter bf code: ");
+    let x: string = io.input();
 
     bf(x);
 

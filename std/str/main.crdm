@@ -1,0 +1,84 @@
+// String inspection and conversion.
+
+public fn len(s: string) -> int {
+    @cpp("return static_cast<int>(s.size());");
+}
+
+public fn charAt(s: string, i: int) -> string {
+    @cpp("return std::string(1, s.at(i));");
+}
+
+public fn charCodeAt(s: string, i: int) -> int {
+    @cpp("return static_cast<int>(static_cast<unsigned char>(s.at(i)));");
+}
+
+public fn fromASCII(code: int) -> string {
+    @cpp("return std::string(1, static_cast<char>(code));");
+}
+
+public fn fromInt(value: int) -> string {
+    @cpp("return std::to_string(value);");
+}
+
+public fn fromFloat(value: float) -> string {
+    @cpp("return std::to_string(value);");
+}
+
+public fn toInt(s: string) -> int {
+    @cpp("return std::stoi(s);");
+}
+
+public fn toFloat(s: string) -> float {
+    @cpp("return std::stof(s);");
+}
+
+// Written in Cardamom, using the primitives above.
+public fn substring(s: string, start: int, end: int) -> string {
+    let from: int = start;
+    let to: int = end;
+
+    if (from < 0) {
+        from = 0;
+    }
+
+    if (to > len(s)) {
+        to = len(s);
+    }
+
+    let out: string = "";
+    let i: int = from;
+
+    while (i < to) {
+        out += charAt(s, i);
+        i += 1;
+    }
+
+    return out;
+}
+
+public fn repeat(s: string, times: int) -> string {
+    let out: string = "";
+    let i: int = 0;
+
+    while (i < times) {
+        out += s;
+        i += 1;
+    }
+
+    return out;
+}
+
+public fn contains(haystack: string, needle: string) -> int {
+    let n: int = len(needle);
+    let limit: int = len(haystack) - n;
+    let i: int = 0;
+
+    while (i <= limit) {
+        if (substring(haystack, i, i + n) == needle) {
+            return 1;
+        }
+        i += 1;
+    }
+
+    return 0;
+}

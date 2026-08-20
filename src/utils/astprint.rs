@@ -369,11 +369,22 @@ impl Visitor for AstPrinter {
         self.indent -= 1;
     }
 
+    fn visit_intrinsic(&mut self, expr: &Expr) {
+        if let Expr::Intrinsic { name, arguments } = expr {
+            println!("{}Intrinsic: @{}", String::from("\t").repeat(self.indent), name.lexeme);
+            self.indent += 1;
+            for argument in arguments.iter() {
+                argument.accept(self);
+            }
+            self.indent -= 1;
+        }
+    }
+
     fn visit_import(&mut self, stmt: &Stmt) {
         println!("{}Import: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Import { path, alias, .. } = stmt {
-            path.accept(self);
+        if let Stmt::Import { name, alias, .. } = stmt {
+            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
             println!("{}Alias: {}", String::from("\t").repeat(self.indent), alias.lexeme);
         }
         self.indent -= 1;
@@ -425,6 +436,9 @@ impl Visitor for AstPrinter {
 
 fn printtype(type_: Type, indent: usize) {
     match type_.kind {
+        TypeKind::Module(ref name) => {
+            println!("{}Module({})", String::from("\t").repeat(indent), name);
+        }
         TypeKind::Int => {
             println!("{}Int", String::from("\t").repeat(indent));
         }

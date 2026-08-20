@@ -70,6 +70,7 @@ impl Lexer {
                 self.add_token(token_kind);
             },
             ';' => self.add_token(TokenKind::Semicolon),
+            '@' => self.add_token(TokenKind::At),
             '+' => {
                 let token_kind = if self.match_token('=') { TokenKind::PlusEq } else { TokenKind::Plus };
                 self.add_token(token_kind);

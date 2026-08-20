@@ -2,7 +2,9 @@ use crate::ast::{Module, Node, Stmt, Expr, Visitor};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
 use crate::ast::{is_static_member, member_modifiers, member_visibility, Modifier};
-use std::collections::HashMap;
+use crate::modules::Program;
+use crate::reachable::{self, FunctionRef};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
 /// Types inferred by the type checker, keyed by AST node address.
@@ -20,6 +22,19 @@ pub struct CppCodeGenerator {
     /// True while generating the body of a `main` that was declared as returning `void`,
     /// so bare `return;` statements can be lowered to `return 0;`.
     in_synthesised_int_main: bool,
+    /// Imported name -> module name, for the module currently being generated.
+    imports: HashMap<String, String>,
+    /// The module currently being generated. The program itself is `main`.
+    current_module: String,
+    /// Names of functions declared in the module currently being generated, so calls to
+    /// them can be mangled to match their definitions.
+    local_functions: HashSet<String>,
+    /// Headers requested by `@include("..")`, gathered across every module.
+    extra_includes: BTreeSet<String>,
+    /// Functions reachable from the program's own code. Anything in an imported module
+    /// that is not in here is skipped, so importing a module only costs what you use.
+    /// Empty means "emit everything", which is what single-module generation does.
+    live_functions: Option<HashSet<FunctionRef>>,
 }
 
 impl CppCodeGenerator {
@@ -30,6 +45,11 @@ impl CppCodeGenerator {
             indent_level: 0,
             expr_types: ExprTypes::new(),
             in_synthesised_int_main: false,
+            imports: HashMap::new(),
+            current_module: "main".to_string(),
+            local_functions: HashSet::new(),
+            extra_includes: BTreeSet::new(),
+            live_functions: None,
         }
     }
 
@@ -41,36 +61,129 @@ impl CppCodeGenerator {
         }
     }
 
-    /// Generate C++ code from a Module AST.
-    pub fn generate(&mut self, module: &Module) -> String {
-        // C++ header includes.
-        self.writeln("#include <iostream>");
-        self.writeln("#include <vector>");
-        self.writeln("#include <string>");
-        self.writeln("#include <sstream>");
-        self.writeln("#include <cstdlib>");
-        self.writeln("#include <functional>");
-        self.writeln("#include <tuple>");
-        self.writeln("#include \"std.hpp\"");
-        self.writeln("");
+    /// Generate C++ code for a whole program: every imported module, then the program
+    /// itself, in dependency order so definitions precede their uses.
+    pub fn generate_program(&mut self, program: &Program) -> String {
+        self.live_functions = Some(reachable::analyse(program));
 
-        // Cardamom does not require a function to be declared before it is used, but C++
-        // does, so emit prototypes for every top-level function up front.
-        self.write_function_prototypes(module);
+        let mut body = String::new();
 
-        module.accept(self);
+        for module in &program.modules {
+            self.current_module = module.name.clone();
+            self.imports = module.imports.clone();
+            self.local_functions = module
+                .ast
+                .statements
+                .iter()
+                .filter_map(|stmt| match &**stmt {
+                    Stmt::Function { name, .. } => Some(name.lexeme.clone()),
+                    _ => None,
+                })
+                .collect();
 
-        // C++ programs need an entry point even when the source module has no `main`.
-        if !Self::has_main(module) {
-            self.writeln("int main()");
-            self.writeln("{");
-            self.indent_level += 1;
-            self.writeln("return 0;");
-            self.indent_level -= 1;
-            self.writeln("}");
+            let module_code = self.capture_output(|gen| {
+                if gen.current_module != "main" {
+                    gen.writeln(&format!("// --- module {} ---", gen.current_module));
+                }
+
+                // Cardamom does not require a function to be declared before it is
+                // used, but C++ does, so emit prototypes for the module up front.
+                gen.write_function_prototypes(&module.ast);
+                module.ast.accept(gen);
+            });
+
+            body.push_str(&module_code);
         }
 
+        // A C++ program needs an entry point even when the source has none.
+        let root = program.root();
+        if !Self::has_main(&root.ast) {
+            self.current_module = root.name.clone();
+            let fallback = self.capture_output(|gen| {
+                gen.writeln("int main()");
+                gen.writeln("{");
+                gen.indent_level += 1;
+                gen.writeln("return 0;");
+                gen.indent_level -= 1;
+                gen.writeln("}");
+            });
+            body.push_str(&fallback);
+        }
+
+        // Includes are written last because `@include` requests are discovered while
+        // generating the bodies above.
+        self.output.clear();
+        self.write_includes();
+        self.output.push_str(&body);
         self.output.clone()
+    }
+
+    /// Generate C++ code from a single Module AST, with no imports.
+    pub fn generate(&mut self, module: &Module) -> String {
+        let body = self.capture_output(|gen| {
+            gen.write_function_prototypes(module);
+            module.accept(gen);
+
+            if !Self::has_main(module) {
+                gen.writeln("int main()");
+                gen.writeln("{");
+                gen.indent_level += 1;
+                gen.writeln("return 0;");
+                gen.indent_level -= 1;
+                gen.writeln("}");
+            }
+        });
+
+        self.output.clear();
+        self.write_includes();
+        self.output.push_str(&body);
+        self.output.clone()
+    }
+
+    /// The C++ symbol for a function declared in `module`.
+    ///
+    /// Module functions are prefixed so that two modules can both define `len` without
+    /// colliding. The program's own functions keep their names, and `main` is always
+    /// `main` so the linker can find it.
+    fn mangled(module: &str, name: &str) -> String {
+        if module == "main" || name == "main" {
+            name.to_string()
+        } else {
+            format!("cardamom_{}_{}", module, name)
+        }
+    }
+
+    /// Whether a function of the module being generated needs to be emitted at all.
+    fn is_live(&self, name: &str) -> bool {
+        match &self.live_functions {
+            Some(live) => live.contains(&(self.current_module.clone(), name.to_string())),
+            // Single-module generation has no call graph, so nothing is dropped.
+            None => true,
+        }
+    }
+
+    fn write_includes(&mut self) {
+        // Headers the generated code always needs, plus anything `@include` asked for.
+        let mut includes: BTreeSet<String> = BTreeSet::new();
+        for base in ["<functional>", "<string>", "<tuple>", "<vector>"] {
+            includes.insert(base.to_string());
+        }
+        includes.extend(self.extra_includes.iter().cloned());
+
+        for include in includes {
+            self.writeln(&format!("#include {}", include));
+        }
+        self.writeln("");
+    }
+
+    /// If `object` is an imported module, returns the C++ symbol for `name` in it.
+    fn resolve_module_function(&self, object: &Expr, name: &Token) -> Option<String> {
+        let Expr::Variable { name: object_name } = object else {
+            return None;
+        };
+
+        let module_name = self.imports.get(&object_name.lexeme)?;
+        Some(Self::mangled(module_name, &name.lexeme))
     }
 
     fn has_main(module: &Module) -> bool {
@@ -83,17 +196,19 @@ impl CppCodeGenerator {
         let mut wrote_any = false;
         for stmt in &module.statements {
             if let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt {
-                // `main` is special-cased below, extern builtins are emitted in full, and
-                // generic functions have no single concrete signature to declare.
+                // `main` needs no prototype, `extern` functions are supplied by the
+                // user, and generic functions have no single concrete signature.
                 if name.lexeme == "main"
                     || modifiers.contains(&Modifier::Extern)
                     || !generics.is_empty()
+                    || !self.is_live(&name.lexeme)
                 {
                     continue;
                 }
                 let ret_type = self.translate_type(return_type);
                 let param_str = self.translate_params(params);
-                self.writeln(&format!("{} {}({});", ret_type, name.lexeme, param_str));
+                let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
+                self.writeln(&format!("{} {}({});", ret_type, cpp_name, param_str));
                 wrote_any = true;
             }
         }
@@ -184,95 +299,10 @@ impl CppCodeGenerator {
                 format!("{}<{}>", name, args_str)
             }
             TypeKind::GenericParam(name) => name.clone(),
+            // Modules are namespaces rather than values, so this is unreachable for a
+            // well-typed program; the type checker rejects using a module as a value.
+            TypeKind::Module(name) => format!("/* module {} */ void", name),
         }
-    }
-
-    /// Check if a function is a built-in function and generate its C++ code.
-    /// Returns true if the function is a built-in and was generated.
-    fn builtin_function(&mut self, name: &Token, _params: &[Box<Stmt>], _return_type: &Type) -> bool {
-        if name.lexeme == "print" {
-            self.writeln("void print(std::string s) {");
-            self.indent_level += 1;
-            self.writeln("std::cout << s;");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "println" {
-            self.writeln("void println(std::string s) {");
-            self.indent_level += 1;
-            self.writeln("std::cout << s << std::endl;");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "input" {
-            self.writeln("std::string input() {");
-            self.indent_level += 1;
-            self.writeln("std::string line;");
-            self.writeln("std::getline(std::cin, line);");
-            self.writeln("return line;");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "toInt" {
-            self.writeln("int toInt(std::string s) {");
-            self.indent_level += 1;
-            self.writeln("return std::stoi(s);");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "toFloat" {
-            self.writeln("float toFloat(std::string s) {");
-            self.indent_level += 1;
-            self.writeln("return std::stof(s);");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "toString" {
-            self.writeln("std::string toString(int s) {");
-            self.indent_level += 1;
-            self.writeln("return std::to_string(s);");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "fromASCII" {
-            self.writeln("std::string fromASCII(int ascii) {");
-            self.indent_level += 1;
-            self.writeln("return std::string(1, static_cast<char>(ascii));");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "len" {
-            self.writeln("int len(std::string s) {");
-            self.indent_level += 1;
-            self.writeln("return s.size();");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "charAt" {
-            self.writeln("std::string charAt(std::string s, int i) {");
-            self.indent_level += 1;
-            self.writeln("return std::string(1, s.at(i));");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        if name.lexeme == "charCodeAt" {
-            self.writeln("int charCodeAt(std::string s, int i) {");
-            self.indent_level += 1;
-            self.writeln("return static_cast<unsigned char>(s.at(i));");
-            self.indent_level -= 1;
-            self.writeln("}");
-            return true;
-        }
-        false
     }
 
     /// Chooses `.` or `->` for a member access. `this` is a pointer in C++, and
@@ -295,6 +325,15 @@ impl CppCodeGenerator {
     }
 
     fn visit_member_call(&mut self, object: &Expr, name: &Token, arguments: &[Box<Expr>]) {
+        // `io.println(x)` is a free function call in the generated C++, not a method.
+        if let Some(cpp_name) = self.resolve_module_function(object, name) {
+            self.output.push_str(&cpp_name);
+            self.output.push('(');
+            self.write_call_arguments(arguments);
+            self.output.push(')');
+            return;
+        }
+
         match name.lexeme.as_str() {
             "push" => {
                 object.accept(self);
@@ -364,6 +403,16 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_expression(&mut self, stmt: &Stmt) {
         if let Stmt::Expression { expression } = stmt {
+            // Intrinsics emit raw text (or nothing at all), so they supply their own
+            // punctuation rather than being terminated like an expression.
+            if let Expr::Intrinsic { .. } = &**expression {
+                let code = self.capture_output(|gen| expression.accept(gen));
+                if !code.is_empty() {
+                    self.writeln(&code);
+                }
+                return;
+            }
+
             self.output.push_str(&self.indent());
             expression.accept(self);
             self.output.push_str(";");
@@ -483,9 +532,14 @@ impl Visitor for CppCodeGenerator {
     fn visit_function(&mut self, stmt: &Stmt) {
         if let Stmt::Function { name, params, body, return_type, modifiers, generics: _ } = stmt {
             if modifiers.contains(&Modifier::Extern) {
-                if self.builtin_function(name, params, return_type) {
-                    return;
-                }
+                // `fn extern` declares a function implemented outside Cardamom; the user
+                // supplies the definition, so emit nothing here.
+                return;
+            }
+
+            // Skip functions of imported modules that the program never reaches.
+            if name.lexeme != "main" && !self.is_live(&name.lexeme) {
+                return;
             }
             
             // C++ requires `main` to return `int`. Cardamom allows `fn main()` (i.e. a
@@ -499,8 +553,9 @@ impl Visitor for CppCodeGenerator {
                 self.translate_type(return_type)
             };
             let param_str = self.translate_params(params);
+            let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
 
-            self.writeln(&format!("{} {}({})", ret_type, name.lexeme, param_str));
+            self.writeln(&format!("{} {}({})", ret_type, cpp_name, param_str));
             self.output.push_str(&self.indent());
             self.output.push_str("{\n");
             self.indent_level += 1;
@@ -520,13 +575,43 @@ impl Visitor for CppCodeGenerator {
         }
     }
 
-    fn visit_import(&mut self, stmt: &Stmt) {
-        if let Stmt::Import { path, alias: _ } = stmt {
-            self.output.push_str(&self.indent());
-            self.output.push_str("#include ");
-            path.accept(self);
-            self.output.push('\n');
+    fn visit_intrinsic(&mut self, expr: &Expr) {
+        if let Expr::Intrinsic { name, arguments } = expr {
+            // String literals keep their quotes in the token, but an intrinsic wants the
+            // contents: the raw C++, or the header name.
+            let literal = |arg: &Box<Expr>| match &**arg {
+                Expr::Literal { value } => Some(
+                    value
+                        .lexeme
+                        .trim_start_matches('"')
+                        .trim_end_matches('"')
+                        .to_string(),
+                ),
+                _ => None,
+            };
+
+            match name.lexeme.as_str() {
+                // Splice the raw C++ in verbatim. This is what lets a standard library
+                // function written in Cardamom bottom out in a real implementation.
+                "cpp" => {
+                    if let Some(code) = arguments.first().and_then(literal) {
+                        self.output.push_str(&code);
+                    }
+                }
+                // Record a header for the generated file; nothing is emitted inline.
+                "include" => {
+                    if let Some(header) = arguments.first().and_then(literal) {
+                        self.extra_includes.insert(header);
+                    }
+                }
+                _ => {}
+            }
         }
+    }
+
+    fn visit_import(&mut self, _stmt: &Stmt) {
+        // Imports produce no code of their own; the standard library definitions they
+        // make reachable are emitted on demand by `use_std_function`.
     }
 
     fn visit_class(&mut self, stmt: &Stmt) {
@@ -729,6 +814,19 @@ impl Visitor for CppCodeGenerator {
             if let Expr::MemberAccess { object, name } = &**callee {
                 self.visit_member_call(object, name, arguments);
                 return;
+            }
+
+            // A call to a function of the module being generated has to use the same
+            // mangled name its definition was given.
+            if let Expr::Variable { name } = &**callee {
+                if self.local_functions.contains(&name.lexeme) {
+                    let cpp_name = Self::mangled(&self.current_module, &name.lexeme);
+                    self.output.push_str(&cpp_name);
+                    self.output.push('(');
+                    self.write_call_arguments(arguments);
+                    self.output.push(')');
+                    return;
+                }
             }
 
             callee.accept(self);
@@ -1001,27 +1099,64 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    fn parse_and_check_with_types(relative_path: &str) -> (Module, ExprTypes) {
+    /// Loads, type checks and generates a fixture together with its imports.
+    fn generate_fixture(relative_path: &str) -> String {
         let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
-        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
+        let program = crate::modules::load(std::path::Path::new(&filename))
+            .unwrap_or_else(|errors| panic!("`{}` should load: {} error(s)", relative_path, errors.len()));
 
-        let mut lexer = Lexer::new(source.clone(), filename.clone());
-        lexer.scan_tokens();
-        assert!(!lexer.had_error, "`{}` should lex cleanly", relative_path);
+        let root = program.root().name.clone();
+        let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
+        let mut expr_types = ExprTypes::new();
 
-        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
-        let module = parser
-            .parse()
-            .unwrap_or_else(|err| panic!("`{}` should parse: {}", relative_path, err.to_string()));
-        assert!(!parser.had_error, "`{}` should parse cleanly", relative_path);
+        for module in &program.modules {
+            let mut symtable = SymbolTable::new();
+            let mut checker = TypeChecker::new(
+                &mut symtable,
+                module.path.to_string_lossy().to_string(),
+                module.source.clone(),
+            );
+            checker.set_module_exports(exports.clone());
+            checker.set_is_library(module.name != root);
+            checker.check_module(&module.ast);
+            assert_eq!(
+                checker.error_count(),
+                0,
+                "`{}` should typecheck (module `{}`)",
+                relative_path,
+                module.name
+            );
 
-        let mut symtable = SymbolTable::new();
-        let mut checker = TypeChecker::new(&mut symtable, filename, source);
-        checker.check_module(&module);
-        assert_eq!(checker.error_count(), 0, "`{}` should typecheck", relative_path);
+            exports.insert(module.name.clone(), checker.exports(&module.ast));
+            expr_types.extend(checker.expr_types.clone());
+        }
 
-        let expr_types = checker.expr_types.clone();
-        (module, expr_types)
+        let mut generator = CppCodeGenerator::with_types(expr_types);
+        generator.generate_program(&program)
+    }
+
+    /// Compiles generated C++, returning the path to the binary.
+    fn compile_cpp(code: &str, label: &str) -> String {
+        let cpp_path = format!("/tmp/cardamom_{}_{}.cpp", label, std::process::id());
+        let bin_path = format!("/tmp/cardamom_{}_{}", label, std::process::id());
+        std::fs::write(&cpp_path, code).expect("generated C++ should be writable");
+
+        let compile = Command::new("g++")
+            .arg(&cpp_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .output()
+            .expect("g++ should run");
+
+        assert!(
+            compile.status.success(),
+            "`{}` should generate compilable C++:\n{}",
+            label,
+            String::from_utf8_lossy(&compile.stderr)
+        );
+
+        let _ = std::fs::remove_file(cpp_path);
+        bin_path
     }
 
     /// Every fixture in `tests/pass` must lower to C++ that actually compiles.
@@ -1035,86 +1170,19 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) != Some("crdm") {
                 continue;
             }
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
             let relative = format!("tests/pass/{}", path.file_name().unwrap().to_string_lossy());
 
-            let (module, expr_types) = parse_and_check_with_types(&relative);
-            let mut generator = CppCodeGenerator::with_types(expr_types);
-            let code = generator.generate(&module);
-
-            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-            let cpp_path = format!("/tmp/cardamom_pass_{}_{}.cpp", std::process::id(), stem);
-            let bin_path = format!("/tmp/cardamom_pass_{}_{}", std::process::id(), stem);
-            std::fs::write(&cpp_path, code).expect("generated C++ should be writable");
-
-            let compile = Command::new("g++")
-                .arg(&cpp_path)
-                .arg("-I")
-                .arg(env!("CARGO_MANIFEST_DIR"))
-                .arg("-o")
-                .arg(&bin_path)
-                .output()
-                .expect("g++ should run");
-
-            assert!(
-                compile.status.success(),
-                "`{}` should generate compilable C++:\n{}",
-                relative,
-                String::from_utf8_lossy(&compile.stderr)
-            );
-
-            let _ = std::fs::remove_file(cpp_path);
+            let code = generate_fixture(&relative);
+            let bin_path = compile_cpp(&code, &format!("pass_{}", stem));
             let _ = std::fs::remove_file(bin_path);
         }
     }
 
-    fn parse_and_check(relative_path: &str) -> Module {
-        let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
-        let source = std::fs::read_to_string(&filename).expect("fixture should be readable");
-
-        let mut lexer = Lexer::new(source.clone(), filename.clone());
-        lexer.scan_tokens();
-        assert!(!lexer.had_error, "`{}` should lex cleanly", relative_path);
-
-        let mut parser = Parser::new(lexer.tokens.clone(), source.clone(), filename.clone());
-        let module = match parser.parse() {
-            Ok(module) => module,
-            Err(err) => panic!("`{}` should parse: {}", relative_path, err.to_string()),
-        };
-        assert!(!parser.had_error, "`{}` should parse cleanly", relative_path);
-
-        let mut symtable = SymbolTable::new();
-        let checker_source = std::fs::read_to_string(&filename).expect("fixture should be readable");
-        let mut checker = TypeChecker::new(&mut symtable, filename, checker_source);
-        checker.check_module(&module);
-        assert_eq!(checker.error_count(), 0, "`{}` should typecheck", relative_path);
-
-        module
-    }
-
     #[test]
     fn bf_codegen_compiles_and_runs_input_echo() {
-        let module = parse_and_check("bf.crdm");
-        let mut generator = CppCodeGenerator::new();
-        let code = generator.generate(&module);
-
-        let pid = std::process::id();
-        let cpp_path = format!("/tmp/cardamom_bf_{}.cpp", pid);
-        let bin_path = format!("/tmp/cardamom_bf_{}", pid);
-        std::fs::write(&cpp_path, code).expect("generated C++ should be writable");
-
-        let compile = Command::new("g++")
-            .arg(&cpp_path)
-            .arg("-I")
-            .arg(env!("CARGO_MANIFEST_DIR"))
-            .arg("-o")
-            .arg(&bin_path)
-            .output()
-            .expect("g++ should run");
-        assert!(
-            compile.status.success(),
-            "generated bf C++ should compile:\n{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
+        let code = generate_fixture("bf.crdm");
+        let bin_path = compile_cpp(&code, "bf");
 
         let mut child = Command::new(&bin_path)
             .stdin(Stdio::piped())
@@ -1130,14 +1198,36 @@ mod tests {
         let output = child.wait_with_output().expect("run should finish");
         assert!(output.status.success(), "generated bf binary should exit cleanly");
 
+        // `bf.crdm` writes cells with `io.print`, so the echoed byte is not followed by
+        // a newline of its own.
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.ends_with("A\n"),
+            stdout.ends_with("A"),
             "generated bf binary should echo one input byte, got `{}`",
             stdout
         );
 
-        let _ = std::fs::remove_file(cpp_path);
         let _ = std::fs::remove_file(bin_path);
+    }
+
+    /// Importing a module must not drag in the functions the program never calls.
+    #[test]
+    fn unused_module_functions_are_not_emitted() {
+        let code = generate_fixture("tests/pass/import_1.crdm");
+
+        assert!(
+            code.contains("cardamom_math_pow"),
+            "a called function should be emitted"
+        );
+        assert!(
+            !code.contains("cardamom_math_sqrt"),
+            "an uncalled function should not be emitted:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("<cmath>"),
+            "an uncalled function should not drag in its includes:\n{}",
+            code
+        );
     }
 }

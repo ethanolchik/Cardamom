@@ -169,6 +169,15 @@ pub enum Expr {
         param_types: Vec<Type>,
         body: Box<Stmt>,
         return_type: Type,
+    },
+    /// A compiler intrinsic, written `@name(args)`.
+    ///
+    /// Intrinsics are the escape hatch that lets the standard library be written in
+    /// Cardamom: `@cpp("..")` splices raw C++ into the generated function body, and
+    /// `@include("<x>")` adds a header to the generated file.
+    Intrinsic {
+        name: Token,
+        arguments: Vec<Box<Expr>>,
     }
 }
 
@@ -221,7 +230,9 @@ pub enum Stmt {
         generics: Vec<Token>
     },
     Import {
-        path: Box<Expr>,
+        /// The module being imported, e.g. `io` in `import io;`.
+        name: Token,
+        /// The name it is bound to, which is the module name unless `as` was used.
         alias: Token,
     },
     Class {
@@ -268,6 +279,7 @@ pub trait Visitor {
     fn visit_reference(&mut self, expr: &Expr);
     fn visit_mut_reference(&mut self, expr: &Expr);
     fn visit_closure(&mut self, expr: &Expr);
+    fn visit_intrinsic(&mut self, expr: &Expr);
     fn visit_array(&mut self, expr: &Expr);
     fn visit_tuple(&mut self, expr: &Expr);
     fn visit_member_assignment(&mut self, stmt: &Expr);
@@ -317,6 +329,7 @@ impl Node for Expr {
             Expr::Reference { .. } => visitor.visit_reference(self),
             Expr::MutReference { .. } => visitor.visit_mut_reference(self),
             Expr::Closure { .. } => visitor.visit_closure(self),
+            Expr::Intrinsic { .. } => visitor.visit_intrinsic(self),
         }
     }
 }

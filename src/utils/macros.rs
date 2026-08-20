@@ -17,6 +17,7 @@ macro_rules! set_flag_str {
                 "debug" => FLAGS.0 |= FLAG_DEBUG,
                 "no colour" => FLAGS.0 |= FLAG_NO_COLOR,
                 "show output" => FLAGS.0 |= FLAG_SHOW_OUTPUT,
+                "ast" => FLAGS.0 |= FLAG_AST,
                 _ => panic!("Invalid flag: {}", $str),
             }
         }
@@ -42,6 +43,7 @@ macro_rules! is_flag_set_str {
                 "debug" => FLAGS.0 & FLAG_DEBUG == FLAG_DEBUG,
                 "no colour" => FLAGS.0 & FLAG_NO_COLOR == FLAG_NO_COLOR,
                 "show output" => FLAGS.0 & FLAG_SHOW_OUTPUT == FLAG_SHOW_OUTPUT,
+                "ast" => FLAGS.0 & FLAG_AST == FLAG_AST,
                 _ => panic!("Invalid flag: {}", $str),
             }
         }

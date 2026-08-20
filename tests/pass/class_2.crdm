@@ -1,4 +1,4 @@
-fn extern println(content: string) {}
+import io;
 
 public class Counter(private start: int) {
     public static species: string = "human";
@@ -10,8 +10,8 @@ public class Counter(private start: int) {
 }
 
 fn main() {
-    println(Counter::species);
+    io.println(Counter::species);
 
     let c: Counter = new Counter(1);
-    println(c.reveal());
+    io.println(c.reveal());
 }

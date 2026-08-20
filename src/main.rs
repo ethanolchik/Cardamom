@@ -7,15 +7,19 @@ pub mod ty;
 pub mod utils;
 pub mod typecheck;
 pub mod codegen;
+pub mod modules;
+pub mod reachable;
 
-use std::fs::{read_to_string, File};
+use std::collections::HashMap;
 use std::env::args;
+use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
 use crate::ast::Node;
-use crate::utils::symtable::SymbolTable;
-
 use crate::codegen::CppCodeGenerator;
+use crate::typecheck::ModuleExports;
+use crate::utils::symtable::SymbolTable;
 
 const PRINT_HELP: fn() -> () = || {
     println!("Usage: cardamom [options] <filename>");
@@ -28,82 +32,90 @@ const PRINT_HELP: fn() -> () = || {
 };
 
 fn run_file(filename: String) -> bool {
-    let source = match read_to_string(filename.clone()) {
-        Ok(source) => source,
-        Err(e) => {
-            eprintln!("Error reading file: {}", e);
+    // Load the program and everything it imports, in dependency order.
+    let program = match modules::load(Path::new(&filename)) {
+        Ok(program) => program,
+        Err(errors) => {
+            for error in &errors {
+                eprintln!("{}", error.to_string());
+            }
+            eprintln!("Program exited with {} error(s).", errors.len());
             return false;
         }
     };
 
-    let mut l = lexer::Lexer::new(source.clone(), filename.clone());
-
-    l.scan_tokens();
-    if l.had_error {
-        eprintln!("Program exited with {} error(s).", l.error_tokens.len());
-        return false;
-    }
-
     if is_flag_set_str!("debug") {
-        for token in l.tokens.iter() {
-            println!("[DEBUG]{}", token.to_string());
+        for module in &program.modules {
+            println!("[DEBUG] loaded module `{}` from {}", module.name, module.path.display());
         }
     }
 
-    let mut p = parser::Parser::new(l.tokens.clone(), source.clone(), filename.clone());
-
-    let module = p.parse();
-    if p.had_error {
-        eprintln!("Program exited with {} error(s).", p.errors);
-        return false;
-    }
-
-    if is_flag_set_str!("debug") {
-        if let Ok(module) = &module {
-            let mut v = utils::astprint::AstPrinter::new();
-            println!("[DEBUG]");
-            module.accept(&mut v);
+    if is_flag_set_str!("ast") {
+        for module in &program.modules {
+            println!("[AST] module `{}`", module.name);
+            let mut printer = utils::astprint::AstPrinter::new();
+            module.ast.accept(&mut printer);
         }
     }
 
-    if let Ok(module) = &module {
+    // Type check each module in turn. Because they are in dependency order, everything
+    // a module imports has already been checked and its exports recorded.
+    let mut exports: HashMap<String, ModuleExports> = HashMap::new();
+    let mut expr_types = codegen::ExprTypes::new();
+    let mut error_count = 0;
+
+    let root_name = program.root().name.clone();
+
+    for module in &program.modules {
         let symtable = &mut SymbolTable::new();
-        let mut tc = typecheck::TypeChecker::new(symtable, filename.clone(), source.clone());
-        tc.check_module(module);
+        let mut tc = typecheck::TypeChecker::new(
+            symtable,
+            module.path.to_string_lossy().to_string(),
+            module.source.clone(),
+        );
+        tc.set_module_exports(exports.clone());
+        tc.set_is_library(module.name != root_name);
+        tc.check_module(&module.ast);
 
         if tc.has_errors() {
             tc.emit_errors();
-            eprintln!("Program exited with {} error(s).", tc.error_count());
-            return false;
-        }
-    
-        // Hand the inferred expression types to codegen so it can emit things the AST
-        // alone does not describe, such as inferred closure parameter types.
-        let mut cg = CppCodeGenerator::with_types(tc.expr_types.clone());
-        let code = cg.generate(module);
-
-        let mut output = File::create("output.cpp").unwrap();
-        output.write_all(code.as_bytes()).unwrap();
-
-        // compile the generated C code
-        let output = std::process::Command::new("g++")
-            .arg("output.cpp")
-            .arg("-o")
-            .arg("output")
-            .output()
-            .expect("Failed to compile the generated C++ code.");
-
-        if !is_flag_set_str!("show output") {
-            let _ = std::fs::remove_file("output.cpp");
+            error_count += tc.error_count();
         }
 
-        if output.status.success() {
-            println!("Successfully compiled the generated C++ code.");
-        } else {
-            eprintln!("Failed to compile the generated C++ code.");
-            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-            return false;
-        }
+        exports.insert(module.name.clone(), tc.exports(&module.ast));
+        // Expression types are keyed by AST node address, and every module's AST is
+        // kept alive by `program`, so the maps can simply be merged.
+        expr_types.extend(tc.expr_types.clone());
+    }
+
+    if error_count > 0 {
+        eprintln!("Program exited with {} error(s).", error_count);
+        return false;
+    }
+
+    let mut cg = CppCodeGenerator::with_types(expr_types);
+    let code = cg.generate_program(&program);
+
+    let mut output = File::create("output.cpp").unwrap();
+    output.write_all(code.as_bytes()).unwrap();
+
+    let result = std::process::Command::new("g++")
+        .arg("output.cpp")
+        .arg("-o")
+        .arg("output")
+        .output()
+        .expect("Failed to compile the generated C++ code.");
+
+    if !is_flag_set_str!("show output") {
+        let _ = std::fs::remove_file("output.cpp");
+    }
+
+    if result.status.success() {
+        println!("Successfully compiled the generated C++ code.");
+    } else {
+        eprintln!("Failed to compile the generated C++ code.");
+        eprintln!("{}", String::from_utf8_lossy(&result.stderr));
+        return false;
     }
 
     true

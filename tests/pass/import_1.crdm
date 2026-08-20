@@ -1,0 +1,13 @@
+import io;
+import str;
+import math as m;
+
+fn main() {
+    io.print("2^10 = ");
+    io.println(str.fromInt(m.pow(2, 10)));
+
+    let s: string = "cardamom";
+    io.println(str.substring(s, 0, 4));
+    io.println(str.fromInt(str.len(s)));
+    io.println(str.fromInt(m.max(m.abs(-3), 2)));
+}

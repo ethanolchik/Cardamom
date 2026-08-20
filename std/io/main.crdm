@@ -1,0 +1,17 @@
+// Console input and output.
+
+public fn print(content: string) {
+    @include("<iostream>");
+    @cpp("std::cout << content;");
+}
+
+public fn println(content: string) {
+    @include("<iostream>");
+    @cpp("std::cout << content << std::endl;");
+}
+
+public fn input() -> string {
+    @include("<iostream>");
+    @include("<string>");
+    @cpp("std::string line; std::getline(std::cin, line); return line;");
+}

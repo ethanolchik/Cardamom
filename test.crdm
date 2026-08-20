@@ -1,4 +1,4 @@
-import "std.io" as io;
+import io;
 
 public class Person(private name: string, private age: int) {
     private address: string = "1 High Road";
