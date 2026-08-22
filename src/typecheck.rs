@@ -46,8 +46,7 @@ pub struct TypeChecker<'a> {
     /// still standing in for something else.
     current_function_generics: Vec<String>,
 
-    /// Public functions of every module compiled so far, keyed by module name. This is
-    /// what `io.println` resolves against.
+    /// Public exports of every module compiled so far, keyed by module name.
     pub module_exports: HashMap<String, ModuleExports>,
     /// The type arguments each generic call site resolved to, keyed by AST node.
     pub call_instantiations: HashMap<*const Expr, Vec<TypeKind>>,
@@ -431,7 +430,7 @@ impl<'a> TypeChecker<'a> {
                     .iter()
                     .filter_map(|f| match &**f {
                         Stmt::Variable { type_, modifiers, .. }
-                            if modifiers.contains(&Modifier::Constructor) =>
+                            if is_constructor_field(modifiers) =>
                         {
                             Some(Self::generalise(type_, &class_generics))
                         }
@@ -446,10 +445,8 @@ impl<'a> TypeChecker<'a> {
                         methods,
                         fully_defined,
                         constructor_params,
-                        constructor_param_count,
                         ..
                     } = class_sym {
-                        *constructor_param_count = constructor_param_types.len();
                         *constructor_params = constructor_param_types;
                         for (field_name, field_type, visibility, is_static) in field_declarations {
                             fields.insert(

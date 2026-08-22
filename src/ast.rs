@@ -34,6 +34,14 @@ pub fn is_static_member(modifiers: &[Modifier]) -> bool {
     modifiers.contains(&Modifier::Static)
 }
 
+/// Whether a field came from the class header, and so is also a constructor parameter.
+///
+/// `class Person(private name: string)` declares `name` as both a field and the first
+/// constructor parameter; this is what distinguishes it from a plain field.
+pub fn is_constructor_field(modifiers: &[Modifier]) -> bool {
+    modifiers.contains(&Modifier::Constructor)
+}
+
 /// The modifiers attached to a class member (`Stmt::Variable` or `Stmt::Function`).
 pub fn member_modifiers(stmt: &Stmt) -> &[Modifier] {
     match stmt {

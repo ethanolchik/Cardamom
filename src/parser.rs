@@ -305,7 +305,6 @@ impl Parser {
                 derived: vec![],
                 generics: vec![],
                 kind: TypeKind::Void,
-                is_constructor: false,
             };
         }
 
@@ -352,8 +351,7 @@ impl Parser {
 
                     let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                     self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
-                    let mut type_ = self.type_expression()?;
-                    type_.is_constructor = true;
+                    let type_ = self.type_expression()?;
 
                     fields.push(Box::new(Stmt::Variable {
                         name: param_name,
@@ -641,7 +639,6 @@ impl Parser {
                     derived: vec![Derived::Array],
                     generics: Vec::new(),
                     kind,
-                    is_constructor: false,
                 }),
                 1,
             );
@@ -655,7 +652,6 @@ impl Parser {
             generics: generics.into_iter().map(Box::new).collect(),
             derived,
             kind,
-            is_constructor: false,
         })
     }
 
@@ -1291,7 +1287,6 @@ impl Parser {
                     derived: vec![Derived::Ref],
                     generics: Vec::new(),
                     kind: current_kind,
-                    is_constructor: false,
                 })),
                 Derived::MutRef => TypeKind::MutRef(Box::new(Type {
                     attributes: attributes.clone(),
@@ -1299,7 +1294,6 @@ impl Parser {
                     derived: vec![Derived::MutRef],
                     generics: Vec::new(),
                     kind: current_kind,
-                    is_constructor: false,
                 })),
                 Derived::Array => {
                     depth_c -= 1;
@@ -1309,7 +1303,6 @@ impl Parser {
                         derived: vec![Derived::Array],
                         generics: Vec::new(),
                         kind: current_kind,
-                        is_constructor: false,
                     }), depth-depth_c)
                 }
                 _ => current_kind,

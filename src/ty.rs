@@ -13,8 +13,6 @@ pub struct Type {
     pub name: Token,
 
     pub kind: TypeKind,
-
-    pub is_constructor: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -177,7 +175,6 @@ impl Type {
             generics: Vec::new(),
             name,
             kind,
-            is_constructor: false,
         }
     }
 

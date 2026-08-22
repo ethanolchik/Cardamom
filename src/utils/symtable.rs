@@ -43,9 +43,10 @@ pub enum Symbol {
         fields: HashMap<String, (Type, Visibility, bool)>,
         methods: HashMap<String, Symbol>,
         fully_defined: bool,
-        constructor_param_count: usize,
-        /// Constructor parameter types in declaration order. `fields` is a map, so it
-        /// cannot preserve the order the constructor needs.
+        /// Constructor parameter types in declaration order.
+        ///
+        /// `fields` is a map, so it cannot preserve the order a positional constructor
+        /// needs in order to check its arguments.
         constructor_params: Vec<Type>,
     },
 }
@@ -102,7 +103,6 @@ impl Symbol {
             fields: HashMap::new(),
             methods: HashMap::new(),
             fully_defined: false,
-            constructor_param_count: 0,
             constructor_params: Vec::new(),
         }
     }

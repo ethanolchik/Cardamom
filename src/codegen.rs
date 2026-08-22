@@ -1,7 +1,7 @@
 use crate::ast::{Module, Node, Stmt, Expr, Visitor};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
-use crate::ast::{is_static_member, member_modifiers, member_visibility, Modifier};
+use crate::ast::{is_constructor_field, is_static_member, member_modifiers, member_visibility, Modifier};
 use crate::modules::Program;
 use crate::reachable::{self, FunctionRef};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -541,7 +541,7 @@ impl CppCodeGenerator {
             // them in declaration order and initialises the matching members.
             let ctor_params: Vec<Box<Stmt>> = fields
                 .iter()
-                .filter(|f| member_modifiers(f).contains(&Modifier::Constructor))
+                .filter(|f| is_constructor_field(member_modifiers(f)))
                 .cloned()
                 .collect();
 
@@ -569,7 +569,7 @@ impl CppCodeGenerator {
             // generated code matches the declaration order in the source.
             for field in fields {
                 if let Stmt::Variable { name: field_name, initialiser: Some(init), modifiers, .. } = &**field {
-                    if modifiers.contains(&Modifier::Constructor) || is_static_member(modifiers) {
+                    if is_constructor_field(modifiers) || is_static_member(modifiers) {
                         continue;
                     }
                     self.output.push_str(&self.indent());
