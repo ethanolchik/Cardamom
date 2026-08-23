@@ -605,6 +605,12 @@ impl CppCodeGenerator {
                     .iter()
                     .chain(methods.iter())
                     .map(|m| &**m)
+                    // An explicit `constructor()` contributes its body to the real C++
+                    // constructor below; it is not also a method named `constructor`.
+                    .filter(|m| {
+                        !matches!(m, Stmt::Function { .. })
+                            || !member_modifiers(m).contains(&Modifier::Constructor)
+                    })
                     .filter(|m| member_visibility(member_modifiers(m)) == visibility)
                     .collect();
 
@@ -783,6 +789,9 @@ impl CppCodeGenerator {
 
             // Method bodies are emitted out of line so they can refer to the whole class.
             for method in methods {
+                if member_modifiers(method).contains(&Modifier::Constructor) {
+                    continue;
+                }
                 if let Stmt::Function {
                     name: method_name,
                     params,
@@ -1063,32 +1072,45 @@ impl CppCodeGenerator {
             return;
         }
 
-        match name.lexeme.as_str() {
-            "push" => {
+        let receiver_kind = self
+            .expr_types
+            .get(&(object as *const Expr))
+            .map(|ty| &ty.kind);
+        let receiver_kind = match receiver_kind {
+            Some(TypeKind::Reference(inner)) | Some(TypeKind::MutRef(inner)) => {
+                Some(&inner.kind)
+            }
+            other => other,
+        };
+        let is_array = matches!(receiver_kind, Some(TypeKind::Array(_, _)));
+        let is_string = matches!(receiver_kind, Some(TypeKind::String));
+
+        match (name.lexeme.as_str(), is_array, is_string) {
+            ("push", true, _) => {
                 object.accept(self);
                 self.output.push_str(".push_back(");
                 self.write_call_arguments(arguments);
                 self.output.push(')');
             }
-            "pop" => {
+            ("pop", true, _) => {
                 object.accept(self);
                 self.output.push_str(".pop_back()");
             }
-            "len" => {
+            ("len", true, _) | ("len", _, true) => {
                 // `.size()` is unsigned; cast so it can be mixed with `int` arithmetic and
                 // comparisons without signed/unsigned surprises.
                 self.output.push_str("static_cast<int>(");
                 object.accept(self);
                 self.output.push_str(".size())");
             }
-            "charAt" => {
+            ("charAt", _, true) => {
                 self.output.push_str("std::string(1, ");
                 object.accept(self);
                 self.output.push_str(".at(");
                 self.write_call_arguments(arguments);
                 self.output.push_str("))");
             }
-            "charCodeAt" => {
+            ("charCodeAt", _, true) => {
                 self.output
                     .push_str("static_cast<int>(static_cast<unsigned char>(");
                 object.accept(self);
