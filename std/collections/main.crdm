@@ -1,0 +1,48 @@
+public class Hashmap<K, V> {
+    private keys: K[] = [];
+    private values: V[] = [];
+
+    public add(key: K, value: V) {
+        for (let i: int = 0; i < this.keys.len(); i += 1) {
+            if (this.keys[i] == key) {
+                this.values[i] = value;
+                return;
+            }
+        }
+
+        this.keys.push(key);
+        this.values.push(value);
+    }
+
+    public get(key: K, fallback: V) -> V {
+        for (let i: int = 0; i < this.keys.len(); i += 1) {
+            if (this.keys[i] == key) {
+                return this.values[i];
+            }
+        }
+
+        return fallback;
+    }
+
+    // Returns 1 when the key was removed and 0 when it was not present.
+    public remove(key: K) -> int {
+        for (let i: int = 0; i < this.keys.len(); i += 1) {
+            if (this.keys[i] == key) {
+                for (let j: int = i; j < this.keys.len() - 1; j += 1) {
+                    this.keys[j] = this.keys[j + 1];
+                    this.values[j] = this.values[j + 1];
+                }
+
+                this.keys.pop();
+                this.values.pop();
+                return 1;
+            }
+        }
+
+        return 0;
+    }
+
+    public size() -> int {
+        return this.keys.len();
+    }
+}
