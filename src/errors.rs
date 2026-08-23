@@ -8,7 +8,7 @@ const RESET: &str = "\x1b[0m";
 
 const CONTEXT_LINES: usize = 2;
 
-const MAX_LINE_LENGTH: usize = 80;  // Adjust this to your preferred line length
+const MAX_LINE_LENGTH: usize = 80; // Adjust this to your preferred line length
 
 trait Diagnostic {
     fn get_line(&self) -> usize;
@@ -17,11 +17,11 @@ trait Diagnostic {
     fn get_message(&self) -> &str;
     fn get_kind(&self) -> &str;
     fn get_colour(&self) -> &str;
-    
+
     fn caret(&self) -> String {
         let mut caret = String::new();
         let span = self.get_span();
-        
+
         if span.end == 0 {
             return caret;
         }
@@ -36,7 +36,7 @@ trait Diagnostic {
         let error_line = self.get_line();
         let start_line = error_line.saturating_sub(CONTEXT_LINES);
         let end_line = (error_line + CONTEXT_LINES).min(lines.len());
-        
+
         (start_line..=end_line)
             .filter_map(|line_num| {
                 if line_num == 0 || line_num > lines.len() {
@@ -47,10 +47,16 @@ trait Diagnostic {
             })
             .collect()
     }
-    
+
     fn format_message(&self, colour: &str) -> String {
         let mut output = String::new();
-        output.push_str(&format!("{}╭─{} {} in {}\n", colour, self.get_kind(), RESET, self.get_filename()));
+        output.push_str(&format!(
+            "{}╭─{} {} in {}\n",
+            colour,
+            self.get_kind(),
+            RESET,
+            self.get_filename()
+        ));
         output.push_str(&format!("{}│\n", colour));
         output
     }
@@ -103,39 +109,87 @@ pub struct Help {
 }
 
 impl Diagnostic for Error {
-    fn get_line(&self) -> usize { self.line }
-    fn get_span(&self) -> &Span { &self.span }
-    fn get_filename(&self) -> &str { &self.filename }
-    fn get_message(&self) -> &str { &self.message }
-    fn get_kind(&self) -> &str { "error" }
-    fn get_colour(&self) -> &str { RED }
+    fn get_line(&self) -> usize {
+        self.line
+    }
+    fn get_span(&self) -> &Span {
+        &self.span
+    }
+    fn get_filename(&self) -> &str {
+        &self.filename
+    }
+    fn get_message(&self) -> &str {
+        &self.message
+    }
+    fn get_kind(&self) -> &str {
+        "error"
+    }
+    fn get_colour(&self) -> &str {
+        RED
+    }
 }
 
 impl Diagnostic for Note {
-    fn get_line(&self) -> usize { self.line }
-    fn get_span(&self) -> &Span { &self.span }
-    fn get_filename(&self) -> &str { &self.filename }
-    fn get_message(&self) -> &str { &self.message }
-    fn get_kind(&self) -> &str { "note" }
-    fn get_colour(&self) -> &str { CYAN }
+    fn get_line(&self) -> usize {
+        self.line
+    }
+    fn get_span(&self) -> &Span {
+        &self.span
+    }
+    fn get_filename(&self) -> &str {
+        &self.filename
+    }
+    fn get_message(&self) -> &str {
+        &self.message
+    }
+    fn get_kind(&self) -> &str {
+        "note"
+    }
+    fn get_colour(&self) -> &str {
+        CYAN
+    }
 }
 
 impl Diagnostic for Warning {
-    fn get_line(&self) -> usize { self.line }
-    fn get_span(&self) -> &Span { &self.span }
-    fn get_filename(&self) -> &str { &self.filename }
-    fn get_message(&self) -> &str { &self.message }
-    fn get_kind(&self) -> &str { "warning" }
-    fn get_colour(&self) -> &str { YELLOW }
+    fn get_line(&self) -> usize {
+        self.line
+    }
+    fn get_span(&self) -> &Span {
+        &self.span
+    }
+    fn get_filename(&self) -> &str {
+        &self.filename
+    }
+    fn get_message(&self) -> &str {
+        &self.message
+    }
+    fn get_kind(&self) -> &str {
+        "warning"
+    }
+    fn get_colour(&self) -> &str {
+        YELLOW
+    }
 }
 
 impl Diagnostic for Help {
-    fn get_line(&self) -> usize { self.line }
-    fn get_span(&self) -> &Span { &self.span }
-    fn get_filename(&self) -> &str { &self.filename }
-    fn get_message(&self) -> &str { &self.message }
-    fn get_kind(&self) -> &str { "help" }
-    fn get_colour(&self) -> &str { GREEN }
+    fn get_line(&self) -> usize {
+        self.line
+    }
+    fn get_span(&self) -> &Span {
+        &self.span
+    }
+    fn get_filename(&self) -> &str {
+        &self.filename
+    }
+    fn get_message(&self) -> &str {
+        &self.message
+    }
+    fn get_kind(&self) -> &str {
+        "help"
+    }
+    fn get_colour(&self) -> &str {
+        GREEN
+    }
 }
 
 impl Error {
@@ -217,10 +271,21 @@ impl Error {
 
     pub fn to_string(&self) -> String {
         let mut output = String::new();
-        
+
         // 1) Print the standard error header
-        output.push_str(&format!("{}error{}: {}\n", self.get_colour(), RESET, self.message));
-        output.push_str(&format!("{}->{} {}:{}\n", self.get_colour(), RESET, self.filename, self.line));
+        output.push_str(&format!(
+            "{}error{}: {}\n",
+            self.get_colour(),
+            RESET,
+            self.message
+        ));
+        output.push_str(&format!(
+            "{}->{} {}:{}\n",
+            self.get_colour(),
+            RESET,
+            self.filename,
+            self.line
+        ));
 
         // 2) Gather "relevant lines":
         //    - The primary error line
@@ -243,7 +308,7 @@ impl Error {
         let mut intervals = Vec::new();
         for &(line_num, _) in &relevant_lines {
             if line_num == 0 || line_num > total_lines {
-                continue; 
+                continue;
             }
             let start = line_num.saturating_sub(CONTEXT_LINES).max(1);
             let end = (line_num + CONTEXT_LINES).min(total_lines);
@@ -334,9 +399,7 @@ impl Error {
                     for note in line_notes {
                         let caret_indent = "      │ ".len();
                         let note_caret = note.caret();
-                        output.push_str(&format!("      │ {}{}{} ",
-                            CYAN, note_caret, RESET
-                        ));
+                        output.push_str(&format!("      │ {}{}{} ", CYAN, note_caret, RESET));
 
                         let total_indent = caret_indent + note_caret.len() + 1;
                         let wrapped_message = Self::wrap_message(&note.message, total_indent);
@@ -350,9 +413,7 @@ impl Error {
                     for help in line_helps {
                         let caret_indent = "      │ ".len();
                         let help_caret = help.caret();
-                        output.push_str(&format!("      │ {}{}{} ",
-                            GREEN, help_caret, RESET
-                        ));
+                        output.push_str(&format!("      │ {}{}{} ", GREEN, help_caret, RESET));
 
                         let total_indent = caret_indent + help_caret.len() + 1;
                         let wrapped_message = Self::wrap_message(&help.message, total_indent);
@@ -440,11 +501,22 @@ impl Warning {
 
     pub fn to_string(&self) -> String {
         let mut output = String::new();
-        
+
         // Header
-        output.push_str(&format!("{}warning{}: {}\n", self.get_colour(), RESET, self.message));
-        output.push_str(&format!("{}->{} {}:{}\n", self.get_colour(), RESET, self.filename, self.line));
-        
+        output.push_str(&format!(
+            "{}warning{}: {}\n",
+            self.get_colour(),
+            RESET,
+            self.message
+        ));
+        output.push_str(&format!(
+            "{}->{} {}:{}\n",
+            self.get_colour(),
+            RESET,
+            self.filename,
+            self.line
+        ));
+
         // Collect all lines we need to show
         let mut all_lines: Vec<(usize, bool)> = vec![(self.line, true)];
         for note in &self.notes {
@@ -452,8 +524,16 @@ impl Warning {
         }
         all_lines.sort_by_key(|&(line, _)| line);
 
-        let min_line = all_lines.iter().map(|&(line, _)| line).min().unwrap_or(self.line);
-        let max_line = all_lines.iter().map(|&(line, _)| line).max().unwrap_or(self.line);
+        let min_line = all_lines
+            .iter()
+            .map(|&(line, _)| line)
+            .min()
+            .unwrap_or(self.line);
+        let max_line = all_lines
+            .iter()
+            .map(|&(line, _)| line)
+            .max()
+            .unwrap_or(self.line);
         let start_line = min_line.saturating_sub(CONTEXT_LINES);
         let end_line = (max_line + CONTEXT_LINES).min(self.source.lines().count());
 
@@ -469,7 +549,8 @@ impl Warning {
 
             // Error indicator
             if line_num == self.line {
-                output.push_str(&format!("      │ {}{}{}\n",
+                output.push_str(&format!(
+                    "      │ {}{}{}\n",
                     self.get_colour(),
                     self.caret(),
                     RESET
@@ -480,42 +561,26 @@ impl Warning {
             for note in &self.notes {
                 if note.line == line_num {
                     let caret_indent = "      │ ".len();
-                    output.push_str(&format!("      │ {}{}{} ",
-                        CYAN,
-                        note.caret(),
-                        RESET
-                    ));
-                    
+                    output.push_str(&format!("      │ {}{}{} ", CYAN, note.caret(), RESET));
+
                     // Calculate the indent for wrapped lines
                     let total_indent = caret_indent + note.caret().len() + 1;
                     let wrapped_message = Self::wrap_message(&note.message, total_indent);
-                    
-                    output.push_str(&format!("{}{}{}\n",
-                        CYAN,
-                        wrapped_message,
-                        RESET
-                    ));
+
+                    output.push_str(&format!("{}{}{}\n", CYAN, wrapped_message, RESET));
                 }
             }
 
             for help in &self.helps {
                 if help.line == line_num {
                     let caret_indent = "      │ ".len();
-                    output.push_str(&format!("      │ {}{}{} ",
-                        GREEN,
-                        help.caret(),
-                        RESET
-                    ));
-                    
+                    output.push_str(&format!("      │ {}{}{} ", GREEN, help.caret(), RESET));
+
                     // Calculate the indent for wrapped lines
                     let total_indent = caret_indent + help.caret().len() + 1;
                     let wrapped_message = Self::wrap_message(&help.message, total_indent);
-                    
-                    output.push_str(&format!("{}{}{}\n",
-                        GREEN,
-                        wrapped_message,
-                        RESET
-                    ));
+
+                    output.push_str(&format!("{}{}{}\n", GREEN, wrapped_message, RESET));
                 }
             }
         }

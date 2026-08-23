@@ -1,5 +1,5 @@
-use crate::token::{Token, TokenKind, Span};
 use crate::errors::{Error, Help};
+use crate::token::{Span, Token, TokenKind};
 
 pub struct Lexer {
     pub source: String,
@@ -14,7 +14,7 @@ pub struct Lexer {
     pub col_end: usize,
 
     pub had_error: bool,
-    pub error_tokens: Vec<Token>
+    pub error_tokens: Vec<Token>,
 }
 
 impl Lexer {
@@ -31,7 +31,7 @@ impl Lexer {
             col_start: 1,
             col_end: 1,
             had_error: false,
-            error_tokens: Vec::new()
+            error_tokens: Vec::new(),
         }
     }
 
@@ -47,7 +47,16 @@ impl Lexer {
         let error_tokens: Vec<Token> = self.error_tokens.clone();
         for token in error_tokens.iter() {
             let message = format!("Unexpected token '{}'", token.lexeme);
-            self.lexerr(&message, token.clone(), vec![Help::new("Remove this character".to_string(), token.line, token.span.clone(), self.filename.clone())]);
+            self.lexerr(
+                &message,
+                token.clone(),
+                vec![Help::new(
+                    "Remove this character".to_string(),
+                    token.line,
+                    token.span.clone(),
+                    self.filename.clone(),
+                )],
+            );
         }
     }
 
@@ -62,19 +71,31 @@ impl Lexer {
             ']' => self.add_token(TokenKind::RBracket),
             ',' => self.add_token(TokenKind::Comma),
             '.' => {
-                let token_kind = if self.match_token('.') { TokenKind::Range } else { TokenKind::Dot };
+                let token_kind = if self.match_token('.') {
+                    TokenKind::Range
+                } else {
+                    TokenKind::Dot
+                };
                 self.add_token(token_kind);
-            },
+            }
             ':' => {
-                let token_kind = if self.match_token(':') { TokenKind::StaticAccess } else { TokenKind::Colon };
+                let token_kind = if self.match_token(':') {
+                    TokenKind::StaticAccess
+                } else {
+                    TokenKind::Colon
+                };
                 self.add_token(token_kind);
-            },
+            }
             ';' => self.add_token(TokenKind::Semicolon),
             '@' => self.add_token(TokenKind::At),
             '+' => {
-                let token_kind = if self.match_token('=') { TokenKind::PlusEq } else { TokenKind::Plus };
+                let token_kind = if self.match_token('=') {
+                    TokenKind::PlusEq
+                } else {
+                    TokenKind::Plus
+                };
                 self.add_token(token_kind);
-            },
+            }
             '-' => {
                 let token_kind = if self.match_token('=') {
                     TokenKind::MinusEq
@@ -87,7 +108,7 @@ impl Lexer {
                     }
                 };
                 self.add_token(token_kind);
-            },
+            }
             '*' => {
                 if self.match_token('=') {
                     self.add_token(TokenKind::MulEq);
@@ -96,20 +117,28 @@ impl Lexer {
                 } else {
                     self.add_token(TokenKind::Mul);
                 }
-            },
+            }
             '/' => {
                 if self.match_token('/') {
                     self.scan_comment();
                 } else {
-                    let token_kind = if self.match_token('=') { TokenKind::DivEq } else { TokenKind::Div };
+                    let token_kind = if self.match_token('=') {
+                        TokenKind::DivEq
+                    } else {
+                        TokenKind::Div
+                    };
                     self.add_token(token_kind);
                 }
-            },
+            }
             '%' => {
                 let is_match = self.match_token('=');
-                let token_kind = if is_match { TokenKind::ModEq } else { TokenKind::Mod };
+                let token_kind = if is_match {
+                    TokenKind::ModEq
+                } else {
+                    TokenKind::Mod
+                };
                 self.add_token(token_kind);
-            },
+            }
             '&' => {
                 let token_kind = if self.match_token('=') {
                     TokenKind::AmpEq
@@ -119,7 +148,7 @@ impl Lexer {
                     TokenKind::Amp
                 };
                 self.add_token(token_kind);
-            },
+            }
             '|' => {
                 let token_kind = if self.match_token('=') {
                     TokenKind::PipeEq
@@ -129,26 +158,42 @@ impl Lexer {
                     TokenKind::Pipe
                 };
                 self.add_token(token_kind);
-            },
+            }
             '^' => {
-                let token_kind = if self.match_token('=') { TokenKind::CaretEq } else { TokenKind::Caret };
+                let token_kind = if self.match_token('=') {
+                    TokenKind::CaretEq
+                } else {
+                    TokenKind::Caret
+                };
                 self.add_token(token_kind);
-            },
+            }
             '~' => self.add_token(TokenKind::Tilde),
             '!' => {
                 let is_match = self.match_token('=');
-                let token_kind = if is_match { TokenKind::Neq } else { TokenKind::Bang };
+                let token_kind = if is_match {
+                    TokenKind::Neq
+                } else {
+                    TokenKind::Bang
+                };
                 self.add_token(token_kind);
-            },
+            }
             '?' => {
                 let is_match = self.match_token('?');
-                let token_kind = if is_match { TokenKind::QuestionQuestion } else { TokenKind::Question };
+                let token_kind = if is_match {
+                    TokenKind::QuestionQuestion
+                } else {
+                    TokenKind::Question
+                };
                 self.add_token(token_kind);
-            },
+            }
             '=' => {
-                let token_kind = if self.match_token('=') { TokenKind::EqEq } else { TokenKind::Eq };
+                let token_kind = if self.match_token('=') {
+                    TokenKind::EqEq
+                } else {
+                    TokenKind::Eq
+                };
                 self.add_token(token_kind);
-            },
+            }
             '<' => {
                 let token_kind = if self.match_token('=') {
                     TokenKind::Lte
@@ -165,7 +210,7 @@ impl Lexer {
                     }
                 };
                 self.add_token(token_kind);
-            },
+            }
             '>' => {
                 let token_kind = if self.match_token('=') {
                     TokenKind::Gte
@@ -182,7 +227,7 @@ impl Lexer {
                     }
                 };
                 self.add_token(token_kind);
-            },
+            }
             '"' => self.scan_string(c),
             '\'' => self.scan_string(c),
             ' ' | '\r' | '\t' => (),
@@ -190,7 +235,7 @@ impl Lexer {
                 self.line += 1;
                 self.col_end = 0;
                 self.col_start = 0;
-            },
+            }
             _ => {
                 if c.is_digit(10) {
                     self.scan_number();
@@ -231,13 +276,21 @@ impl Lexer {
         if self.current + 1 >= self.source.len() {
             '\0'
         } else {
-            self.source[self.current+1..].chars().next().unwrap_or('\0')
+            self.source[self.current + 1..]
+                .chars()
+                .next()
+                .unwrap_or('\0')
         }
     }
 
     fn add_token(&mut self, kind: TokenKind) {
         let lexeme = self.source[self.start..self.current].to_string();
-        let token = Token::new(kind.clone(), lexeme, self.line, Span::new(self.col_start, self.col_end));
+        let token = Token::new(
+            kind.clone(),
+            lexeme,
+            self.line,
+            Span::new(self.col_start, self.col_end),
+        );
         self.tokens.push(token.clone());
 
         if kind == TokenKind::Error {
@@ -327,7 +380,12 @@ impl Lexer {
     }
 
     fn lexerr(&mut self, message: &str, token: Token, help: Vec<Help>) {
-        let mut error = Error::new(message.to_string(), token.line, token.span, self.filename.clone());
+        let mut error = Error::new(
+            message.to_string(),
+            token.line,
+            token.span,
+            self.filename.clone(),
+        );
         error.add_source(self.source.clone());
 
         for h in help {

@@ -1,0 +1,11 @@
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+}
+
+public class Counter(private value: int) {
+    public get() -> int {
+        return this.value;
+    }
+}

@@ -1,6 +1,6 @@
 use crate::ast::*;
-use crate::token::*;
 use crate::errors::*;
+use crate::token::*;
 use crate::ty::*;
 
 pub struct Parser {
@@ -92,7 +92,9 @@ impl Parser {
         } else if self.match_token(TokenKind::Continue) {
             return self.continue_statement();
         } else if self.match_token(TokenKind::LBrace) {
-            return Ok(Stmt::Block { statements: self.block()?.into_iter().map(Box::new).collect() });
+            return Ok(Stmt::Block {
+                statements: self.block()?.into_iter().map(Box::new).collect(),
+            });
         }
 
         self.expression_statement()
@@ -121,7 +123,11 @@ impl Parser {
             None
         };
 
-        Ok(Stmt::If { condition: Box::new(condition), then_branch, else_branch })
+        Ok(Stmt::If {
+            condition: Box::new(condition),
+            then_branch,
+            else_branch,
+        })
     }
 
     pub fn while_statement(&mut self) -> Result<Stmt, Error> {
@@ -131,7 +137,10 @@ impl Parser {
 
         let body = Box::new(self.statement()?);
 
-        Ok(Stmt::While { condition: Box::new(condition), body } )
+        Ok(Stmt::While {
+            condition: Box::new(condition),
+            body,
+        })
     }
 
     pub fn for_statement(&mut self) -> Result<Stmt, Error> {
@@ -163,7 +172,12 @@ impl Parser {
 
         let body = Box::new(self.statement()?);
 
-        Ok(Stmt::For { initialiser: initialiser.map(Box::new), condition: condition.map(Box::new), increment: increment.map(Box::new), body })
+        Ok(Stmt::For {
+            initialiser: initialiser.map(Box::new),
+            condition: condition.map(Box::new),
+            increment: increment.map(Box::new),
+            body,
+        })
     }
 
     pub fn return_statement(&mut self) -> Result<Stmt, Error> {
@@ -175,7 +189,10 @@ impl Parser {
         };
 
         self.consume(TokenKind::Semicolon, "Expected ';' after return value.")?;
-        Ok(Stmt::Return { token, value: value.map(Box::new) })
+        Ok(Stmt::Return {
+            token,
+            value: value.map(Box::new),
+        })
     }
 
     pub fn break_statement(&mut self) -> Result<Stmt, Error> {
@@ -227,8 +244,17 @@ impl Parser {
             None
         };
 
-        self.consume(TokenKind::Semicolon, "Expected ';' after variable declaration.")?;
-        Ok(Stmt::Variable { name, type_, initialiser: initialiser.map(Box::new), derived, modifiers })
+        self.consume(
+            TokenKind::Semicolon,
+            "Expected ';' after variable declaration.",
+        )?;
+        Ok(Stmt::Variable {
+            name,
+            type_,
+            initialiser: initialiser.map(Box::new),
+            derived,
+            modifiers,
+        })
     }
 
     pub fn function_declaration(&mut self, kind: &str) -> Result<Stmt, Error> {
@@ -267,7 +293,14 @@ impl Parser {
             self.consume(TokenKind::Gt, "Expected '>' after generics.")?;
         }
 
-        self.consume(TokenKind::LParen, &format!("Expected '(' after {} name.", kind))?;
+        self.consume(
+            TokenKind::LParen,
+            &format!(
+                "Expected '(' after {} name, found {:?}.",
+                kind,
+                self.peek().lexeme
+            ),
+        )?;
         let mut params = Vec::new();
 
         if !self.check(TokenKind::RParen) {
@@ -285,7 +318,13 @@ impl Parser {
                 let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                 self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
                 let type_ = self.type_expression()?;
-                params.push(Box::new(Stmt::Variable { name: param_name, type_, initialiser: None, derived, modifiers: vec![] }));
+                params.push(Box::new(Stmt::Variable {
+                    name: param_name,
+                    type_,
+                    initialiser: None,
+                    derived,
+                    modifiers: vec![],
+                }));
 
                 if !self.match_token(TokenKind::Comma) {
                     break;
@@ -301,7 +340,12 @@ impl Parser {
         } else {
             return_type = Type {
                 attributes: vec![],
-                name: Token::new(TokenKind::Identifier, "void".to_string(), self.previous().line, self.previous().span),
+                name: Token::new(
+                    TokenKind::Identifier,
+                    "void".to_string(),
+                    self.previous().line,
+                    self.previous().span,
+                ),
                 derived: vec![],
                 generics: vec![],
                 kind: TypeKind::Void,
@@ -311,7 +355,14 @@ impl Parser {
         self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
         let body = self.block()?;
 
-        Ok(Stmt::Function { name, params: params.into_iter().collect(), body: body.into_iter().map(Box::new).collect(), return_type, modifiers: function_modifier, generics })
+        Ok(Stmt::Function {
+            name,
+            params: params.into_iter().collect(),
+            body: body.into_iter().map(Box::new).collect(),
+            return_type,
+            modifiers: function_modifier,
+            generics,
+        })
     }
 
     pub fn class_declaration(&mut self) -> Result<Stmt, Error> {
@@ -349,7 +400,8 @@ impl Parser {
                     let mut modifiers = self.member_modifiers()?;
                     modifiers.push(Modifier::Constructor);
 
-                    let param_name = self.consume(TokenKind::Identifier, "Expected parameter name.")?;
+                    let param_name =
+                        self.consume(TokenKind::Identifier, "Expected parameter name.")?;
                     self.consume(TokenKind::Colon, "Expected ':' after parameter name.")?;
                     let type_ = self.type_expression()?;
 
@@ -378,7 +430,13 @@ impl Parser {
 
         self.consume(TokenKind::RBrace, "Expected '}' after class body.")?;
 
-        Ok(Stmt::Class { name, generics, modifier: class_modifier, fields, methods })
+        Ok(Stmt::Class {
+            name,
+            generics,
+            modifier: class_modifier,
+            fields,
+            methods,
+        })
     }
 
     /// Parses the modifiers in front of a class member.
@@ -410,10 +468,9 @@ impl Parser {
             let token = self.previous();
 
             if visibility.is_some() {
-                return Err(self.error_at(
-                    &token,
-                    "A member can only have one visibility modifier.",
-                ));
+                return Err(
+                    self.error_at(&token, "A member can only have one visibility modifier.")
+                );
             }
 
             visibility = modifier;
@@ -461,7 +518,10 @@ impl Parser {
                 None
             };
 
-            self.consume(TokenKind::Semicolon, "Expected ';' after field declaration.")?;
+            self.consume(
+                TokenKind::Semicolon,
+                "Expected ';' after field declaration.",
+            )?;
 
             fields.push(Box::new(Stmt::Variable {
                 name,
@@ -473,10 +533,20 @@ impl Parser {
         } else {
             let mut method = self.function_declaration("method")?;
 
-            if let Stmt::Function { name: ref mut n, modifiers: ref mut method_modifiers, .. } = method {
+            if let Stmt::Function {
+                name: ref mut n,
+                modifiers: ref mut method_modifiers,
+                ..
+            } = method
+            {
                 *n = name;
                 method_modifiers.extend(modifiers);
                 method_modifiers.push(Modifier::Method);
+                // Allow an explicit constructor method in the class body using the
+                // reserved name `constructor`.
+                if n.lexeme == "constructor" {
+                    method_modifiers.push(Modifier::Constructor);
+                }
             }
 
             methods.push(Box::new(method));
@@ -494,7 +564,9 @@ impl Parser {
                 let func = self.function_declaration("extension function")?;
                 methods.push(Box::new(func));
             } else {
-                return Err(self.error("Expected function declaration in extend block.".to_string()));
+                return Err(
+                    self.error("Expected function declaration in extend block.".to_string())
+                );
             }
         }
         self.consume(TokenKind::RBrace, "Expected '}' after extend block")?;
@@ -509,7 +581,7 @@ impl Parser {
         let mut derived = Vec::new();
         let mut generics: Vec<Type> = Vec::new();
         let mut kind: TypeKind;
-        let name: Token;
+        let mut name: Token;
 
         // Prefix modifiers: `&T`, `#T`, `*T`. These bind more loosely than a postfix
         // `[]`, so `&int[]` is a reference to an array of ints. Use parentheses to get
@@ -536,7 +608,10 @@ impl Parser {
                 self.consume(TokenKind::Gt, "Expected '>' after function generics.")?;
             }
 
-            self.consume(TokenKind::LParen, "Expected '(' before function parameters.")?;
+            self.consume(
+                TokenKind::LParen,
+                "Expected '(' before function parameters.",
+            )?;
 
             let mut parameters = Vec::new();
 
@@ -551,7 +626,10 @@ impl Parser {
             }
 
             self.consume(TokenKind::RParen, "Expected ')' after function parameters.")?;
-            self.consume(TokenKind::Arrow, "Expected '->' before function return type.")?;
+            self.consume(
+                TokenKind::Arrow,
+                "Expected '->' before function return type.",
+            )?;
 
             let return_type = self.type_expression()?;
 
@@ -608,7 +686,30 @@ impl Parser {
             }
         } else {
             name = self.consume(TokenKind::Identifier, "Expected type name.")?;
-            kind = TypeKind::from_name(&name.lexeme.clone());
+            kind = TypeKind::from_name(&name.lexeme);
+
+            // In a qualified type, the final component is the class and everything
+            // before it is the owning module: `collections.Box` becomes
+            // `User("collections", "Box")`.
+            if self.match_token(TokenKind::Dot) {
+                let first = name.clone();
+                let mut parts = vec![first.lexeme.clone()];
+                loop {
+                    let part =
+                        self.consume(TokenKind::Identifier, "Expected type name after '.'.")?;
+                    parts.push(part.lexeme);
+
+                    if !self.match_token(TokenKind::Dot) {
+                        break;
+                    }
+                }
+
+                let class_name = parts.pop().unwrap();
+                let module = parts.join(".");
+                let qualified = format!("{}.{}", module, class_name);
+                name = Token::new(TokenKind::Identifier, qualified, first.line, first.span);
+                kind = TypeKind::User(module, class_name);
+            }
 
             if self.match_token(TokenKind::Lt) {
                 loop {
@@ -623,7 +724,13 @@ impl Parser {
                 attributes.push(Attribute::Class);
 
                 // `Foo<int>` is a particular instantiation, distinct from `Foo` itself.
-                kind = TypeKind::GenericInstance(name.lexeme.clone(), generics.clone());
+                // Preserve an explicit owner; an unqualified owner remains empty until
+                // the type checker resolves it to the current module.
+                let (module, class_name) = match &kind {
+                    TypeKind::User(module, class_name) => (module.clone(), class_name.clone()),
+                    _ => (String::new(), name.lexeme.clone()),
+                };
+                kind = TypeKind::GenericInstance(module, class_name, generics.clone());
             }
         }
 
@@ -657,7 +764,10 @@ impl Parser {
 
     pub fn import_declaration(&mut self) -> Result<Stmt, Error> {
         // `import io;`, or `import io as console;` to bind it to a different name.
-        let name = self.consume(TokenKind::Identifier, "Expected module name after 'import'.")?;
+        let name = self.consume(
+            TokenKind::Identifier,
+            "Expected module name after 'import'.",
+        )?;
 
         let alias = if self.match_token(TokenKind::As) {
             self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?
@@ -672,7 +782,9 @@ impl Parser {
     pub fn expression_statement(&mut self) -> Result<Stmt, Error> {
         let expr = self.expression()?;
         self.consume(TokenKind::Semicolon, "Expected ';' after expression.")?;
-        Ok(Stmt::Expression { expression: Box::new(expr) })
+        Ok(Stmt::Expression {
+            expression: Box::new(expr),
+        })
     }
 
     pub fn expression(&mut self) -> Result<Expr, Error> {
@@ -682,21 +794,57 @@ impl Parser {
     pub fn assignment(&mut self) -> Result<Expr, Error> {
         let expr = self.logical_or()?;
 
-        if self.match_token(TokenKind::Eq) || self.match_token(TokenKind::PlusEq) || self.match_token(TokenKind::MinusEq) || self.match_token(TokenKind::MulEq) || self.match_token(TokenKind::DivEq) || self.match_token(TokenKind::ModEq) || self.match_token(TokenKind::AmpEq) || self.match_token(TokenKind::PipeEq) || self.match_token(TokenKind::CaretEq) || self.match_token(TokenKind::LShiftEq) || self.match_token(TokenKind::RShiftEq) {
+        if self.match_token(TokenKind::Eq)
+            || self.match_token(TokenKind::PlusEq)
+            || self.match_token(TokenKind::MinusEq)
+            || self.match_token(TokenKind::MulEq)
+            || self.match_token(TokenKind::DivEq)
+            || self.match_token(TokenKind::ModEq)
+            || self.match_token(TokenKind::AmpEq)
+            || self.match_token(TokenKind::PipeEq)
+            || self.match_token(TokenKind::CaretEq)
+            || self.match_token(TokenKind::LShiftEq)
+            || self.match_token(TokenKind::RShiftEq)
+        {
             let equals = self.previous().clone();
             let value = self.assignment()?;
 
             if let Expr::Variable { name } = expr {
-                return Ok(Expr::Assignment { name, value: Box::new(value), op: equals });
+                return Ok(Expr::Assignment {
+                    name,
+                    value: Box::new(value),
+                    op: equals,
+                });
             } else if let Expr::MemberAccess { object, name } = expr {
-                return Ok(Expr::MemberAssignment { object, name, value: Box::new(value), op: equals });
+                return Ok(Expr::MemberAssignment {
+                    object,
+                    name,
+                    value: Box::new(value),
+                    op: equals,
+                });
             } else if let Expr::StaticAccess { object, name } = expr {
-                return Ok(Expr::StaticAssignment { object, name, value: Box::new(value), op: equals });
-            } else if let Expr::Index { object, index, token } = expr {
-                return Ok(Expr::IndexAssignment { object, index, value: Box::new(value), op: equals, token });
+                return Ok(Expr::StaticAssignment {
+                    object,
+                    name,
+                    value: Box::new(value),
+                    op: equals,
+                });
+            } else if let Expr::Index {
+                object,
+                index,
+                token,
+            } = expr
+            {
+                return Ok(Expr::IndexAssignment {
+                    object,
+                    index,
+                    value: Box::new(value),
+                    op: equals,
+                    token,
+                });
             }
 
-            return Err(self.error(String::from("Invalid assignment target.")))
+            return Err(self.error(String::from("Invalid assignment target.")));
         }
 
         Ok(expr)
@@ -708,7 +856,11 @@ impl Parser {
         while self.match_token(TokenKind::Or) {
             let op = self.previous().clone();
             let right = self.logical_and()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -720,7 +872,11 @@ impl Parser {
         while self.match_token(TokenKind::And) {
             let op = self.previous().clone();
             let right = self.nullish_coalesce()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -732,7 +888,11 @@ impl Parser {
         while self.match_token(TokenKind::QuestionQuestion) {
             let op = self.previous().clone();
             let right = self.bitwise_or()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -744,7 +904,11 @@ impl Parser {
         while self.match_token(TokenKind::Pipe) {
             let op = self.previous().clone();
             let right = self.bitwise_xor()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -756,7 +920,11 @@ impl Parser {
         while self.match_token(TokenKind::Caret) {
             let op = self.previous().clone();
             let right = self.bitwise_and()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -768,7 +936,11 @@ impl Parser {
         while self.match_token(TokenKind::Amp) {
             let op = self.previous().clone();
             let right = self.equality()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -780,7 +952,11 @@ impl Parser {
         while self.match_token(TokenKind::EqEq) || self.match_token(TokenKind::Neq) {
             let op = self.previous().clone();
             let right = self.comparison()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -789,10 +965,18 @@ impl Parser {
     pub fn comparison(&mut self) -> Result<Expr, Error> {
         let mut expr = self.shift()?;
 
-        while self.match_token(TokenKind::Lt) || self.match_token(TokenKind::Lte) || self.match_token(TokenKind::Gt) || self.match_token(TokenKind::Gte) {
+        while self.match_token(TokenKind::Lt)
+            || self.match_token(TokenKind::Lte)
+            || self.match_token(TokenKind::Gt)
+            || self.match_token(TokenKind::Gte)
+        {
             let op = self.previous().clone();
             let right = self.shift()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -804,7 +988,11 @@ impl Parser {
         while self.match_token(TokenKind::LShift) || self.match_token(TokenKind::RShift) {
             let op = self.previous().clone();
             let right = self.addition()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -816,7 +1004,11 @@ impl Parser {
         while self.match_token(TokenKind::Plus) || self.match_token(TokenKind::Minus) {
             let op = self.previous().clone();
             let right = self.multiplication()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
@@ -825,20 +1017,33 @@ impl Parser {
     pub fn multiplication(&mut self) -> Result<Expr, Error> {
         let mut expr = self.unary()?;
 
-        while self.match_token(TokenKind::Mul) || self.match_token(TokenKind::Div) || self.match_token(TokenKind::Mod) {
+        while self.match_token(TokenKind::Mul)
+            || self.match_token(TokenKind::Div)
+            || self.match_token(TokenKind::Mod)
+        {
             let op = self.previous().clone();
             let right = self.unary()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
 
         Ok(expr)
     }
 
     pub fn unary(&mut self) -> Result<Expr, Error> {
-        if self.match_token(TokenKind::Bang) || self.match_token(TokenKind::Minus) || self.match_token(TokenKind::Tilde) {
+        if self.match_token(TokenKind::Bang)
+            || self.match_token(TokenKind::Minus)
+            || self.match_token(TokenKind::Tilde)
+        {
             let op = self.previous().clone();
             let right = self.unary()?;
-            return Ok(Expr::Unary { op, right: Box::new(right) });
+            return Ok(Expr::Unary {
+                op,
+                right: Box::new(right),
+            });
         }
 
         self.reference()
@@ -851,9 +1056,13 @@ impl Parser {
             let right = self.reference()?;
 
             return Ok(if mutable {
-                Expr::MutReference { object: Box::new(right) }
+                Expr::MutReference {
+                    object: Box::new(right),
+                }
             } else {
-                Expr::Reference { object: Box::new(right) }
+                Expr::Reference {
+                    object: Box::new(right),
+                }
             });
         }
 
@@ -864,7 +1073,10 @@ impl Parser {
         if self.match_token(TokenKind::As) {
             let type_ = self.type_expression()?;
             let right = self.cast()?;
-            return Ok(Expr::Cast { object: Box::new(right), type_ });
+            return Ok(Expr::Cast {
+                object: Box::new(right),
+                type_,
+            });
         }
 
         self.index()
@@ -877,7 +1089,11 @@ impl Parser {
             let index = self.expression()?;
             let token = self.previous();
             self.consume(TokenKind::RBracket, "Expected ']' after index.")?;
-            expr = Expr::Index { object: Box::new(expr), index: Box::new(index), token };
+            expr = Expr::Index {
+                object: Box::new(expr),
+                index: Box::new(index),
+                token,
+            };
         }
 
         Ok(expr)
@@ -888,12 +1104,21 @@ impl Parser {
 
         while self.match_token(TokenKind::Dot) || self.match_token(TokenKind::StaticAccess) {
             let is_static = self.previous().kind == TokenKind::StaticAccess;
-            let name = self.consume(TokenKind::Identifier, "Expected property name after '.' or '::'.")?;
-            
+            let name = self.consume(
+                TokenKind::Identifier,
+                "Expected property name after '.' or '::'.",
+            )?;
+
             if is_static {
-                expr = Expr::StaticAccess { object: Box::new(expr), name };
+                expr = Expr::StaticAccess {
+                    object: Box::new(expr),
+                    name,
+                };
             } else {
-                expr = Expr::MemberAccess { object: Box::new(expr), name };
+                expr = Expr::MemberAccess {
+                    object: Box::new(expr),
+                    name,
+                };
             }
         }
 
@@ -951,13 +1176,21 @@ impl Parser {
                     };
                 }
             } else if self.match_token(TokenKind::Dot) {
-                let name = self.consume(TokenKind::Identifier, "Expected property name after '.'.")?;
-                expr = Expr::MemberAccess { object: Box::new(expr), name };
+                let name =
+                    self.consume(TokenKind::Identifier, "Expected property name after '.'.")?;
+                expr = Expr::MemberAccess {
+                    object: Box::new(expr),
+                    name,
+                };
             } else if self.match_token(TokenKind::LBracket) {
                 let index = self.expression()?;
                 let token = self.previous();
                 self.consume(TokenKind::RBracket, "Expected ']' after index.")?;
-                expr = Expr::Index { token, object: Box::new(expr), index: Box::new(index) };
+                expr = Expr::Index {
+                    token,
+                    object: Box::new(expr),
+                    index: Box::new(index),
+                };
             } else {
                 break;
             }
@@ -967,8 +1200,13 @@ impl Parser {
     }
 
     pub fn primary(&mut self) -> Result<Expr, Error> {
-        if self.match_token(TokenKind::Integer) || self.match_token(TokenKind::Float) || self.match_token(TokenKind::String) {
-            return Ok(Expr::Literal { value: self.previous().clone() });
+        if self.match_token(TokenKind::Integer)
+            || self.match_token(TokenKind::Float)
+            || self.match_token(TokenKind::String)
+        {
+            return Ok(Expr::Literal {
+                value: self.previous().clone(),
+            });
         }
 
         // Compiler intrinsics: `@cpp("..")`, `@include("..")`.
@@ -992,7 +1230,9 @@ impl Parser {
         }
 
         if self.match_token(TokenKind::Identifier) {
-            return Ok(Expr::Variable { name: self.previous().clone() });
+            return Ok(Expr::Variable {
+                name: self.previous().clone(),
+            });
         }
 
         if self.match_token(TokenKind::LParen) {
@@ -1009,10 +1249,14 @@ impl Parser {
                 }
 
                 self.consume(TokenKind::RParen, "Expected ')' after expression.")?;
-                return Ok(Expr::Tuple { elements: elements.into_iter().map(Box::new).collect() });
+                return Ok(Expr::Tuple {
+                    elements: elements.into_iter().map(Box::new).collect(),
+                });
             }
             self.consume(TokenKind::RParen, "Expected ')' after expression.")?;
-            return Ok(Expr::Grouping { expression: Box::new(expr) });
+            return Ok(Expr::Grouping {
+                expression: Box::new(expr),
+            });
         }
 
         if self.match_token(TokenKind::LBracket) {
@@ -1030,14 +1274,17 @@ impl Parser {
             }
 
             self.consume(TokenKind::RBracket, "Expected ']' after array elements.")?;
-            return Ok(Expr::Array { elements: elements.into_iter().map(Box::new).collect(), token });
+            return Ok(Expr::Array {
+                elements: elements.into_iter().map(Box::new).collect(),
+                token,
+            });
         }
 
         if self.match_token(TokenKind::New) {
             return self.class_init();
         }
 
-        if self.match_token(TokenKind::Pipe){
+        if self.match_token(TokenKind::Pipe) {
             return self.closure(true);
         }
 
@@ -1055,13 +1302,20 @@ impl Parser {
                     self.peek().line,
                     self.peek().span,
                     self.filename.clone(),
-                )]
+                )],
             ))
         }
     }
 
     pub fn class_init(&mut self) -> Result<Expr, Error> {
-        let name = self.consume(TokenKind::Identifier, "Expected class name.")?;
+        let first = self.consume(TokenKind::Identifier, "Expected class name.")?;
+        let mut qualified = first.lexeme.clone();
+        while self.match_token(TokenKind::Dot) {
+            let part = self.consume(TokenKind::Identifier, "Expected class name after '.'.")?;
+            qualified.push('.');
+            qualified.push_str(&part.lexeme);
+        }
+        let name = Token::new(TokenKind::Identifier, qualified, first.line, first.span);
 
         // `new Box<int>(..)`; without them the type arguments are inferred.
         let mut generics = Vec::new();
@@ -1091,7 +1345,11 @@ impl Parser {
         }
 
         self.consume(TokenKind::RParen, "Expected ')' after arguments.")?;
-        Ok(Expr::ClassInit { name, generics, arguments: arguments.into_iter().map(Box::new).collect() })
+        Ok(Expr::ClassInit {
+            name,
+            generics,
+            arguments: arguments.into_iter().map(Box::new).collect(),
+        })
     }
 
     pub fn closure(&mut self, fields: bool) -> Result<Expr, Error> {
@@ -1105,8 +1363,9 @@ impl Parser {
         if fields {
             if !self.check(TokenKind::Pipe) {
                 loop {
-                    parameters.push(self.consume(TokenKind::Identifier, "Expected parameter name.")?);
-    
+                    parameters
+                        .push(self.consume(TokenKind::Identifier, "Expected parameter name.")?);
+
                     lexeme += &self.previous().lexeme;
 
                     if self.match_token(TokenKind::Colon) {
@@ -1130,13 +1389,19 @@ impl Parser {
         let return_type = self.type_expression()?;
         lexeme += &return_type.name.lexeme;
 
-        self.consume(TokenKind::Arrow, "Expected '->' before closure body.")?;        
+        self.consume(TokenKind::Arrow, "Expected '->' before closure body.")?;
 
         let body = Box::new(self.statement()?);
 
         name.lexeme = lexeme;
 
-        Ok(Expr::Closure { name, parameters, param_types, body, return_type })
+        Ok(Expr::Closure {
+            name,
+            parameters,
+            param_types,
+            body,
+            return_type,
+        })
     }
 
     pub fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, Error> {
@@ -1240,8 +1505,17 @@ impl Parser {
             }
 
             match self.peek().kind {
-                TokenKind::Fn | TokenKind::Let | TokenKind::Const | TokenKind::Class | TokenKind
-                ::Import | TokenKind::If | TokenKind::While | TokenKind::For | TokenKind::Return | TokenKind::Break | TokenKind::Continue => return,
+                TokenKind::Fn
+                | TokenKind::Let
+                | TokenKind::Const
+                | TokenKind::Class
+                | TokenKind::Import
+                | TokenKind::If
+                | TokenKind::While
+                | TokenKind::For
+                | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue => return,
                 _ => {}
             }
 
@@ -1252,7 +1526,12 @@ impl Parser {
     fn error(&mut self, message: String) -> Error {
         self.had_error = true;
         self.errors += 1;
-        let mut e = Error::new(message, self.peek().line, self.peek().span, self.filename.clone());
+        let mut e = Error::new(
+            message,
+            self.peek().line,
+            self.peek().span,
+            self.filename.clone(),
+        );
         e.add_source(self.source.clone());
         e
     }
@@ -1260,7 +1539,12 @@ impl Parser {
     fn error_with_notes(&mut self, message: String, notes: Vec<Note>) -> Error {
         self.had_error = true;
         self.errors += 1;
-        let mut e = Error::new(message, self.peek().line, self.peek().span, self.filename.clone());
+        let mut e = Error::new(
+            message,
+            self.peek().line,
+            self.peek().span,
+            self.filename.clone(),
+        );
         e.add_source(self.source.clone());
 
         for note in notes {
@@ -1275,7 +1559,7 @@ impl Parser {
         derived: &[Derived],
         attributes: &Vec<Attribute>,
         name: &Token,
-        depth: usize
+        depth: usize,
     ) -> TypeKind {
         let mut current_kind = kind;
         let mut depth_c = depth;
@@ -1297,13 +1581,16 @@ impl Parser {
                 })),
                 Derived::Array => {
                     depth_c -= 1;
-                    TypeKind::Array(Box::new(Type {
-                        attributes: attributes.clone(),
-                        name: name.clone(),
-                        derived: vec![Derived::Array],
-                        generics: Vec::new(),
-                        kind: current_kind,
-                    }), depth-depth_c)
+                    TypeKind::Array(
+                        Box::new(Type {
+                            attributes: attributes.clone(),
+                            name: name.clone(),
+                            derived: vec![Derived::Array],
+                            generics: Vec::new(),
+                            kind: current_kind,
+                        }),
+                        depth - depth_c,
+                    )
                 }
                 _ => current_kind,
             };

@@ -1,9 +1,11 @@
-use crate::ast::{Module, Node, Stmt, Expr, Visitor};
-use crate::token::Token;
-use crate::ty::{Type, TypeKind};
-use crate::ast::{is_constructor_field, is_static_member, member_modifiers, member_visibility, Modifier};
+use crate::ast::{
+    is_constructor_field, is_static_member, member_modifiers, member_visibility, Modifier,
+};
+use crate::ast::{Expr, Module, Node, Stmt, Visitor};
 use crate::modules::Program;
 use crate::reachable::{self, FunctionRef};
+use crate::token::Token;
+use crate::ty::{Type, TypeKind};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
@@ -122,7 +124,7 @@ impl CppCodeGenerator {
     /// Applies the active specialisation to a type argument.
     fn resolve_type_argument(&self, kind: &TypeKind) -> TypeKind {
         match kind {
-            TypeKind::GenericParam(name) | TypeKind::User(name) => {
+            TypeKind::GenericParam(name) | TypeKind::User(_, name) => {
                 match self.current_substitution.get(name) {
                     Some(bound) if !Self::names_itself(name, bound) => bound.clone(),
                     _ => kind.clone(),
@@ -132,10 +134,27 @@ impl CppCodeGenerator {
         }
     }
 
+    /// Normalises a type's module owner for codegen.
+    ///
+    /// The parser initially records plain names (`Person`, `Box<int>`) with an empty
+    /// module. If the type checker leaves one unresolved, treat it as local to the
+    /// current module so generated type names match generated class declarations.
+    fn type_module<'a>(&'a self, module: &'a str) -> &'a str {
+        if module.is_empty() {
+            &self.current_module
+        } else {
+            self.imports
+                .get(module)
+                .map(String::as_str)
+                .unwrap_or(module)
+        }
+    }
+
     /// Every instantiation of `name` needed in the module being generated.
     fn instantiations_of(&self, name: &str) -> Vec<Vec<TypeKind>> {
         self.instantiations
             .get(&self.current_module)
+            .or_else(|| self.instantiations.get(""))
             .and_then(|module| module.get(name))
             .cloned()
             .unwrap_or_default()
@@ -181,12 +200,12 @@ impl CppCodeGenerator {
 
     /// Whether a substitution binds `name` to a type that is just `name` again.
     fn names_itself(name: &str, bound: &TypeKind) -> bool {
-        matches!(bound, TypeKind::GenericParam(other) | TypeKind::User(other) if other == name)
+        matches!(bound, TypeKind::GenericParam(other) | TypeKind::User(_, other) if other == name)
     }
 
     /// The C++ name of one specialisation of a generic class.
-    fn mangled_class(name: &str, arguments: &[TypeKind]) -> String {
-        let mut mangled = Self::ident(name);
+    fn mangled_class(module: &str, name: &str, arguments: &[TypeKind]) -> String {
+        let mut mangled = Self::mangled(module, name);
         for argument in arguments {
             mangled.push('_');
             mangled.push_str(&Self::type_tag(argument));
@@ -201,22 +220,38 @@ impl CppCodeGenerator {
             TypeKind::Float => "float".to_string(),
             TypeKind::String => "string".to_string(),
             TypeKind::Void => "void".to_string(),
-            TypeKind::User(name) => name.clone(),
+            TypeKind::User(module, name) => {
+                if module.is_empty() || module == "main" {
+                    name.clone()
+                } else {
+                    format!("{}_{}", module.replace('.', "_"), name)
+                }
+            }
             TypeKind::GenericParam(name) => name.clone(),
             TypeKind::Array(inner, _) => format!("{}arr", Self::type_tag(&inner.kind)),
             TypeKind::Reference(inner) => format!("ref{}", Self::type_tag(&inner.kind)),
             TypeKind::MutRef(inner) => format!("mut{}", Self::type_tag(&inner.kind)),
             TypeKind::Tuple(elements) => {
-                let parts: Vec<String> =
-                    elements.iter().map(|e| Self::type_tag(&e.kind)).collect();
+                let parts: Vec<String> = elements.iter().map(|e| Self::type_tag(&e.kind)).collect();
                 format!("tup{}", parts.join("_"))
             }
             TypeKind::Function(params, ret) => {
-                let parts: Vec<String> =
-                    params.iter().map(|p| Self::type_tag(&p.kind)).collect();
+                let parts: Vec<String> = params.iter().map(|p| Self::type_tag(&p.kind)).collect();
                 format!("fn{}_to_{}", parts.join("_"), Self::type_tag(&ret.kind))
             }
-            TypeKind::GenericInstance(name, _) | TypeKind::Module(name) => name.clone(),
+            TypeKind::GenericInstance(module, name, arguments) => {
+                let mut tag = if module.is_empty() || module == "main" {
+                    name.clone()
+                } else {
+                    format!("{}_{}", module.replace('.', "_"), name)
+                };
+                for argument in arguments {
+                    tag.push('_');
+                    tag.push_str(&Self::type_tag(&argument.kind));
+                }
+                tag
+            }
+            TypeKind::Module(name) => name.clone(),
         }
     }
 
@@ -344,18 +379,96 @@ impl CppCodeGenerator {
     /// `this` is deliberately absent: Cardamom's `this` means exactly what C++'s does,
     /// so it is passed through rather than renamed.
     const CPP_KEYWORDS: &'static [&'static str] = &[
-        "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool",
-        "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class",
-        "compl", "concept", "const", "consteval", "constexpr", "constinit", "const_cast",
-        "continue", "co_await", "co_return", "co_yield", "decltype", "default", "delete",
-        "do", "double", "dynamic_cast", "else", "enum", "explicit", "export", "extern",
-        "false", "float", "for", "friend", "goto", "if", "inline", "int", "long",
-        "mutable", "namespace", "new", "noexcept", "not", "not_eq", "nullptr",
-        "operator", "or", "or_eq", "private", "protected", "public", "register",
-        "reinterpret_cast", "requires", "return", "short", "signed", "sizeof", "static",
-        "static_assert", "static_cast", "struct", "switch", "template",
-        "thread_local", "throw", "true", "try", "typedef", "typeid", "typename", "union",
-        "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
+        "alignas",
+        "alignof",
+        "and",
+        "and_eq",
+        "asm",
+        "auto",
+        "bitand",
+        "bitor",
+        "bool",
+        "break",
+        "case",
+        "catch",
+        "char",
+        "char8_t",
+        "char16_t",
+        "char32_t",
+        "class",
+        "compl",
+        "concept",
+        "const",
+        "consteval",
+        "constexpr",
+        "constinit",
+        "const_cast",
+        "continue",
+        "co_await",
+        "co_return",
+        "co_yield",
+        "decltype",
+        "default",
+        "delete",
+        "do",
+        "double",
+        "dynamic_cast",
+        "else",
+        "enum",
+        "explicit",
+        "export",
+        "extern",
+        "false",
+        "float",
+        "for",
+        "friend",
+        "goto",
+        "if",
+        "inline",
+        "int",
+        "long",
+        "mutable",
+        "namespace",
+        "new",
+        "noexcept",
+        "not",
+        "not_eq",
+        "nullptr",
+        "operator",
+        "or",
+        "or_eq",
+        "private",
+        "protected",
+        "public",
+        "register",
+        "reinterpret_cast",
+        "requires",
+        "return",
+        "short",
+        "signed",
+        "sizeof",
+        "static",
+        "static_assert",
+        "static_cast",
+        "struct",
+        "switch",
+        "template",
+        "thread_local",
+        "throw",
+        "true",
+        "try",
+        "typedef",
+        "typeid",
+        "typename",
+        "union",
+        "unsigned",
+        "using",
+        "virtual",
+        "void",
+        "volatile",
+        "wchar_t",
+        "while",
+        "xor",
         "xor_eq",
     ];
 
@@ -391,9 +504,9 @@ impl CppCodeGenerator {
             .iter()
             .filter_map(|method| match &**method {
                 // A static method has no `this`, so `const` does not apply.
-                Stmt::Function { name, modifiers, .. } if !is_static_member(modifiers) => {
-                    Some(name.lexeme.clone())
-                }
+                Stmt::Function {
+                    name, modifiers, ..
+                } if !is_static_member(modifiers) => Some(name.lexeme.clone()),
                 _ => None,
             })
             .collect();
@@ -444,17 +557,13 @@ impl CppCodeGenerator {
 
     /// Runs `write` once per instantiation of a generic class, with its type parameters
     /// bound; a non-generic class is written once with no substitution.
-    fn for_each_class_specialisation(
-        &mut self,
-        stmt: &Stmt,
-        write: fn(&mut Self, &Stmt, &str),
-    ) {
+    fn for_each_class_specialisation(&mut self, stmt: &Stmt, write: fn(&mut Self, &Stmt, &str)) {
         let Stmt::Class { name, generics, .. } = stmt else {
             return;
         };
 
         if generics.is_empty() {
-            let class_name = Self::ident(&name.lexeme);
+            let class_name = Self::mangled(&self.current_module, &name.lexeme);
             write(self, stmt, &class_name);
             return;
         }
@@ -467,14 +576,21 @@ impl CppCodeGenerator {
                 .collect();
 
             let previous = std::mem::replace(&mut self.current_substitution, substitution);
-            let class_name = Self::mangled_class(&name.lexeme, &arguments);
+            let class_name = Self::mangled_class(&self.current_module, &name.lexeme, &arguments);
             write(self, stmt, &class_name);
             self.current_substitution = previous;
         }
     }
 
     fn write_class_declaration_body(&mut self, stmt: &Stmt, class_name: &str) {
-        if let Stmt::Class { generics: _, modifier: _, fields, methods, .. } = stmt {
+        if let Stmt::Class {
+            generics: _,
+            modifier: _,
+            fields,
+            methods,
+            ..
+        } = stmt
+        {
             let const_methods = Self::const_methods(methods);
 
             self.writeln(&format!("class {} {{", class_name));
@@ -511,11 +627,25 @@ impl CppCodeGenerator {
                     };
 
                     match member {
-                        Stmt::Variable { name: field_name, type_, .. } => {
+                        Stmt::Variable {
+                            name: field_name,
+                            type_,
+                            ..
+                        } => {
                             let cpp_type = self.translate_type(type_);
-                            self.writeln(&format!("{}{} {};", prefix, cpp_type, Self::ident(&field_name.lexeme)));
+                            self.writeln(&format!(
+                                "{}{} {};",
+                                prefix,
+                                cpp_type,
+                                Self::ident(&field_name.lexeme)
+                            ));
                         }
-                        Stmt::Function { name: method_name, params, return_type, .. } => {
+                        Stmt::Function {
+                            name: method_name,
+                            params,
+                            return_type,
+                            ..
+                        } => {
                             let ret_type = self.translate_type(return_type);
                             let param_str = self.translate_params(params);
                             // A method that never mutates is `const`, so it can be
@@ -527,7 +657,11 @@ impl CppCodeGenerator {
                             };
                             self.writeln(&format!(
                                 "{}{} {}({}){};",
-                                prefix, ret_type, Self::ident(&method_name.lexeme), param_str, suffix
+                                prefix,
+                                ret_type,
+                                Self::ident(&method_name.lexeme),
+                                param_str,
+                                suffix
                             ));
                         }
                         _ => {}
@@ -550,7 +684,10 @@ impl CppCodeGenerator {
             let ctor_param_str = self.translate_params(&ctor_params);
             let mut init_list = String::new();
             for param in &ctor_params {
-                if let Stmt::Variable { name: field_name, .. } = &**param {
+                if let Stmt::Variable {
+                    name: field_name, ..
+                } = &**param
+                {
                     if !init_list.is_empty() {
                         init_list.push_str(", ");
                     }
@@ -565,15 +702,35 @@ impl CppCodeGenerator {
             ));
             self.writeln("{");
             self.indent_level += 1;
+            // If the class body supplied an explicit constructor method, emit its
+            // statements here instead of relying solely on the synthesised initializer.
+            if let Some(ctor_method) = methods
+                .iter()
+                .find(|m| member_modifiers(m).contains(&Modifier::Constructor))
+            {
+                if let Stmt::Function { body, .. } = &**ctor_method {
+                    for s in body {
+                        s.accept(self);
+                    }
+                }
+            }
+
             // Non-constructor fields with an initialiser are assigned in the body so the
             // generated code matches the declaration order in the source.
             for field in fields {
-                if let Stmt::Variable { name: field_name, initialiser: Some(init), modifiers, .. } = &**field {
+                if let Stmt::Variable {
+                    name: field_name,
+                    initialiser: Some(init),
+                    modifiers,
+                    ..
+                } = &**field
+                {
                     if is_constructor_field(modifiers) || is_static_member(modifiers) {
                         continue;
                     }
                     self.output.push_str(&self.indent());
-                    self.output.push_str(&format!("this->{} = ", Self::ident(&field_name.lexeme)));
+                    self.output
+                        .push_str(&format!("this->{} = ", Self::ident(&field_name.lexeme)));
                     init.accept(self);
                     self.output.push_str(";\n");
                 }
@@ -589,12 +746,22 @@ impl CppCodeGenerator {
 
     /// Static data members and out-of-line method definitions.
     fn write_class_definitions_body(&mut self, stmt: &Stmt, class_name: &str) {
-        if let Stmt::Class { fields, methods, .. } = stmt {
+        if let Stmt::Class {
+            fields, methods, ..
+        } = stmt
+        {
             let const_methods = Self::const_methods(methods);
 
             // Static data members need a definition outside the class body.
             for field in fields {
-                if let Stmt::Variable { name: field_name, type_, initialiser, modifiers, .. } = &**field {
+                if let Stmt::Variable {
+                    name: field_name,
+                    type_,
+                    initialiser,
+                    modifiers,
+                    ..
+                } = &**field
+                {
                     if !is_static_member(modifiers) {
                         continue;
                     }
@@ -602,7 +769,9 @@ impl CppCodeGenerator {
                     self.output.push_str(&self.indent());
                     self.output.push_str(&format!(
                         "{} {}::{}",
-                        cpp_type, class_name, Self::ident(&field_name.lexeme)
+                        cpp_type,
+                        class_name,
+                        Self::ident(&field_name.lexeme)
                     ));
                     if let Some(init) = initialiser {
                         self.output.push_str(" = ");
@@ -614,7 +783,14 @@ impl CppCodeGenerator {
 
             // Method bodies are emitted out of line so they can refer to the whole class.
             for method in methods {
-                if let Stmt::Function { name: method_name, params, body, return_type, .. } = &**method {
+                if let Stmt::Function {
+                    name: method_name,
+                    params,
+                    body,
+                    return_type,
+                    ..
+                } = &**method
+                {
                     let ret_type = self.translate_type(return_type);
                     let param_str = self.translate_params(params);
                     let suffix = if const_methods.contains(&method_name.lexeme) {
@@ -624,7 +800,11 @@ impl CppCodeGenerator {
                     };
                     self.writeln(&format!(
                         "{} {}::{}({}){}",
-                        ret_type, class_name, Self::ident(&method_name.lexeme), param_str, suffix
+                        ret_type,
+                        class_name,
+                        Self::ident(&method_name.lexeme),
+                        param_str,
+                        suffix
                     ));
                     self.writeln("{");
                     self.indent_level += 1;
@@ -672,15 +852,24 @@ impl CppCodeGenerator {
     }
 
     fn has_main(module: &Module) -> bool {
-        module.statements.iter().any(|stmt| {
-            matches!(&**stmt, Stmt::Function { name, .. } if name.lexeme == "main")
-        })
+        module
+            .statements
+            .iter()
+            .any(|stmt| matches!(&**stmt, Stmt::Function { name, .. } if name.lexeme == "main"))
     }
 
     fn write_function_prototypes(&mut self, module: &Module) {
         let mut wrote_any = false;
         for stmt in &module.statements {
-            if let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt {
+            if let Stmt::Function {
+                name,
+                params,
+                return_type,
+                modifiers,
+                generics,
+                ..
+            } = &**stmt
+            {
                 // `main` needs no prototype, `extern` functions are supplied by the
                 // user, and generic functions have no single concrete signature.
                 if name.lexeme == "main"
@@ -706,11 +895,8 @@ impl CppCodeGenerator {
                         let param_str = self.translate_params(params);
                         self.current_substitution = previous;
 
-                        let cpp_name = Self::mangled_generic(
-                            &self.current_module,
-                            &name.lexeme,
-                            &arguments,
-                        );
+                        let cpp_name =
+                            Self::mangled_generic(&self.current_module, &name.lexeme, &arguments);
                         self.writeln(&format!("{} {}({});", ret_type, cpp_name, param_str));
                         wrote_any = true;
                     }
@@ -737,7 +923,13 @@ impl CppCodeGenerator {
                 if !param_str.is_empty() {
                     param_str.push_str(", ");
                 }
-                write!(&mut param_str, "{} {}", self.translate_type(type_), Self::ident(&name.lexeme)).unwrap();
+                write!(
+                    &mut param_str,
+                    "{} {}",
+                    self.translate_type(type_),
+                    Self::ident(&name.lexeme)
+                )
+                .unwrap();
             }
         }
         param_str
@@ -773,11 +965,11 @@ impl CppCodeGenerator {
             // A type parameter reaches codegen as a plain user type, because the parser
             // cannot tell `T` from a class name. Inside a specialisation the active
             // substitution is what distinguishes them.
-            TypeKind::User(name) => match self.current_substitution.get(name) {
+            TypeKind::User(module, name) => match self.current_substitution.get(name) {
                 Some(bound) if !Self::names_itself(name, bound) => {
                     self.translate_type(&Type::new(ty.name.clone(), bound.clone()))
                 }
-                _ => Self::ident(name), // user types become class names
+                _ => Self::mangled(self.type_module(module), name), // user types become class names
             },
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
@@ -794,7 +986,11 @@ impl CppCodeGenerator {
                     .map(|p| self.translate_type(p))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("std::function<{}({})>", self.translate_type(ret), params_str)
+                format!(
+                    "std::function<{}({})>",
+                    self.translate_type(ret),
+                    params_str
+                )
             }
             // Borrows are real C++ references: `&T` is read-only, `#T` allows writing
             // through it. The type checker rejects assignment through a `const T&`, so
@@ -811,12 +1007,12 @@ impl CppCodeGenerator {
             }
             // A generic class is monomorphised, so `Box<int>` names the specialised
             // class `Box_int` rather than a C++ template instantiation.
-            TypeKind::GenericInstance(name, args) => {
+            TypeKind::GenericInstance(module, name, args) => {
                 let arguments: Vec<TypeKind> = args
                     .iter()
                     .map(|a| self.resolve_type_argument(&a.kind))
                     .collect();
-                Self::mangled_class(name, &arguments)
+                Self::mangled_class(self.type_module(module), name, &arguments)
             }
             // Inside a specialisation, a type parameter stands for its bound type.
             TypeKind::GenericParam(name) => match self.current_substitution.get(name) {
@@ -893,7 +1089,8 @@ impl CppCodeGenerator {
                 self.output.push_str("))");
             }
             "charCodeAt" => {
-                self.output.push_str("static_cast<int>(static_cast<unsigned char>(");
+                self.output
+                    .push_str("static_cast<int>(static_cast<unsigned char>(");
                 object.accept(self);
                 self.output.push_str(".at(");
                 self.write_call_arguments(arguments);
@@ -956,7 +1153,12 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_if(&mut self, stmt: &Stmt) {
-        if let Stmt::If { condition, then_branch, else_branch } = stmt {
+        if let Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = stmt
+        {
             self.output.push_str(&self.indent());
             self.output.push_str("if (");
             condition.accept(self);
@@ -997,22 +1199,34 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_for(&mut self, stmt: &Stmt) {
-        if let Stmt::For { initialiser, condition, increment, body } = stmt {
+        if let Stmt::For {
+            initialiser,
+            condition,
+            increment,
+            body,
+        } = stmt
+        {
             self.output.push_str(&self.indent());
             self.output.push_str("for (");
             if let Some(init) = initialiser {
-                let init_code = self.capture_output(|gen| { init.accept(gen); });
+                let init_code = self.capture_output(|gen| {
+                    init.accept(gen);
+                });
                 self.output.push_str(&init_code);
             } else {
                 self.output.push_str("; ");
             }
             if let Some(cond) = condition {
-                let cond_code = self.capture_output(|gen| { cond.accept(gen); });
+                let cond_code = self.capture_output(|gen| {
+                    cond.accept(gen);
+                });
                 self.output.push_str(&cond_code);
             }
             self.output.push_str("; ");
             if let Some(inc) = increment {
-                let inc_code = self.capture_output(|gen| { inc.accept(gen); });
+                let inc_code = self.capture_output(|gen| {
+                    inc.accept(gen);
+                });
                 self.output.push_str(&inc_code);
             }
             self.output.push_str(") ");
@@ -1049,7 +1263,14 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_variable(&mut self, stmt: &Stmt) {
-        if let Stmt::Variable { name, initialiser, type_, modifiers: _, derived: _ } = stmt {
+        if let Stmt::Variable {
+            name,
+            initialiser,
+            type_,
+            modifiers: _,
+            derived: _,
+        } = stmt
+        {
             let cpp_type = self.translate_type(type_);
             self.output.push_str(&self.indent());
             self.output.push_str(&cpp_type);
@@ -1065,7 +1286,15 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_function(&mut self, stmt: &Stmt) {
-        if let Stmt::Function { name, params, body, return_type, modifiers, generics } = stmt {
+        if let Stmt::Function {
+            name,
+            params,
+            body,
+            return_type,
+            modifiers,
+            generics,
+        } = stmt
+        {
             if modifiers.contains(&Modifier::Extern) {
                 // `fn extern` declares a function implemented outside Cardamom; the user
                 // supplies the definition, so emit nothing here.
@@ -1087,8 +1316,7 @@ impl Visitor for CppCodeGenerator {
                         .zip(arguments.iter().cloned())
                         .collect();
 
-                    let previous =
-                        std::mem::replace(&mut self.current_substitution, substitution);
+                    let previous = std::mem::replace(&mut self.current_substitution, substitution);
                     let cpp_name =
                         Self::mangled_generic(&self.current_module, &name.lexeme, &arguments);
                     self.write_function(&cpp_name, params, body, return_type, false);
@@ -1096,7 +1324,7 @@ impl Visitor for CppCodeGenerator {
                 }
                 return;
             }
-            
+
             // C++ requires `main` to return `int`. Cardamom allows `fn main()` (i.e. a
             // `void` return), so synthesise the `int` return type and the trailing
             // `return 0;` for that case.
@@ -1214,7 +1442,12 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_call(&mut self, expr: &Expr) {
-        if let Expr::Call { callee, paren: _, arguments } = expr {
+        if let Expr::Call {
+            callee,
+            paren: _,
+            arguments,
+        } = expr
+        {
             if let Expr::MemberAccess { object, name } = &**callee {
                 self.visit_member_call(expr, object, name, arguments);
                 return;
@@ -1241,7 +1474,13 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_generic_call(&mut self, expr: &Expr) {
-        if let Expr::GenericCall { callee, paren: _, arguments, generics: _ } = expr {
+        if let Expr::GenericCall {
+            callee,
+            paren: _,
+            arguments,
+            generics: _,
+        } = expr
+        {
             // The type arguments are already baked into the specialisation's name, so
             // nothing of them survives into the generated C++.
             if let Expr::MemberAccess { object, name } = &**callee {
@@ -1289,7 +1528,12 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_index(&mut self, expr: &Expr) {
-        if let Expr::Index { object, index, token: _ } = expr {
+        if let Expr::Index {
+            object,
+            index,
+            token: _,
+        } = expr
+        {
             object.accept(self);
             self.output.push('[');
             index.accept(self);
@@ -1307,16 +1551,24 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_class_init(&mut self, expr: &Expr) {
-        if let Expr::ClassInit { name, arguments, .. } = expr {
+        if let Expr::ClassInit {
+            name, arguments, ..
+        } = expr
+        {
             // Classes have value semantics, so `new Person(..)` is a constructor call.
             // A generic class resolves to whichever specialisation was inferred here.
             let class_name = match self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind) {
-                Some(TypeKind::GenericInstance(base, arguments)) => {
-                    let kinds: Vec<TypeKind> =
-                        arguments.iter().map(|a| self.resolve_type_argument(&a.kind)).collect();
-                    Self::mangled_class(base, &kinds)
+                Some(TypeKind::GenericInstance(module, base, arguments)) => {
+                    let kinds: Vec<TypeKind> = arguments
+                        .iter()
+                        .map(|a| self.resolve_type_argument(&a.kind))
+                        .collect();
+                    Self::mangled_class(self.type_module(module), base, &kinds)
                 }
-                _ => Self::ident(&name.lexeme),
+                Some(TypeKind::User(module, class_name)) => {
+                    Self::mangled(self.type_module(module), class_name)
+                }
+                _ => Self::mangled(&self.current_module, &name.lexeme),
             };
             self.output.push_str(&class_name);
             self.output.push('(');
@@ -1345,14 +1597,22 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_closure(&mut self, expr: &Expr) {
-        if let Expr::Closure { name: _, parameters, param_types, body, return_type } = expr {
+        if let Expr::Closure {
+            name: _,
+            parameters,
+            param_types,
+            body,
+            return_type,
+        } = expr
+        {
             // A closure is an *expression*, so it has to be emitted inline. Emitting a
             // named function definition here produced C++ that could never compile;
             // a lambda is both valid in expression position and able to capture.
             //
             // Parameter types are usually inferred from the closure's expected type, so
             // prefer the type checker's result and fall back to any explicit annotations.
-            let inferred_params = match self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind) {
+            let inferred_params = match self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind)
+            {
                 Some(TypeKind::Function(params, _)) => Some(params.clone()),
                 _ => None,
             };
@@ -1368,24 +1628,29 @@ impl Visitor for CppCodeGenerator {
                 if i > 0 {
                     params_str.push_str(", ");
                 }
-                write!(&mut params_str, "{} {}", param_type, Self::ident(&param.lexeme)).unwrap();
+                write!(
+                    &mut params_str,
+                    "{} {}",
+                    param_type,
+                    Self::ident(&param.lexeme)
+                )
+                .unwrap();
             }
 
             let ret_type = self.translate_type(return_type);
             // Capture by value so the lambda stays valid after the enclosing scope ends
             // (closures can be returned from functions).
-            self.output.push_str(&format!("[=]({}) -> {} ", params_str, ret_type));
+            self.output
+                .push_str(&format!("[=]({}) -> {} ", params_str, ret_type));
 
-            let body_code = self.capture_output(|gen| {
-                match &**body {
-                    Stmt::Block { .. } => body.accept(gen),
-                    _ => {
-                        gen.writeln("{");
-                        gen.indent_level += 1;
-                        body.accept(gen);
-                        gen.indent_level -= 1;
-                        gen.writeln("}");
-                    }
+            let body_code = self.capture_output(|gen| match &**body {
+                Stmt::Block { .. } => body.accept(gen),
+                _ => {
+                    gen.writeln("{");
+                    gen.indent_level += 1;
+                    body.accept(gen);
+                    gen.indent_level -= 1;
+                    gen.writeln("}");
                 }
             });
             // The body was rendered as statements, so drop the leading indent and the
@@ -1426,7 +1691,13 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_member_assignment(&mut self, expr: &Expr) {
-        if let Expr::MemberAssignment { object, name, value, op } = expr {
+        if let Expr::MemberAssignment {
+            object,
+            name,
+            value,
+            op,
+        } = expr
+        {
             object.accept(self);
             self.output.push_str(Self::member_access_operator(object));
             self.output.push_str(&Self::ident(&name.lexeme));
@@ -1438,7 +1709,13 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
-        if let Expr::StaticAssignment { object, name, value, op } = expr {
+        if let Expr::StaticAssignment {
+            object,
+            name,
+            value,
+            op,
+        } = expr
+        {
             object.accept(self);
             self.output.push_str("::");
             self.output.push_str(&Self::ident(&name.lexeme));
@@ -1450,7 +1727,14 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_index_assignment(&mut self, expr: &Expr) {
-        if let Expr::IndexAssignment { object, index, value, op, token: _ } = expr {
+        if let Expr::IndexAssignment {
+            object,
+            index,
+            value,
+            op,
+            token: _,
+        } = expr
+        {
             object.accept(self);
             self.output.push('[');
             index.accept(self);
@@ -1466,7 +1750,14 @@ impl Visitor for CppCodeGenerator {
         if let Stmt::Extension { target, methods } = stmt {
             let target_name = target.name.lexeme.clone();
             for method in methods {
-                if let Stmt::Function { name, params, return_type, body, .. } = &**method {
+                if let Stmt::Function {
+                    name,
+                    params,
+                    return_type,
+                    body,
+                    ..
+                } = &**method
+                {
                     let ret_type = self.translate_type(return_type);
                     let mut param_str = String::new();
                     // For extension methods, add the extended type as the first parameter.
@@ -1475,16 +1766,25 @@ impl Visitor for CppCodeGenerator {
                         param_str.push_str(", ");
                     }
                     for (i, param) in params.iter().enumerate() {
-                        if let Stmt::Variable { name: param_name, type_, .. } = &**param {
+                        if let Stmt::Variable {
+                            name: param_name,
+                            type_,
+                            ..
+                        } = &**param
+                        {
                             let t = self.translate_type(type_);
-                            write!(&mut param_str, "{} {}", t, Self::ident(&param_name.lexeme)).unwrap();
+                            write!(&mut param_str, "{} {}", t, Self::ident(&param_name.lexeme))
+                                .unwrap();
                             if i < params.len() - 1 {
                                 param_str.push_str(", ");
                             }
                         }
                     }
                     // Generate the function prototype (and body, if desired).
-                    self.writeln(&format!("{} {}_extension_{}({})", ret_type, target_name, name.lexeme, param_str));
+                    self.writeln(&format!(
+                        "{} {}_extension_{}({})",
+                        ret_type, target_name, name.lexeme, param_str
+                    ));
                     // Optionally, generate a stub body:
                     self.writeln("{");
                     self.indent_level += 1;
@@ -1502,8 +1802,6 @@ impl Visitor for CppCodeGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
     use crate::typecheck::TypeChecker;
     use crate::utils::symtable::SymbolTable;
     use std::io::Write;
@@ -1512,8 +1810,10 @@ mod tests {
     /// Loads, type checks and generates a fixture together with its imports.
     fn generate_fixture(relative_path: &str) -> String {
         let filename = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), relative_path);
-        let program = crate::modules::load(std::path::Path::new(&filename))
-            .unwrap_or_else(|errors| panic!("`{}` should load: {} error(s)", relative_path, errors.len()));
+        let program =
+            crate::modules::load(std::path::Path::new(&filename)).unwrap_or_else(|errors| {
+                panic!("`{}` should load: {} error(s)", relative_path, errors.len())
+            });
 
         let root = program.root().name.clone();
         let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
@@ -1548,10 +1848,16 @@ mod tests {
             generic_call_sites.extend(checker.generic_call_sites.clone());
 
             for (module_name, functions) in checker.instantiations.clone() {
-                instantiations.entry(module_name).or_default().extend(functions);
+                instantiations
+                    .entry(module_name)
+                    .or_default()
+                    .extend(functions);
             }
             for (module_name, functions) in checker.function_generics.clone() {
-                function_generics.entry(module_name).or_default().extend(functions);
+                function_generics
+                    .entry(module_name)
+                    .or_default()
+                    .extend(functions);
             }
         }
 
@@ -1627,7 +1933,10 @@ mod tests {
             .write_all(b",.\nA\n")
             .expect("stdin write should succeed");
         let output = child.wait_with_output().expect("run should finish");
-        assert!(output.status.success(), "generated bf binary should exit cleanly");
+        assert!(
+            output.status.success(),
+            "generated bf binary should exit cleanly"
+        );
 
         // `bf.crdm` writes cells with `io.print`, so the echoed byte is not followed by
         // a newline of its own.
@@ -1724,7 +2033,11 @@ impl<'a> MutationDetector<'a> {
         match stmt {
             Stmt::Expression { expression } => self.walk_expr(expression),
             Stmt::Block { statements } => statements.iter().for_each(|s| self.walk_stmt(s)),
-            Stmt::If { condition, then_branch, else_branch } => {
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.walk_expr(condition);
                 self.walk_stmt(then_branch);
                 if let Some(else_branch) = else_branch {
@@ -1735,7 +2048,12 @@ impl<'a> MutationDetector<'a> {
                 self.walk_expr(condition);
                 self.walk_stmt(body);
             }
-            Stmt::For { initialiser, condition, increment, body } => {
+            Stmt::For {
+                initialiser,
+                condition,
+                increment,
+                body,
+            } => {
                 if let Some(initialiser) = initialiser {
                     self.walk_stmt(initialiser);
                 }
@@ -1747,8 +2065,13 @@ impl<'a> MutationDetector<'a> {
                 }
                 self.walk_stmt(body);
             }
-            Stmt::Return { value: Some(value), .. } => self.walk_expr(value),
-            Stmt::Variable { initialiser: Some(initialiser), .. } => self.walk_expr(initialiser),
+            Stmt::Return {
+                value: Some(value), ..
+            } => self.walk_expr(value),
+            Stmt::Variable {
+                initialiser: Some(initialiser),
+                ..
+            } => self.walk_expr(initialiser),
             _ => {}
         }
     }
@@ -1762,7 +2085,12 @@ impl<'a> MutationDetector<'a> {
                 }
                 self.walk_expr(value);
             }
-            Expr::IndexAssignment { object, index, value, .. } => {
+            Expr::IndexAssignment {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 if Self::targets_this(object) {
                     self.mutates = true;
                 }
@@ -1770,7 +2098,9 @@ impl<'a> MutationDetector<'a> {
                 self.walk_expr(index);
                 self.walk_expr(value);
             }
-            Expr::Call { callee, arguments, .. } => {
+            Expr::Call {
+                callee, arguments, ..
+            } => {
                 // Calling a non-const method on `this` mutates it transitively.
                 if let Expr::MemberAccess { object, name } = &**callee {
                     if Self::targets_this(object) && !self.const_methods.contains(&name.lexeme) {

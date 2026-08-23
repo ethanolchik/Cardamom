@@ -2,14 +2,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::errors::{Error, Help, Note};
 use crate::token::{Token, TokenKind};
 use crate::ty::{Type, TypeKind};
-use crate::utils::symtable::{SymbolTable, Symbol, Visibility};
-use crate::errors::{Error, Note, Help};
+use crate::utils::symtable::{Symbol, SymbolTable, Visibility};
 
 /// A map from expressions to their inferred types.
 type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
-
 
 /// Main TypeChecker structure.
 /// - Contains a mutable reference to the `SymbolTable`.
@@ -64,7 +63,6 @@ pub struct TypeChecker<'a> {
     /// True when checking an imported module rather than the program itself, which
     /// relaxes the requirement to have a `main`.
     is_library: bool,
-
 }
 
 /// A generic call appearing inside a generic function.
@@ -84,6 +82,7 @@ pub struct GenericCallSite {
 #[derive(Clone, Debug, Default)]
 pub struct ModuleExports {
     pub functions: HashMap<String, ExportedFunction>,
+    pub classes: HashMap<String, ExportedClass>,
 }
 
 /// The signature an importing module sees.
@@ -95,9 +94,25 @@ pub struct ExportedFunction {
     pub generics: Vec<String>,
 }
 
+/// The members of a class that are visible to importing modules.
+#[derive(Clone, Debug)]
+pub struct ExportedClass {
+    /// Names of the class's type parameters, in declaration order.
+    pub generics: Vec<String>,
+    pub fields: HashMap<String, (Type, Visibility, bool)>,
+    pub methods: HashMap<String, (Vec<Type>, Type, Visibility, bool)>,
+    pub constructor_params: Vec<Type>,
+}
+
 impl ModuleExports {
     pub fn function_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.functions.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    pub fn class_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.classes.keys().cloned().collect();
         names.sort();
         names
     }
@@ -133,7 +148,6 @@ impl<'a> TypeChecker<'a> {
             function_generics: HashMap::new(),
             module_name: "main".to_string(),
             is_library: false,
-
         }
     }
 
@@ -158,50 +172,231 @@ impl<'a> TypeChecker<'a> {
         self.collect_declarations(module);
         self.define_class_members(module);
         self.register_extensions(module);
+        self.reject_generic_methods(module);
 
         module.accept(self);
 
         self.check_entry_point(module);
     }
 
-    /// Collects the `public` functions of the module just checked, so importers can
-    /// resolve calls against them.
+    /// Collects the `public` functions and classes of the module just checked, so importers can
+    /// resolve references against them.
     pub fn exports(&self, module: &Module) -> ModuleExports {
         let mut exports = ModuleExports::default();
 
         for stmt in &module.statements {
-            let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt else {
-                continue;
+            if let Stmt::Function {
+                name,
+                params,
+                return_type,
+                modifiers,
+                generics,
+                ..
+            } = &**stmt
+            {
+                let function =
+                    self.collect_exported_function(params, return_type, modifiers, generics);
+                if let Some(function) = function {
+                    exports.functions.insert(name.lexeme.clone(), function);
+                }
+            } else if let Stmt::Class {
+                name,
+                generics,
+                fields,
+                methods,
+                modifier,
+            } = &**stmt
+            {
+                let class = self.collect_exported_class(generics, fields, methods, modifier);
+                if let Some(class) = class {
+                    exports.classes.insert(name.lexeme.clone(), class);
+                }
             };
-
-            // Only `public fn` is exported; everything else is module-private.
-            if !modifiers.contains(&Modifier::Public) {
-                continue;
-            }
-
-            let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
-
-            let param_types = params
-                .iter()
-                .filter_map(|p| match &**p {
-                    Stmt::Variable { type_, .. } => {
-                        Some(Self::generalise(type_, &generic_names))
-                    }
-                    _ => None,
-                })
-                .collect();
-
-            exports.functions.insert(
-                name.lexeme.clone(),
-                ExportedFunction {
-                    params: param_types,
-                    return_type: Self::generalise(return_type, &generic_names),
-                    generics: generic_names,
-                },
-            );
         }
 
         exports
+    }
+
+    fn collect_exported_function(
+        &self,
+        params: &[Box<Stmt>],
+        return_type: &Type,
+        modifiers: &[Modifier],
+        generics: &[Token],
+    ) -> Option<ExportedFunction> {
+        if !modifiers.contains(&Modifier::Public) {
+            return None;
+        }
+
+        let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+
+        let param_types = params
+            .iter()
+            .filter_map(|p| {
+                if let Stmt::Variable { type_, .. } = &**p {
+                    let generalised = Self::generalise(type_, &generic_names);
+                    Some(self.qualify_type(&generalised))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Some(ExportedFunction {
+            params: param_types,
+            return_type: self.qualify_type(&Self::generalise(return_type, &generic_names)),
+            generics: generic_names,
+        })
+    }
+
+    fn collect_exported_class(
+        &self,
+        generics: &[Token],
+        fields: &[Box<Stmt>],
+        methods: &[Box<Stmt>],
+        modifier: &[Modifier],
+    ) -> Option<ExportedClass> {
+        if !modifier.contains(&Modifier::Public) {
+            return None;
+        }
+
+        let generic_names: Vec<String> = generics.iter().map(|g| g.lexeme.clone()).collect();
+
+        let mut field_exports = HashMap::new();
+        let mut constructor_params = Vec::new();
+        for f in fields {
+            if let Stmt::Variable {
+                name: field_name,
+                type_,
+                modifiers,
+                ..
+            } = &**f
+            {
+                if modifiers.contains(&Modifier::Public) {
+                    let qualified = self.qualify_type(&Self::generalise(type_, &generic_names));
+                    field_exports.insert(
+                        field_name.lexeme.clone(),
+                        (
+                            qualified,
+                            self.visibility_of(modifiers),
+                            is_static_member(modifiers),
+                        ),
+                    );
+                }
+                if is_constructor_field(modifiers) {
+                    constructor_params
+                        .push(self.qualify_type(&Self::generalise(type_, &generic_names)));
+                }
+            }
+        }
+
+        let mut method_exports = HashMap::new();
+        // TODO: a method's own type parameters are not exported; `ExportedClass` has
+        // nowhere to record them. `reject_generic_methods` rejects such methods for now.
+        for m in methods {
+            if let Stmt::Function {
+                name: method_name,
+                params,
+                return_type,
+                modifiers,
+                ..
+            } = &**m
+            {
+                if modifiers.contains(&Modifier::Public) {
+                    let param_types = params
+                        .iter()
+                        .filter_map(|p| {
+                            if let Stmt::Variable { type_, .. } = &**p {
+                                Some(self.qualify_type(&Self::generalise(type_, &generic_names)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    method_exports.insert(
+                        method_name.lexeme.clone(),
+                        (
+                            param_types,
+                            self.qualify_type(&Self::generalise(return_type, &generic_names)),
+                            self.visibility_of(modifiers),
+                            is_static_member(modifiers),
+                        ),
+                    );
+                }
+            }
+        }
+
+        Some(ExportedClass {
+            generics: generic_names,
+            fields: field_exports,
+            methods: method_exports,
+            constructor_params,
+        })
+    }
+
+    /// Rejects methods that declare their own type parameters.
+    ///
+    /// A method may use the type parameters of the class it belongs to, but not add its
+    /// own: nothing records a method's own type parameters, member access drops them,
+    /// and code generation has no per-method specialisation. Without this check such a
+    /// method type checks and then emits an undeclared type name into the generated
+    /// C++, so it is rejected at the declaration where the cause is obvious.
+    ///
+    /// TODO: support generic methods; see `reject_generic_methods` for what is missing.
+    fn reject_generic_methods(&mut self, module: &Module) {
+        for stmt in &module.statements {
+            let Stmt::Class {
+                name: class_name,
+                methods,
+                ..
+            } = &**stmt
+            else {
+                continue;
+            };
+
+            for method in methods {
+                let Stmt::Function { name, generics, .. } = &**method else {
+                    continue;
+                };
+
+                if generics.is_empty() {
+                    continue;
+                }
+
+                let parameters = generics
+                    .iter()
+                    .map(|g| g.lexeme.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                self.error_with_notes(
+                    name.clone(),
+                    &format!(
+                        "Method `{}` cannot declare its own type parameters",
+                        name.lexeme
+                    ),
+                    vec![Note::new(
+                        format!(
+                            "`{}<{}>` is declared on a method; only a class or a top-level function may take type parameters",
+                            name.lexeme, parameters
+                        ),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![Help::new(
+                        format!(
+                            "Move `{}` to a top-level generic function, or add it to `class {}<..>`",
+                            parameters, class_name.lexeme
+                        ),
+                        name.line,
+                        name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                );
+            }
+        }
     }
 
     /// `main` is the program entry point, so it has a fixed shape: it takes no
@@ -214,7 +409,15 @@ impl<'a> TypeChecker<'a> {
         }
 
         for stmt in &module.statements {
-            let Stmt::Function { name, params, return_type, modifiers, generics, .. } = &**stmt else {
+            let Stmt::Function {
+                name,
+                params,
+                return_type,
+                modifiers,
+                generics,
+                ..
+            } = &**stmt
+            else {
                 continue;
             };
 
@@ -316,7 +519,8 @@ impl<'a> TypeChecker<'a> {
                         self.filename.clone(),
                     )],
                     vec![Help::new(
-                        "Use `import <module> as <name>;` to bind it to a different name".to_string(),
+                        "Use `import <module> as <name>;` to bind it to a different name"
+                            .to_string(),
                         alias.line,
                         alias.span.clone(),
                         self.filename.clone(),
@@ -327,10 +531,7 @@ impl<'a> TypeChecker<'a> {
 
             imported.insert(alias.lexeme.clone(), alias.clone());
 
-            let module_type = Type::new(
-                alias.clone(),
-                TypeKind::Module(name.lexeme.clone()),
-            );
+            let module_type = Type::new(alias.clone(), TypeKind::Module(name.lexeme.clone()));
 
             self.symtable.declare_module(
                 &alias.lexeme,
@@ -365,14 +566,17 @@ impl<'a> TypeChecker<'a> {
                     let mut param_types = Vec::new();
                     for p in params {
                         if let Stmt::Variable { type_, .. } = &**p {
-                            param_types.push(Self::generalise(type_, &generic_names));
+                            let generalised = Self::generalise(type_, &generic_names);
+                            param_types.push(self.qualify_type(&generalised));
                         }
                     }
 
+                    let return_type =
+                        self.qualify_type(&Self::generalise(return_type, &generic_names));
                     let sym = Symbol::new_generic_function(
                         name.clone(),
                         param_types,
-                        Self::generalise(return_type, &generic_names),
+                        return_type,
                         false,
                         generic_names,
                     );
@@ -386,7 +590,14 @@ impl<'a> TypeChecker<'a> {
     // Class fields & methods
     fn define_class_members(&mut self, module: &Module) {
         for stmt in &module.statements {
-            if let Stmt::Class { name, generics, fields, methods, .. } = &**stmt {
+            if let Stmt::Class {
+                name,
+                generics,
+                fields,
+                methods,
+                ..
+            } = &**stmt
+            {
                 let class_name = name.lexeme.clone();
                 let class_generics: Vec<String> =
                     generics.iter().map(|g| g.lexeme.clone()).collect();
@@ -395,10 +606,18 @@ impl<'a> TypeChecker<'a> {
                 // any combination (e.g. `private static`) is representable.
                 let mut field_declarations = Vec::new();
                 for f in fields {
-                    if let Stmt::Variable { name: field_name, type_, modifiers, .. } = &**f {
+                    if let Stmt::Variable {
+                        name: field_name,
+                        type_,
+                        modifiers,
+                        ..
+                    } = &**f
+                    {
+                        let qualified =
+                            self.qualify_type(&Self::generalise(type_, &class_generics));
                         field_declarations.push((
                             field_name.clone(),
-                            Self::generalise(type_, &class_generics),
+                            qualified,
                             self.visibility_of(modifiers),
                             is_static_member(modifiers),
                         ));
@@ -407,17 +626,28 @@ impl<'a> TypeChecker<'a> {
 
                 let mut method_declarations = Vec::new();
                 for m in methods {
-                    if let Stmt::Function { name: method_name, params, return_type, modifiers, .. } = &**m {
+                    if let Stmt::Function {
+                        name: method_name,
+                        params,
+                        return_type,
+                        modifiers,
+                        ..
+                    } = &**m
+                    {
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(Self::generalise(type_, &class_generics));
+                                param_types.push(
+                                    self.qualify_type(&Self::generalise(type_, &class_generics)),
+                                );
                             }
                         }
+                        let qualified_return =
+                            self.qualify_type(&Self::generalise(return_type, &class_generics));
                         method_declarations.push((
                             method_name.clone(),
                             param_types,
-                            Self::generalise(return_type, &class_generics),
+                            qualified_return,
                             self.visibility_of(modifiers),
                             is_static_member(modifiers),
                         ));
@@ -429,10 +659,10 @@ impl<'a> TypeChecker<'a> {
                 let constructor_param_types: Vec<Type> = fields
                     .iter()
                     .filter_map(|f| match &**f {
-                        Stmt::Variable { type_, modifiers, .. }
-                            if is_constructor_field(modifiers) =>
-                        {
-                            Some(Self::generalise(type_, &class_generics))
+                        Stmt::Variable {
+                            type_, modifiers, ..
+                        } if is_constructor_field(modifiers) => {
+                            Some(self.qualify_type(&Self::generalise(type_, &class_generics)))
                         }
                         _ => None,
                     })
@@ -446,12 +676,13 @@ impl<'a> TypeChecker<'a> {
                         fully_defined,
                         constructor_params,
                         ..
-                    } = class_sym {
+                    } = class_sym
+                    {
                         *constructor_params = constructor_param_types;
                         for (field_name, field_type, visibility, is_static) in field_declarations {
                             fields.insert(
                                 field_name.lexeme.clone(),
-                                (field_type.clone(), visibility.clone(), is_static)
+                                (field_type.clone(), visibility.clone(), is_static),
                             );
 
                             symbol_declarations.push((
@@ -460,12 +691,14 @@ impl<'a> TypeChecker<'a> {
                                     field_name,
                                     field_type,
                                     Some(visibility),
-                                    is_static
-                                )
+                                    is_static,
+                                ),
                             ));
                         }
 
-                        for (method_name, param_types, return_type, visibility, is_static) in method_declarations {
+                        for (method_name, param_types, return_type, visibility, is_static) in
+                            method_declarations
+                        {
                             methods.insert(
                                 method_name.lexeme.clone(),
                                 Symbol::new_function_with_visibility(
@@ -474,8 +707,8 @@ impl<'a> TypeChecker<'a> {
                                     return_type,
                                     true,
                                     Some(visibility),
-                                    is_static
-                                )
+                                    is_static,
+                                ),
                             );
                         }
 
@@ -576,8 +809,27 @@ impl<'a> TypeChecker<'a> {
             return None;
         };
 
-        let function = self.module_exports.get(module)?.functions.get(&name.lexeme)?;
+        let function = self
+            .module_exports
+            .get(module)?
+            .functions
+            .get(&name.lexeme)?;
         Some((module.clone(), name.lexeme.clone(), function.clone()))
+    }
+
+    /// If `callee` names a class exported by an imported module, returns its module
+    /// and exported declaration.
+    fn module_class(&self, callee: &Expr) -> Option<(String, String, ExportedClass)> {
+        let Expr::MemberAccess { object, name } = callee else {
+            return None;
+        };
+        let object_ty = self.get_expr_type(object)?;
+        let TypeKind::Module(module) = &object_ty.kind else {
+            return None;
+        };
+
+        let class = self.module_exports.get(module)?.classes.get(&name.lexeme)?;
+        Some((module.clone(), name.lexeme.clone(), class.clone()))
     }
 
     /// Resolves a call to a generic function, reporting any problem with its type
@@ -607,7 +859,12 @@ impl<'a> TypeChecker<'a> {
                         explicit.len()
                     ),
                     vec![Note::new(
-                        format!("`{}` is declared as `{}<{}>`", name, name, generics.join(", ")),
+                        format!(
+                            "`{}` is declared as `{}<{}>`",
+                            name,
+                            name,
+                            generics.join(", ")
+                        ),
                         token.line,
                         token.span.clone(),
                         self.filename.clone(),
@@ -645,7 +902,10 @@ impl<'a> TypeChecker<'a> {
                     )],
                 );
 
-                subs.insert(parameter.clone(), TypeKind::User("error".to_string()));
+                subs.insert(
+                    parameter.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                );
             }
         }
 
@@ -658,23 +918,122 @@ impl<'a> TypeChecker<'a> {
     fn generalise_explicit(&self, types: &[Type]) -> Vec<Type> {
         types
             .iter()
-            .map(|ty| Self::generalise(ty, &self.current_function_generics))
+            .map(|ty| {
+                let generalised = Self::generalise(ty, &self.current_function_generics);
+                self.qualify_type(&generalised)
+            })
             .collect()
+    }
+
+    /// Resolves an import alias to the imported module's canonical name.
+    fn resolve_module_name(&self, qualifier: &str) -> String {
+        match self.symtable.lookup_module(qualifier) {
+            Some(Symbol::Variable(_, _, ty, ..)) => match &ty.kind {
+                TypeKind::Module(module) => module.clone(),
+                _ => qualifier.to_string(),
+            },
+            _ => qualifier.to_string(),
+        }
+    }
+
+    /// Resolves module ownership for user-written types.
+    ///
+    /// Parsed unqualified names intentionally have an empty owner until type checking,
+    /// where they become local to the current module. Explicit qualifiers are also
+    /// canonicalised so `import foo as f; f.Box` is owned by `foo`, not by the alias.
+    fn qualify_type(&self, ty: &Type) -> Type {
+        let kind = match &ty.kind {
+            TypeKind::User(module, name) => {
+                if name == "error" || name == "bool" {
+                    TypeKind::User(module.clone(), name.clone())
+                } else if module.is_empty() {
+                    let written = if ty.name.lexeme.contains('.') {
+                        ty.name.lexeme.as_str()
+                    } else {
+                        name.as_str()
+                    };
+
+                    if let Some((owner, base)) = written.rsplit_once('.') {
+                        TypeKind::User(self.resolve_module_name(owner), base.to_string())
+                    } else {
+                        TypeKind::User(self.module_name.clone(), name.clone())
+                    }
+                } else {
+                    TypeKind::User(self.resolve_module_name(module), name.clone())
+                }
+            }
+            TypeKind::GenericInstance(module, name, args) => {
+                let args = args.iter().map(|arg| self.qualify_type(arg)).collect();
+                if module.is_empty() {
+                    let written = if ty.name.lexeme.contains('.') {
+                        ty.name.lexeme.as_str()
+                    } else {
+                        name.as_str()
+                    };
+
+                    if let Some((owner, base)) = written.rsplit_once('.') {
+                        TypeKind::GenericInstance(
+                            self.resolve_module_name(owner),
+                            base.to_string(),
+                            args,
+                        )
+                    } else {
+                        TypeKind::GenericInstance(self.module_name.clone(), name.clone(), args)
+                    }
+                } else {
+                    TypeKind::GenericInstance(
+                        self.resolve_module_name(module),
+                        name.clone(),
+                        args,
+                    )
+                }
+            }
+            TypeKind::Array(inner, depth) => {
+                TypeKind::Array(Box::new(self.qualify_type(inner)), *depth)
+            }
+            TypeKind::Reference(inner) => TypeKind::Reference(Box::new(self.qualify_type(inner))),
+            TypeKind::MutRef(inner) => TypeKind::MutRef(Box::new(self.qualify_type(inner))),
+            TypeKind::Function(params, ret) => TypeKind::Function(
+                params
+                    .iter()
+                    .map(|param| self.qualify_type(param))
+                    .collect(),
+                Box::new(self.qualify_type(ret)),
+            ),
+            TypeKind::Tuple(elements) => {
+                TypeKind::Tuple(elements.iter().map(|e| self.qualify_type(e)).collect())
+            }
+            other => other.clone(),
+        };
+
+        Type { kind, ..ty.clone() }
     }
 
     /// Binds a class's type parameters to the arguments of one of its instantiations.
     fn class_substitution(
         &self,
+        module: &str,
         class_name: &str,
         arguments: &[Type],
     ) -> HashMap<String, TypeKind> {
-        let Some(Symbol::Class { generics, .. }) = self.symtable.lookup_class(class_name) else {
-            return HashMap::new();
+        let generics = if module.is_empty() || module == self.module_name {
+            match self.symtable.lookup_class(class_name) {
+                Some(Symbol::Class { generics, .. }) => generics.clone(),
+                _ => return HashMap::new(),
+            }
+        } else {
+            match self
+                .module_exports
+                .get(module)
+                .and_then(|exports| exports.classes.get(class_name))
+            {
+                Some(class) => class.generics.clone(),
+                None => return HashMap::new(),
+            }
         };
 
         generics
-            .iter()
-            .cloned()
+            .into_iter()
             .zip(arguments.iter().map(|argument| argument.kind.clone()))
             .collect()
     }
@@ -695,6 +1054,7 @@ impl<'a> TypeChecker<'a> {
     /// Records that a generic class is used at a particular instantiation.
     fn record_class_instantiation(
         &mut self,
+        module_name: &str,
         name: &str,
         generics: &[String],
         subs: &HashMap<String, TypeKind>,
@@ -708,18 +1068,21 @@ impl<'a> TypeChecker<'a> {
             .map(|parameter| {
                 subs.get(parameter)
                     .cloned()
-                    .unwrap_or(TypeKind::User("error".to_string()))
+                    .unwrap_or(TypeKind::User("".to_string(), "error".to_string()))
             })
             .collect();
 
         // A use inside a generic function is not concrete yet; the fixpoint resolves it
         // once the enclosing function's own instantiations are known.
-        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+        if arguments
+            .iter()
+            .any(|argument| self.is_unresolved(argument))
+        {
             if let Some(caller) = self.current_function.clone() {
                 let site = GenericCallSite {
                     caller_module: self.module_name.clone(),
                     caller: Self::function_key(&caller),
-                    callee_module: self.module_name.clone(),
+                    callee_module: module_name.to_string(),
                     callee: Self::class_key(name),
                     arguments,
                 };
@@ -733,7 +1096,7 @@ impl<'a> TypeChecker<'a> {
 
         let instantiations = self
             .instantiations
-            .entry(self.module_name.clone())
+            .entry(module_name.to_string())
             .or_default()
             .entry(Self::class_key(name))
             .or_default();
@@ -757,12 +1120,18 @@ impl<'a> TypeChecker<'a> {
             return;
         }
 
+        let module = if module.is_empty() {
+            self.module_name.clone()
+        } else {
+            module.to_string()
+        };
+
         let arguments: Vec<TypeKind> = generics
             .iter()
             .map(|parameter| {
                 subs.get(parameter)
                     .cloned()
-                    .unwrap_or(TypeKind::User("error".to_string()))
+                    .unwrap_or(TypeKind::User("".to_string(), "error".to_string()))
             })
             .collect();
 
@@ -775,12 +1144,15 @@ impl<'a> TypeChecker<'a> {
         // A call inside a generic function is not a concrete instantiation yet. Record
         // it so `expand_instantiations` can resolve it once the caller's own
         // instantiations are known.
-        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+        if arguments
+            .iter()
+            .any(|argument| self.is_unresolved(argument))
+        {
             if let Some(caller) = self.current_function.clone() {
                 let site = GenericCallSite {
                     caller_module: self.module_name.clone(),
                     caller,
-                    callee_module: module.to_string(),
+                    callee_module: module.clone(),
                     callee: name.to_string(),
                     arguments,
                 };
@@ -794,7 +1166,7 @@ impl<'a> TypeChecker<'a> {
 
         let instantiations = self
             .instantiations
-            .entry(module.to_string())
+            .entry(module)
             .or_default()
             .entry(name.to_string())
             .or_default();
@@ -804,26 +1176,22 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-
     /// Whether a type argument is still generic or came from an earlier error.
     fn is_unresolved(&self, kind: &TypeKind) -> bool {
         match kind {
             TypeKind::GenericParam(_) => true,
             // A user type named after an enclosing type parameter is that parameter,
             // not a concrete type: the call is inside a generic function.
-            TypeKind::User(name) => {
+            TypeKind::User(_, name) => {
                 name == "error" || self.current_function_generics.contains(name)
             }
             TypeKind::Array(inner, _) => self.is_unresolved(&inner.kind),
-            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => {
-                self.is_unresolved(&inner.kind)
-            }
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => self.is_unresolved(&inner.kind),
             TypeKind::Function(params, ret) => {
-                params.iter().any(|p| self.is_unresolved(&p.kind))
-                    || self.is_unresolved(&ret.kind)
+                params.iter().any(|p| self.is_unresolved(&p.kind)) || self.is_unresolved(&ret.kind)
             }
             TypeKind::Tuple(elements) => elements.iter().any(|e| self.is_unresolved(&e.kind)),
-            TypeKind::GenericInstance(_, args) => {
+            TypeKind::GenericInstance(_, _, args) => {
                 args.iter().any(|a| self.is_unresolved(&a.kind))
             }
             _ => false,
@@ -838,7 +1206,7 @@ impl<'a> TypeChecker<'a> {
     /// `GenericParam`, so this conversion is what makes a signature actually generic.
     fn generalise(ty: &Type, generics: &[String]) -> Type {
         let kind = match &ty.kind {
-            TypeKind::User(name) if generics.contains(name) => {
+            TypeKind::User(_, name) if generics.contains(name) => {
                 TypeKind::GenericParam(name.clone())
             }
             TypeKind::Array(inner, depth) => {
@@ -851,14 +1219,21 @@ impl<'a> TypeChecker<'a> {
                 TypeKind::MutRef(Box::new(Self::generalise(inner, generics)))
             }
             TypeKind::Function(params, ret) => TypeKind::Function(
-                params.iter().map(|p| Self::generalise(p, generics)).collect(),
+                params
+                    .iter()
+                    .map(|p| Self::generalise(p, generics))
+                    .collect(),
                 Box::new(Self::generalise(ret, generics)),
             ),
             TypeKind::Tuple(elements) => TypeKind::Tuple(
-                elements.iter().map(|e| Self::generalise(e, generics)).collect(),
+                elements
+                    .iter()
+                    .map(|e| Self::generalise(e, generics))
+                    .collect(),
             ),
             // `Box<T>` mentions the type parameter in its arguments.
-            TypeKind::GenericInstance(name, args) => TypeKind::GenericInstance(
+            TypeKind::GenericInstance(module, name, args) => TypeKind::GenericInstance(
+                module.clone(),
                 name.clone(),
                 args.iter().map(|a| Self::generalise(a, generics)).collect(),
             ),
@@ -873,11 +1248,7 @@ impl<'a> TypeChecker<'a> {
     ///
     /// The first binding for a parameter wins; a later conflicting one is reported by
     /// the ordinary argument check once the substitution has been applied.
-    fn infer_substitution(
-        param: &Type,
-        argument: &Type,
-        subs: &mut HashMap<String, TypeKind>,
-    ) {
+    fn infer_substitution(param: &Type, argument: &Type, subs: &mut HashMap<String, TypeKind>) {
         match (&param.kind, &argument.kind) {
             (TypeKind::GenericParam(name), _) => {
                 // Borrows are transparent for inference: passing an `int` to a `&T`
@@ -885,14 +1256,10 @@ impl<'a> TypeChecker<'a> {
                 let resolved = Self::without_borrows(argument);
                 subs.entry(name.clone()).or_insert(resolved.kind);
             }
-            (TypeKind::Array(p, _), TypeKind::Array(a, _)) => {
-                Self::infer_substitution(p, a, subs)
-            }
+            (TypeKind::Array(p, _), TypeKind::Array(a, _)) => Self::infer_substitution(p, a, subs),
             (TypeKind::Reference(p), TypeKind::Reference(a))
             | (TypeKind::MutRef(p), TypeKind::MutRef(a))
-            | (TypeKind::Reference(p), TypeKind::MutRef(a)) => {
-                Self::infer_substitution(p, a, subs)
-            }
+            | (TypeKind::Reference(p), TypeKind::MutRef(a)) => Self::infer_substitution(p, a, subs),
             // A borrowed parameter matched against a plain value: look through it.
             (TypeKind::Reference(p), _) | (TypeKind::MutRef(p), _) => {
                 Self::infer_substitution(p, argument, subs)
@@ -910,9 +1277,9 @@ impl<'a> TypeChecker<'a> {
             }
             // `Box<T>` matched against `Box<int>` infers `T = int`.
             (
-                TypeKind::GenericInstance(p_name, p_args),
-                TypeKind::GenericInstance(a_name, a_args),
-            ) if p_name == a_name => {
+                TypeKind::GenericInstance(p_module, p_name, p_args),
+                TypeKind::GenericInstance(a_module, a_name, a_args),
+            ) if p_module == a_module && p_name == a_name => {
                 for (p, a) in p_args.iter().zip(a_args.iter()) {
                     Self::infer_substitution(p, a, subs);
                 }
@@ -992,7 +1359,10 @@ impl<'a> TypeChecker<'a> {
         if matches!(target_ty.kind, TypeKind::Reference(_)) {
             self.error_with_notes(
                 token.clone(),
-                &format!("Cannot assign through immutable borrow `{}`", target_ty.kind),
+                &format!(
+                    "Cannot assign through immutable borrow `{}`",
+                    target_ty.kind
+                ),
                 vec![Note::new(
                     format!("{} is borrowed immutably with `&`", description),
                     token.line,
@@ -1001,7 +1371,7 @@ impl<'a> TypeChecker<'a> {
                 )],
                 vec![Help::new(
                     format!(
-                        "Use a mutable borrow instead: `#{}`",
+                        "Use a mutable borrow instead: `&mut {}`",
                         target_ty.kind.to_string().trim_start_matches('&')
                     ),
                     token.line,
@@ -1020,7 +1390,7 @@ impl<'a> TypeChecker<'a> {
             TypeKind::Function(params, _) => Some(params.clone()),
             // A bare function name in callee position is typed as `User(name)` and
             // resolved against the function table.
-            TypeKind::User(name) => match self.symtable.lookup_function(name) {
+            TypeKind::User(_, name) => match self.symtable.lookup_function(name) {
                 Some(Symbol::Function { params, .. }) => Some(params.clone()),
                 _ => None,
             },
@@ -1069,7 +1439,9 @@ impl<'a> TypeChecker<'a> {
             Visibility::Private => Some(class_name) == self.current_class.as_deref(),
             Visibility::Protected => {
                 // TODO: Add inheritance check once subclassing is implemented.
-                self.current_class.as_deref().map_or(false, |current| current == class_name)
+                self.current_class
+                    .as_deref()
+                    .map_or(false, |current| current == class_name)
             }
         }
     }
@@ -1082,7 +1454,6 @@ impl<'a> TypeChecker<'a> {
             _ => Visibility::Private,
         }
     }
-
 
     /// Creates an `Error` object based on a `Token` (for line/col info) and appends it to `self.errors`.
     fn error_token(&self, token: &Token, message: &str) {
@@ -1132,21 +1503,41 @@ impl<'a> TypeChecker<'a> {
             TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
             // A module is a namespace, not something a variable can be declared as.
             TypeKind::Module(_) => false,
-            TypeKind::User(name) => {
+            TypeKind::User(module, name) => {
                 // Keep cascaded diagnostics readable once an earlier expression has failed.
-                let is_generic_param = matches!(
-                    self.symtable.lookup_symbol(name),
-                    Some(Symbol::Variable(_, _, ty, ..))
-                        if matches!(ty.kind, TypeKind::GenericParam(_))
-                );
+                if name == "error" || name == "bool" {
+                    return true;
+                }
 
-                (name == "error" || self.symtable.lookup_type(name).is_some() || is_generic_param)
+                let local = module.is_empty() || module == &self.module_name;
+                let is_generic_param = local
+                    && matches!(
+                        self.symtable.lookup_symbol(name),
+                        Some(Symbol::Variable(_, _, ty, ..))
+                            if matches!(ty.kind, TypeKind::GenericParam(_))
+                    );
+                let class_exists = if local {
+                    self.symtable.lookup_type(name).is_some()
+                } else {
+                    self.module_exports
+                        .get(module)
+                        .is_some_and(|exports| exports.classes.contains_key(name))
+                };
+
+                (class_exists || is_generic_param)
                     && ty.generics.iter().all(|arg| self.type_exists(arg))
             }
             TypeKind::GenericParam(name) => self.symtable.lookup_symbol(name).is_some(),
-            TypeKind::GenericInstance(name, args) => {
-                self.symtable.lookup_type(name).is_some()
-                    && args.iter().all(|arg| self.type_exists(arg))
+            TypeKind::GenericInstance(module, name, args) => {
+                let local = module.is_empty() || module == &self.module_name;
+                let class_exists = if local {
+                    self.symtable.lookup_type(name).is_some()
+                } else {
+                    self.module_exports
+                        .get(module)
+                        .is_some_and(|exports| exports.classes.contains_key(name))
+                };
+                class_exists && args.iter().all(|arg| self.type_exists(arg))
             }
             TypeKind::Reference(inner) | TypeKind::MutRef(inner) => {
                 // Check if the inner type exists
@@ -1170,7 +1561,10 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn error_type(&self, token: &Token) -> Type {
-        Type::new(token.clone(), TypeKind::User("error".to_string()))
+        Type::new(
+            token.clone(),
+            TypeKind::User("".to_string(), "error".to_string()),
+        )
     }
 
     fn int_type(&self, token: &Token) -> Type {
@@ -1193,7 +1587,9 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn statements_guarantee_return(&self, statements: &[Box<Stmt>]) -> bool {
-        statements.iter().any(|stmt| self.statement_guarantees_return(stmt))
+        statements
+            .iter()
+            .any(|stmt| self.statement_guarantees_return(stmt))
     }
 
     fn statement_guarantees_return(&self, stmt: &Stmt) -> bool {
@@ -1223,21 +1619,27 @@ impl<'a> TypeChecker<'a> {
             if let Stmt::Extension { target, methods } = &**stmt {
                 let target_name = target.name.lexeme.clone();
                 for method in methods {
-                    if let Stmt::Function { name, params, return_type, .. } = &**method {
+                    if let Stmt::Function {
+                        name,
+                        params,
+                        return_type,
+                        ..
+                    } = &**method
+                    {
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
-                                param_types.push(type_.clone());
+                                param_types.push(self.qualify_type(type_));
                             }
                         }
                         // Create a symbol for the extension method.
                         let sym = Symbol::new_function_with_visibility(
                             name.clone(),
                             param_types,
-                            return_type.clone(),
+                            self.qualify_type(return_type),
                             true, // mark as method (or extension)
                             Some(Visibility::Public),
-                            false
+                            false,
                         );
                         // Register the method for the target type.
                         self.symtable.register_extension_method(&target_name, sym);
@@ -1258,7 +1660,7 @@ fn get_token(expr: &Expr) -> Token {
         | Expr::IndexAssignment { op, .. }
         | Expr::MemberAssignment { name: op, .. }
         | Expr::MemberAccess { name: op, .. }
-        | Expr::Call { paren: op, ..} => op.clone(),
+        | Expr::Call { paren: op, .. } => op.clone(),
         Expr::Grouping { expression } => get_token(expression),
         Expr::Array { token, .. } => token.clone(),
         Expr::Tuple { elements } => elements
@@ -1279,7 +1681,7 @@ fn get_token_s(stmt: &Stmt) -> Token {
             }
         }
         Stmt::Expression { expression: expr } => get_token(expr),
-        _ => Token::dummy("unknown")
+        _ => Token::dummy("unknown"),
     }
 }
 
@@ -1290,31 +1692,22 @@ impl<'a> Visitor for TypeChecker<'a> {
             right.accept(self);
 
             let left_ty = self.get_expr_type(left).cloned().unwrap_or_else(|| {
-                self.error_token(
-                    &op,
-                    "Left operand has unknown type in binary operation",
-                );
+                self.error_token(&op, "Left operand has unknown type in binary operation");
 
                 let token = get_token(left);
 
                 Type::new(
                     token.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
             let right_ty = self.get_expr_type(right).cloned().unwrap_or_else(|| {
-                self.error_token(
-                    &op,
-                    "Right operand has unknown type in binary operation",
-                );
+                self.error_token(&op, "Right operand has unknown type in binary operation");
 
                 let token = get_token(right);
 
-                Type::new(
-                    token,
-                    TypeKind::User("error".to_string()),
-                )
+                Type::new(token, TypeKind::User("".to_string(), "error".to_string()))
             });
 
             // Example: handle arithmetic vs. comparison operators
@@ -1331,11 +1724,13 @@ impl<'a> Visitor for TypeChecker<'a> {
                             left_ty
                         }
                     }
-                    TokenKind::EqEq | TokenKind::Neq | TokenKind::Lt | TokenKind::Gt | TokenKind::Lte | TokenKind::Gte => {
-                        Type::new(
-                            Token::dummy("int"),
-                            TypeKind::Int
-                        ) // booleans are just integers.
+                    TokenKind::EqEq
+                    | TokenKind::Neq
+                    | TokenKind::Lt
+                    | TokenKind::Gt
+                    | TokenKind::Lte
+                    | TokenKind::Gte => {
+                        Type::new(Token::dummy("int"), TypeKind::Int) // booleans are just integers.
                     }
                     _ => {
                         // fallback: just assume same as left
@@ -1353,7 +1748,7 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                 Type::new(
                     op.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             };
 
@@ -1365,13 +1760,10 @@ impl<'a> Visitor for TypeChecker<'a> {
         if let Expr::Unary { op, right } = expr {
             right.accept(self);
             let right_ty = self.get_expr_type(right).cloned().unwrap_or_else(|| {
-                self.error_token(
-                    &op,
-                    "Unknown type for operand in unary expression",
-                );
+                self.error_token(&op, "Unknown type for operand in unary expression");
                 Type::new(
                     op.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
@@ -1387,7 +1779,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         );
                         Type::new(
                             op.clone(),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         )
                     }
                 }
@@ -1402,18 +1794,15 @@ impl<'a> Visitor for TypeChecker<'a> {
         if let Expr::Literal { value } = expr {
             // Infer type from token kind
             let lit_ty = match value.kind {
-                TokenKind::Integer => {
-                    Type::new(value.clone(), TypeKind::Int)
-                }
-                TokenKind::Float => {
-                    Type::new(value.clone(), TypeKind::Float)
-                }
-                TokenKind::String => {
-                    Type::new(value.clone(), TypeKind::String)
-                }
+                TokenKind::Integer => Type::new(value.clone(), TypeKind::Int),
+                TokenKind::Float => Type::new(value.clone(), TypeKind::Float),
+                TokenKind::String => Type::new(value.clone(), TypeKind::String),
                 _ => {
                     // fallback
-                    Type::new(value.clone(), TypeKind::User("bool".to_string()))
+                    Type::new(
+                        value.clone(),
+                        TypeKind::User("".to_string(), "bool".to_string()),
+                    )
                 }
             };
             self.set_expr_type(expr, lit_ty);
@@ -1454,7 +1843,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 expr,
                                 Type::new(
                                     name.clone(),
-                                    TypeKind::User(name.lexeme.clone()),
+                                    TypeKind::User("".to_string(), name.lexeme.clone()),
                                 ),
                             );
                         } else {
@@ -1466,7 +1855,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 expr,
                                 Type::new(
                                     name.clone(),
-                                    TypeKind::User("error".to_string()),
+                                    TypeKind::User("".to_string(), "error".to_string()),
                                 ),
                             );
                         }
@@ -1477,7 +1866,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                             expr,
                             Type::new(
                                 name.clone(),
-                                TypeKind::User(name.lexeme.clone()),
+                                TypeKind::User("".to_string(), name.lexeme.clone()),
                             ),
                         );
                     }
@@ -1490,7 +1879,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         expr,
                         Type::new(
                             name.clone(),
-                            TypeKind::User(name.lexeme.clone()),
+                            TypeKind::User("".to_string(), name.lexeme.clone()),
                         ),
                     );
                 } else if let Some(symbol) = self.symtable.lookup_function(&name.lexeme) {
@@ -1501,31 +1890,30 @@ impl<'a> Visitor for TypeChecker<'a> {
                             expr,
                             Type::new(
                                 name.clone(),
-                                TypeKind::User(name.lexeme.clone()),
+                                TypeKind::User("".to_string(), name.lexeme.clone()),
                             ),
                         );
-                    } else if let Symbol::Function { params, return_type, .. } = symbol {
+                    } else if let Symbol::Function {
+                        params,
+                        return_type,
+                        ..
+                    } = symbol
+                    {
                         // Used as a value, a function has its own function type, so it
                         // can be stored in a variable or passed to another function.
-                        let function_ty = self.function_type(
-                            name,
-                            params.clone(),
-                            return_type.clone(),
-                        );
+                        let function_ty =
+                            self.function_type(name, params.clone(), return_type.clone());
                         self.set_expr_type(expr, function_ty);
                     } else {
                         self.set_expr_type(expr, self.error_type(name));
                     }
                 } else {
-                    self.error_token(
-                        name,
-                        &format!("Unknown variable `{}`", name.lexeme),
-                    );
+                    self.error_token(name, &format!("Unknown variable `{}`", name.lexeme));
                     self.set_expr_type(
                         expr,
                         Type::new(
                             name.clone(),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         ),
                     );
                 }
@@ -1542,21 +1930,18 @@ impl<'a> Visitor for TypeChecker<'a> {
             let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
                 Type::new(
                     name.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
             // Check if the type of the right-hand side exists
             if !self.type_exists(&rhs_ty) {
-                self.error_token(
-                    name,
-                    &format!("Type `{}` does not exist", rhs_ty.kind),
-                );
+                self.error_token(name, &format!("Type `{}` does not exist", rhs_ty.kind));
                 self.set_expr_type(
                     expr,
                     Type::new(
                         name.clone(),
-                        TypeKind::User("error".to_string()),
+                        TypeKind::User("".to_string(), "error".to_string()),
                     ),
                 );
                 return;
@@ -1571,15 +1956,12 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                     // Check if the type of the variable exists
                     if !self.type_exists(var_ty) {
-                        self.error_token(
-                            name,
-                            &format!("Type `{}` does not exist", var_ty.kind),
-                        );
+                        self.error_token(name, &format!("Type `{}` does not exist", var_ty.kind));
                         self.set_expr_type(
                             expr,
                             Type::new(
                                 name.clone(),
-                                TypeKind::User("error".to_string()),
+                                TypeKind::User("".to_string(), "error".to_string()),
                             ),
                         );
                         return;
@@ -1597,45 +1979,41 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 rhs_ty.kind, var_ty.kind
                             ),
                             vec![Note::new(
-                                format!("Variable `{}` is declared here with type `{}`", 
-                                    name.lexeme, var_ty.kind),
+                                format!(
+                                    "Variable `{}` is declared here with type `{}`",
+                                    name.lexeme, var_ty.kind
+                                ),
                                 var_ty.name.line,
                                 var_ty.name.span.clone(),
-                                self.filename.clone()
+                                self.filename.clone(),
                             )],
                             vec![Help::new(
                                 format!("Try using a value of type `{}`", var_ty.kind),
                                 name.line,
                                 name.span.clone(),
-                                self.filename.clone()
-                            )]
+                                self.filename.clone(),
+                            )],
                         );
                     }
                     // Assignment expression type => var's type
                     self.set_expr_type(expr, var_ty.clone());
                 } else {
-                    self.error_token(
-                        name,
-                        &format!("Symbol `{}` is not a variable", name.lexeme),
-                    );
+                    self.error_token(name, &format!("Symbol `{}` is not a variable", name.lexeme));
                     self.set_expr_type(
                         expr,
                         Type::new(
                             name.clone(),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         ),
                     );
                 }
             } else {
-                self.error_token(
-                    name,
-                    &format!("Unknown variable `{}`", name.lexeme),
-                );
+                self.error_token(name, &format!("Unknown variable `{}`", name.lexeme));
                 self.set_expr_type(
                     expr,
                     Type::new(
                         name.clone(),
-                        TypeKind::User("error".to_string()),
+                        TypeKind::User("".to_string(), "error".to_string()),
                     ),
                 );
             }
@@ -1644,7 +2022,10 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_member_assignment(&mut self, expr: &Expr) {
         if let Expr::MemberAssignment {
-            object, name, value, ..
+            object,
+            name,
+            value,
+            ..
         } = expr
         {
             object.accept(self);
@@ -1653,20 +2034,23 @@ impl<'a> Visitor for TypeChecker<'a> {
             value.accept(self);
             self.current_assignment = None;
 
-            let obj_ty = self
-                .get_expr_type(object)
-                .cloned()
-                .unwrap_or_else(|| Type::new(name.clone(), TypeKind::User("error".to_string())));
-            let rhs_ty = self
-                .get_expr_type(value)
-                .cloned()
-                .unwrap_or_else(|| Type::new(name.clone(), TypeKind::User("error".to_string())));
+            let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
+            });
+            let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
+            });
 
             let obj_ty = Self::without_borrows(&obj_ty);
 
-            if let TypeKind::User(ref class_name) = obj_ty.kind {
-                if let Some(Symbol::Class { fields, .. }) = self.symtable.lookup_class(class_name)
-                {
+            if let TypeKind::User(_, ref class_name) = obj_ty.kind {
+                if let Some(Symbol::Class { fields, .. }) = self.symtable.lookup_class(class_name) {
                     if let Some(field_ty) = fields.get(&name.lexeme) {
                         if !rhs_ty.is_compatible_with(&field_ty.0) {
                             self.error_with_notes(
@@ -1676,34 +2060,33 @@ impl<'a> Visitor for TypeChecker<'a> {
                                     field_ty.0.kind, rhs_ty.kind
                                 ),
                                 vec![Note::new(
-                                    format!("Field `{}` is declared here with type `{}`", 
-                                        name.lexeme, field_ty.0.kind),
+                                    format!(
+                                        "Field `{}` is declared here with type `{}`",
+                                        name.lexeme, field_ty.0.kind
+                                    ),
                                     field_ty.0.name.line,
                                     field_ty.0.name.span.clone(),
-                                    self.filename.clone()
+                                    self.filename.clone(),
                                 )],
                                 vec![Help::new(
                                     format!("Try using a value of type `{}`", field_ty.0.kind),
                                     name.line,
                                     name.span.clone(),
-                                    self.filename.clone()
-                                )]
+                                    self.filename.clone(),
+                                )],
                             );
                         }
                         self.set_expr_type(expr, field_ty.0.clone());
                     } else {
                         self.error_token(
                             name,
-                            &format!(
-                                "No field `{}` in class `{}`",
-                                name.lexeme, class_name
-                            ),
+                            &format!("No field `{}` in class `{}`", name.lexeme, class_name),
                         );
                         self.set_expr_type(
                             expr,
                             Type::new(
                                 name.clone(),
-                                TypeKind::User("error".to_string()),
+                                TypeKind::User("".to_string(), "error".to_string()),
                             ),
                         );
                     }
@@ -1716,20 +2099,23 @@ impl<'a> Visitor for TypeChecker<'a> {
                         expr,
                         Type::new(
                             name.clone(),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         ),
                     );
                 }
             } else {
                 self.error_token(
                     name,
-                    &format!("Cannot do member assignment on non-class type `{}`", obj_ty.kind),
+                    &format!(
+                        "Cannot do member assignment on non-class type `{}`",
+                        obj_ty.kind
+                    ),
                 );
                 self.set_expr_type(
                     expr,
                     Type::new(
                         name.clone(),
-                        TypeKind::User("error".to_string()),
+                        TypeKind::User("".to_string(), "error".to_string()),
                     ),
                 );
             }
@@ -1756,7 +2142,10 @@ impl<'a> Visitor for TypeChecker<'a> {
             };
 
             // Look up the class and verify static member access
-            if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
+            if let Some(Symbol::Class {
+                fields, methods, ..
+            }) = self.symtable.lookup_class(class_name)
+            {
                 // Check static fields first
                 if let Some((field_ty, visibility, is_static)) = fields.get(&name.lexeme) {
                     if !self.is_member_visible(visibility, class_name) {
@@ -1773,19 +2162,23 @@ impl<'a> Visitor for TypeChecker<'a> {
                     if !is_static {
                         self.error_with_notes(
                             name.clone(),
-                            &format!("Cannot access non-static field `{}` in static context", name.lexeme),
+                            &format!(
+                                "Cannot access non-static field `{}` in static context",
+                                name.lexeme
+                            ),
                             vec![Note::new(
                                 format!("Field `{}` is defined here as non-static", name.lexeme),
                                 name.line,
                                 name.span.clone(),
-                                self.filename.clone()
+                                self.filename.clone(),
                             )],
                             vec![Help::new(
-                                "Try accessing the field using an instance of the class".to_string(),
+                                "Try accessing the field using an instance of the class"
+                                    .to_string(),
                                 name.line,
                                 name.span.clone(),
-                                self.filename.clone()
-                            )]
+                                self.filename.clone(),
+                            )],
                         );
                     }
                     self.set_expr_type(expr, field_ty.clone());
@@ -1795,7 +2188,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                     is_static,
                     visibility,
                     ..
-                }) = methods.get(&name.lexeme) {
+                }) = methods.get(&name.lexeme)
+                {
                     if let Some(visibility) = visibility {
                         if !self.is_member_visible(visibility, class_name) {
                             self.error_token(
@@ -1820,14 +2214,15 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 format!("Method `{}` is defined here as non-static", name.lexeme),
                                 name.line,
                                 name.span.clone(),
-                                self.filename.clone()
+                                self.filename.clone(),
                             )],
                             vec![Help::new(
-                                "Try accessing the method using an instance of the class".to_string(),
+                                "Try accessing the method using an instance of the class"
+                                    .to_string(),
                                 name.line,
                                 name.span.clone(),
-                                self.filename.clone()
-                            )]
+                                self.filename.clone(),
+                            )],
                         );
                     }
                     self.set_expr_type(
@@ -1840,7 +2235,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                 } else {
                     self.error_token(
                         name,
-                        &format!("No static member `{}` found in class `{}`", name.lexeme, class_name),
+                        &format!(
+                            "No static member `{}` found in class `{}`",
+                            name.lexeme, class_name
+                        ),
                     );
                     self.set_expr_type(expr, self.error_type(name));
                 }
@@ -1857,14 +2255,23 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
-        if let Expr::StaticAssignment { object, name, value, .. } = expr {
+        if let Expr::StaticAssignment {
+            object,
+            name,
+            value,
+            ..
+        } = expr
+        {
             object.accept(self);
             self.current_assignment = Some(expr.clone());
             value.accept(self);
             self.current_assignment = None;
 
             let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
             });
 
             let class_name = match &**object {
@@ -1877,9 +2284,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             };
 
             // Look up the static field in the class
-            if let Some(Symbol::Class { fields, .. }) = 
-                self.symtable.lookup_class(&class_name)
-            {
+            if let Some(Symbol::Class { fields, .. }) = self.symtable.lookup_class(&class_name) {
                 if let Some((field_ty, visibility, is_static)) = fields.get(&name.lexeme) {
                     if !self.is_member_visible(visibility, &class_name) {
                         self.error_token(
@@ -1895,7 +2300,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                     if !is_static {
                         self.error_token(
                             name,
-                            &format!("Cannot assign non-static field `{}` using static access", name.lexeme),
+                            &format!(
+                                "Cannot assign non-static field `{}` using static access",
+                                name.lexeme
+                            ),
                         );
                     }
                     if !rhs_ty.is_compatible_with(field_ty) {
@@ -1913,7 +2321,10 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                 self.error_token(
                     name,
-                    &format!("No static field `{}` found in class `{}`", name.lexeme, class_name),
+                    &format!(
+                        "No static field `{}` found in class `{}`",
+                        name.lexeme, class_name
+                    ),
                 );
             } else {
                 self.error_token(
@@ -1927,7 +2338,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 expr,
                 Type::new(
                     name.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 ),
             );
         }
@@ -1935,25 +2346,35 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_index_assignment(&mut self, expr: &Expr) {
         if let Expr::IndexAssignment {
-            object, index, value, token, ..
+            object,
+            index,
+            value,
+            token,
+            ..
         } = expr
         {
             object.accept(self);
             index.accept(self);
             value.accept(self);
 
-            let obj_ty = self
-                .get_expr_type(object)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-            let idx_ty = self
-                .get_expr_type(index)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
-            let rhs_ty = self
-                .get_expr_type(value)
-                .cloned()
-                .unwrap_or_else(|| Type::new(token.clone(), TypeKind::User("error".to_string())));
+            let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
+                Type::new(
+                    token.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
+            });
+            let idx_ty = self.get_expr_type(index).cloned().unwrap_or_else(|| {
+                Type::new(
+                    token.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
+            });
+            let rhs_ty = self.get_expr_type(value).cloned().unwrap_or_else(|| {
+                Type::new(
+                    token.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
+            });
             let obj_ty = Self::without_borrows(&obj_ty);
 
             if let TypeKind::Array(elem_ty, _) = obj_ty.kind {
@@ -1966,14 +2387,14 @@ impl<'a> Visitor for TypeChecker<'a> {
                             format!("Found index of type `{}`", idx_ty.kind),
                             token.line,
                             token.span.clone(),
-                            self.filename.clone()
+                            self.filename.clone(),
                         )],
                         vec![Help::new(
                             "Try using an integer expression for the index".to_string(),
                             token.line,
                             token.span.clone(),
-                            self.filename.clone()
-                        )]
+                            self.filename.clone(),
+                        )],
                     );
                 }
                 if !rhs_ty.is_compatible_with(&elem_ty) {
@@ -1994,16 +2415,21 @@ impl<'a> Visitor for TypeChecker<'a> {
                         "Double check the type definitions and try again".to_string(),
                         token.line,
                         token.span.clone(),
-                        self.filename.clone()
+                        self.filename.clone(),
                     )],
-                    vec![]
+                    vec![],
                 );
             }
         }
     }
 
     fn visit_call(&mut self, expr: &Expr) {
-        if let Expr::Call { callee, arguments, paren } = expr {
+        if let Expr::Call {
+            callee,
+            arguments,
+            paren,
+        } = expr
+        {
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
@@ -2027,7 +2453,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     self.get_expr_type(a).cloned().unwrap_or_else(|| {
                         Type::new(
                             paren.clone(),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         )
                     })
                 })
@@ -2037,8 +2463,16 @@ impl<'a> Visitor for TypeChecker<'a> {
             // exported signature, so its type parameters are still known here.
             if let Some((module, name, function)) = self.module_callee(callee) {
                 let result = self.check_call_signature(
-                    expr, &paren, &module, &name, &function.generics, &function.params,
-                    &function.return_type, &[], arguments, &arg_tys,
+                    expr,
+                    &paren,
+                    &module,
+                    &name,
+                    &function.generics,
+                    &function.params,
+                    &function.return_type,
+                    &[],
+                    arguments,
+                    &arg_tys,
                 );
                 self.set_expr_type(expr, result);
                 return;
@@ -2047,7 +2481,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
                 Type::new(
                     paren.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
@@ -2076,13 +2510,15 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 .to_string(),
                                 paren.line,
                                 paren.span.clone(),
-                                self.filename.clone()
+                                self.filename.clone(),
                             )],
                         );
                     } else {
                         // Create a substitution map for monomorphization
                         let mut subs: HashMap<String, TypeKind> = HashMap::new();
-                        for (i, (expected, actual)) in param_tys.iter().zip(arg_tys.iter()).enumerate() {
+                        for (i, (expected, actual)) in
+                            param_tys.iter().zip(arg_tys.iter()).enumerate()
+                        {
                             if let Some(argument) = arguments.get(i) {
                                 self.check_mutable_borrow(expected, argument, actual);
                             }
@@ -2095,7 +2531,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                                         expected.kind, actual.kind
                                     ),
                                     vec![Note::new(
-                                        format!("Function was defined with argument type `{}`", expected.kind),
+                                        format!(
+                                            "Function was defined with argument type `{}`",
+                                            expected.kind
+                                        ),
                                         expected.name.line,
                                         expected.name.span.clone(),
                                         self.filename.clone(),
@@ -2115,16 +2554,29 @@ impl<'a> Visitor for TypeChecker<'a> {
                         self.set_expr_type(expr, instantiated_ret_ty);
                     }
                 }
-                TypeKind::User(ref name) => {
+                TypeKind::User(ref module, ref name) => {
                     if let Some(sym) = self.symtable.lookup_function(name) {
-                        if let Symbol::Function { params, return_type, generics, .. } = sym {
+                        if let Symbol::Function {
+                            params,
+                            return_type,
+                            generics,
+                            ..
+                        } = sym
+                        {
                             let (params, return_type, generics) =
                                 (params.clone(), return_type.clone(), generics.clone());
-                            let module = self.module_name.clone();
 
                             let result = self.check_call_signature(
-                                expr, &paren, &module, name, &generics, &params,
-                                &return_type, &[], arguments, &arg_tys,
+                                expr,
+                                &paren,
+                                &module,
+                                name,
+                                &generics,
+                                &params,
+                                &return_type,
+                                &[],
+                                arguments,
+                                &arg_tys,
                             );
                             self.set_expr_type(expr, result);
                         } else {
@@ -2137,7 +2589,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 expr,
                                 Type::new(
                                     token.clone(),
-                                    TypeKind::User("error".to_string()),
+                                    TypeKind::User("".to_string(), "error".to_string()),
                                 ),
                             );
                         }
@@ -2151,14 +2603,12 @@ impl<'a> Visitor for TypeChecker<'a> {
                             expr,
                             Type::new(
                                 token.clone(),
-                                TypeKind::User("error".to_string()),
+                                TypeKind::User("".to_string(), "error".to_string()),
                             ),
                         );
                     }
                 }
-                TypeKind::Int
-                | TypeKind::Float
-                | TypeKind::String => {
+                TypeKind::Int | TypeKind::Float | TypeKind::String => {
                     self.error_token(
                         &paren,
                         &format!("Cannot call non-function type `{}`", callee_ty.kind),
@@ -2179,7 +2629,13 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_generic_call(&mut self, expr: &Expr) {
-        if let Expr::GenericCall { callee, arguments, generics, .. } = expr {
+        if let Expr::GenericCall {
+            callee,
+            arguments,
+            generics,
+            ..
+        } = expr
+        {
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
@@ -2191,7 +2647,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     self.get_expr_type(a).cloned().unwrap_or_else(|| {
                         Type::new(
                             get_token(a),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         )
                     })
                 })
@@ -2212,8 +2668,16 @@ impl<'a> Visitor for TypeChecker<'a> {
                 let explicit = self.generalise_explicit(explicit);
 
                 let result = self.check_call_signature(
-                    expr, &token, &module, &name, &function.generics, &function.params,
-                    &function.return_type, &explicit, arguments, &arg_tys,
+                    expr,
+                    &token,
+                    &module,
+                    &name,
+                    &function.generics,
+                    &function.params,
+                    &function.return_type,
+                    &explicit,
+                    arguments,
+                    &arg_tys,
                 );
                 self.set_expr_type(expr, result);
                 return;
@@ -2222,7 +2686,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
                 Type::new(
                     get_token(callee),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
@@ -2269,15 +2733,20 @@ impl<'a> Visitor for TypeChecker<'a> {
                         self.set_expr_type(expr, instantiated_ret_ty);
                     }
                 }
-                TypeKind::User(ref name) => {
+                TypeKind::User(ref module, ref name) => {
                     if let Some(sym) = self.symtable.lookup_function(name) {
                         // `generics` here is the *call's* explicit type arguments; the
                         // function's own type parameter names come from the symbol.
-                        if let Symbol::Function { params, return_type, generics: declared, .. } = sym {
+                        if let Symbol::Function {
+                            params,
+                            return_type,
+                            generics: declared,
+                            ..
+                        } = sym
+                        {
                             let (params, return_type, fn_generics) =
                                 (params.clone(), return_type.clone(), declared.clone());
                             let token = get_token(callee);
-                            let module = self.module_name.clone();
 
                             // Reporting "not generic" is clearer than an arity
                             // complaint about a list of no type parameters, so the
@@ -2285,7 +2754,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                             let explicit: &[Type] = if fn_generics.is_empty() {
                                 self.error_token(
                                     &token,
-                                    &format!("`{}` is not generic, so it takes no type arguments", name),
+                                    &format!(
+                                        "`{}` is not generic, so it takes no type arguments",
+                                        name
+                                    ),
                                 );
                                 &[]
                             } else {
@@ -2294,8 +2766,16 @@ impl<'a> Visitor for TypeChecker<'a> {
                             let explicit = self.generalise_explicit(explicit);
 
                             let result = self.check_call_signature(
-                                expr, &token, &module, name, &fn_generics, &params,
-                                &return_type, &explicit, arguments, &arg_tys,
+                                expr,
+                                &token,
+                                &module,
+                                name,
+                                &fn_generics,
+                                &params,
+                                &return_type,
+                                &explicit,
+                                arguments,
+                                &arg_tys,
                             );
                             self.set_expr_type(expr, result);
                         } else {
@@ -2307,7 +2787,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 expr,
                                 Type::new(
                                     get_token(callee),
-                                    TypeKind::User("error".to_string()),
+                                    TypeKind::User("".to_string(), "error".to_string()),
                                 ),
                             );
                         }
@@ -2320,7 +2800,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                             expr,
                             Type::new(
                                 get_token(callee),
-                                TypeKind::User("error".to_string()),
+                                TypeKind::User("".to_string(), "error".to_string()),
                             ),
                         );
                     }
@@ -2334,7 +2814,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         expr,
                         Type::new(
                             get_token(callee),
-                            TypeKind::User("error".to_string()),
+                            TypeKind::User("".to_string(), "error".to_string()),
                         ),
                     );
                 }
@@ -2346,17 +2826,23 @@ impl<'a> Visitor for TypeChecker<'a> {
         if let Expr::MemberAccess { object, name } = expr {
             object.accept(self);
             let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
             });
             let obj_ty = Self::without_borrows(&obj_ty);
 
             // A member of `Box<int>` is a member of `Box` with `T` bound to `int`, so
             // reduce to the class and remember the substitution to apply.
             let (obj_ty, class_subs) = match &obj_ty.kind {
-                TypeKind::GenericInstance(class_name, arguments) => {
-                    let subs = self.class_substitution(class_name, arguments);
+                TypeKind::GenericInstance(module_name, class_name, arguments) => {
+                    let subs = self.class_substitution(module_name, class_name, arguments);
                     (
-                        Type::new(obj_ty.name.clone(), TypeKind::User(class_name.clone())),
+                        Type::new(
+                            obj_ty.name.clone(),
+                            TypeKind::User(module_name.clone(), class_name.clone()),
+                        ),
                         subs,
                     )
                 }
@@ -2371,6 +2857,17 @@ impl<'a> Visitor for TypeChecker<'a> {
                         .get(module_name)
                         .cloned()
                         .unwrap_or_default();
+
+                    if let Some((module_name, class_name, _)) = self.module_class(expr) {
+                        self.set_expr_type(
+                            expr,
+                            Type::new(
+                                name.clone(),
+                                TypeKind::User(module_name.clone(), class_name.clone()),
+                            ),
+                        );
+                        return;
+                    }
 
                     match exports.functions.get(&name.lexeme) {
                         Some(function) => {
@@ -2399,7 +2896,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                                     self.filename.clone(),
                                 )],
                                 vec![Help::new(
-                                    "Functions must be declared `public` to be importable".to_string(),
+                                    "Functions must be declared `public` to be importable"
+                                        .to_string(),
                                     name.line,
                                     name.span.clone(),
                                     self.filename.clone(),
@@ -2454,20 +2952,87 @@ impl<'a> Visitor for TypeChecker<'a> {
                     } else {
                         self.error_token(
                             name,
-                            &format!("No member `{}` in array type `{}`", name.lexeme, obj_ty.kind),
+                            &format!(
+                                "No member `{}` in array type `{}`",
+                                name.lexeme, obj_ty.kind
+                            ),
                         );
                         self.set_expr_type(expr, self.error_type(name));
                     }
                     return;
                 }
-                TypeKind::User(class_name) => {
-                if let Some(Symbol::Class { fields, methods, .. }) = self.symtable.lookup_class(class_name) {
-                    // Check if we're in a static context
-                    if !self.in_static_context {
-                        // Only allow static access through StaticAccess expression
-                        if let Some((_, _, is_static)) = fields.get(&name.lexeme) {
-                            if *is_static {
-                                self.error_with_notes(
+                TypeKind::User(module_name, class_name) => {
+                    if !module_name.is_empty() && module_name != &self.module_name {
+                        let class = self
+                            .module_exports
+                            .get(module_name)
+                            .and_then(|exports| exports.classes.get(class_name))
+                            .cloned();
+
+                        if let Some(class) = class {
+                            if let Some((field_ty, _, is_static)) = class.fields.get(&name.lexeme) {
+                                if *is_static && !self.in_static_context {
+                                    self.error_token(
+                                    name,
+                                    &format!(
+                                        "Static field `{}` must be accessed using static access syntax",
+                                        name.lexeme
+                                    ),
+                                );
+                                }
+                                self.set_expr_type(expr, field_ty.apply_substitution(&class_subs));
+                            } else if let Some((params, return_type, _, is_static)) =
+                                class.methods.get(&name.lexeme)
+                            {
+                                if *is_static && !self.in_static_context {
+                                    self.error_token(
+                                    name,
+                                    &format!(
+                                        "Static method `{}` must be accessed using static access syntax",
+                                        name.lexeme
+                                    ),
+                                );
+                                }
+                                self.set_expr_type(
+                                    expr,
+                                    Type::new(
+                                        name.clone(),
+                                        TypeKind::Function(
+                                            params
+                                                .iter()
+                                                .map(|p| p.apply_substitution(&class_subs))
+                                                .collect(),
+                                            Box::new(return_type.apply_substitution(&class_subs)),
+                                        ),
+                                    ),
+                                );
+                            } else {
+                                self.error_token(
+                                    name,
+                                    &format!(
+                                        "No public member `{}` in class `{}`",
+                                        name.lexeme, class_name
+                                    ),
+                                );
+                                self.set_expr_type(expr, self.error_type(name));
+                            }
+                        } else {
+                            self.error_token(
+                                name,
+                                &format!("Unknown class `{}.{}`", module_name, class_name),
+                            );
+                            self.set_expr_type(expr, self.error_type(name));
+                        }
+                    } else if let Some(Symbol::Class {
+                        fields, methods, ..
+                    }) = self.symtable.lookup_class(class_name)
+                    {
+                        // Check if we're in a static context
+                        if !self.in_static_context {
+                            // Only allow static access through StaticAccess expression
+                            if let Some((_, _, is_static)) = fields.get(&name.lexeme) {
+                                if *is_static {
+                                    self.error_with_notes(
                                     name.clone(),
                                     &format!("Static field `{}` must be accessed using static access syntax", name.lexeme),
                                     vec![Note::new(
@@ -2483,10 +3048,13 @@ impl<'a> Visitor for TypeChecker<'a> {
                                         self.filename.clone()
                                     )]
                                 );
+                                }
                             }
-                        }
-                        if let Some(Symbol::Function { is_static: true, .. }) = methods.get(&name.lexeme) {
-                            self.error_with_notes(
+                            if let Some(Symbol::Function {
+                                is_static: true, ..
+                            }) = methods.get(&name.lexeme)
+                            {
+                                self.error_with_notes(
                                 name.clone(),
                                 &format!("Static method `{}` must be accessed using static access syntax", name.lexeme),
                                 vec![Note::new(
@@ -2502,79 +3070,87 @@ impl<'a> Visitor for TypeChecker<'a> {
                                     self.filename.clone()
                                 )]
                             );
+                            }
                         }
-                    }
-                    // Check fields
-                    if let Some((field_ty, visibility, ..)) = fields.get(&name.lexeme) {
-                        // Check visibility
-                        let is_visible = self.is_member_visible(visibility, &class_name);
-
-                        if !is_visible {
-                            self.error_token(
-                                name,
-                                &format!("Cannot access {} field `{}` of class `{}`", 
-                                    visibility.to_string().to_lowercase(),
-                                    name.lexeme, 
-                                    class_name
-                                ),
-                            );
-                        }
-
-                        self.set_expr_type(expr, field_ty.apply_substitution(&class_subs));
-                    } else if let Some(method) = methods.get(&name.lexeme) {
-                        if let Symbol::Function {
-                            params,
-                            return_type,
-                            visibility,
-                            ..
-                        } = method {
-                            // Check method visibility
-                            let is_visible = visibility
-                                .as_ref()
-                                .map_or(true, |v| self.is_member_visible(v, &class_name));
+                        // Check fields
+                        if let Some((field_ty, visibility, ..)) = fields.get(&name.lexeme) {
+                            // Check visibility
+                            let is_visible = self.is_member_visible(visibility, &class_name);
 
                             if !is_visible {
                                 self.error_token(
                                     name,
-                                    &format!("Cannot access {} method `{}` of class `{}`",
-                                        visibility.as_ref().map_or("".to_string(), |v| v.to_string().to_lowercase()),
+                                    &format!(
+                                        "Cannot access {} field `{}` of class `{}`",
+                                        visibility.to_string().to_lowercase(),
                                         name.lexeme,
                                         class_name
                                     ),
                                 );
                             }
 
-                            let fn_ty = Type::new(
-                                name.clone(),
-                                TypeKind::Function(
-                                    params
-                                        .iter()
-                                        .map(|p| p.apply_substitution(&class_subs))
-                                        .collect(),
-                                    Box::new(return_type.apply_substitution(&class_subs)),
+                            self.set_expr_type(expr, field_ty.apply_substitution(&class_subs));
+                        } else if let Some(method) = methods.get(&name.lexeme) {
+                            if let Symbol::Function {
+                                params,
+                                return_type,
+                                visibility,
+                                ..
+                            } = method
+                            {
+                                // Check method visibility
+                                let is_visible = visibility
+                                    .as_ref()
+                                    .map_or(true, |v| self.is_member_visible(v, &class_name));
+
+                                if !is_visible {
+                                    self.error_token(
+                                        name,
+                                        &format!(
+                                            "Cannot access {} method `{}` of class `{}`",
+                                            visibility.as_ref().map_or("".to_string(), |v| v
+                                                .to_string()
+                                                .to_lowercase()),
+                                            name.lexeme,
+                                            class_name
+                                        ),
+                                    );
+                                }
+
+                                let fn_ty = Type::new(
+                                    name.clone(),
+                                    TypeKind::Function(
+                                        params
+                                            .iter()
+                                            .map(|p| p.apply_substitution(&class_subs))
+                                            .collect(),
+                                        Box::new(return_type.apply_substitution(&class_subs)),
+                                    ),
+                                );
+                                self.set_expr_type(expr, fn_ty);
+                            }
+                        } else {
+                            self.error_token(
+                                name,
+                                &format!("No member `{}` in class `{}`", name.lexeme, class_name),
+                            );
+                            self.set_expr_type(
+                                expr,
+                                Type::new(
+                                    name.clone(),
+                                    TypeKind::User("".to_string(), "error".to_string()),
                                 ),
                             );
-                            self.set_expr_type(expr, fn_ty);
                         }
-                    } else {
-                        self.error_token(
-                            name,
-                            &format!("No member `{}` in class `{}`", name.lexeme, class_name),
-                        );
-                        self.set_expr_type(
-                            expr,
-                            Type::new(
-                                name.clone(),
-                                TypeKind::User("error".to_string()),
-                            ),
-                        );
                     }
-                }
                 }
                 _ => {
                     self.error_token(
                         name,
-                        &format!("Cannot access member `{}` on type `{}`", name.lexeme, obj_ty.kind),
+                        &format!(
+                            "Cannot access member `{}` on type `{}`",
+                            name.lexeme, obj_ty.kind
+                        ),
                     );
                     self.set_expr_type(expr, self.error_type(name));
                 }
@@ -2583,17 +3159,28 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_index(&mut self, expr: &Expr) {
-        if let Expr::Index { object, index, token } = expr {
+        if let Expr::Index {
+            object,
+            index,
+            token,
+        } = expr
+        {
             object.accept(self);
             index.accept(self);
 
             let name = get_token(object);
 
             let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
             });
             let idx_ty = self.get_expr_type(index).cloned().unwrap_or_else(|| {
-                Type::new(name.clone(), TypeKind::User("error".to_string()))
+                Type::new(
+                    name.clone(),
+                    TypeKind::User("".to_string(), "error".to_string()),
+                )
             });
             let obj_ty = Self::without_borrows(&obj_ty);
 
@@ -2606,14 +3193,14 @@ impl<'a> Visitor for TypeChecker<'a> {
                             format!("Found index of type `{}`", idx_ty.kind),
                             token.line,
                             token.span.clone(),
-                            self.filename.clone()
+                            self.filename.clone(),
                         )],
                         vec![Help::new(
                             "Try using an integer expression for the index".to_string(),
                             token.line,
                             token.span.clone(),
-                            self.filename.clone()
-                        )]
+                            self.filename.clone(),
+                        )],
                     );
                 }
                 self.set_expr_type(expr, *elem_ty.clone());
@@ -2625,9 +3212,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                         "Double check the type definitions and try again".to_string(),
                         token.line,
                         token.span.clone(),
-                        self.filename.clone()
+                        self.filename.clone(),
                     )],
-                    vec![]
+                    vec![],
                 );
             }
         }
@@ -2636,41 +3223,49 @@ impl<'a> Visitor for TypeChecker<'a> {
     fn visit_cast(&mut self, expr: &Expr) {
         if let Expr::Cast { object, type_ } = expr {
             object.accept(self);
+            let target_ty = self.qualify_type(type_);
 
             let name = get_token(object);
 
             let obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
                 Type::new(
                     name.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
             // Simplistic cast logic
-            if !obj_ty.is_compatible_with(type_) {
+            if !obj_ty.is_compatible_with(&target_ty) {
                 // Maybe it's int->float or vice versa, or same user type, etc.
                 // We'll do a minimal check
-                match (&obj_ty.kind, &type_.kind) {
-                    (TypeKind::Int, TypeKind::Float)
-                    | (TypeKind::Float, TypeKind::Int) => {
+                match (&obj_ty.kind, &target_ty.kind) {
+                    (TypeKind::Int, TypeKind::Float) | (TypeKind::Float, TypeKind::Int) => {
                         // allowed
                     }
-                    (TypeKind::User(u1), TypeKind::User(u2)) if u1 == u2 => {
+                    (TypeKind::User(m1, u1), TypeKind::User(m2, u2)) if u1 == u2 && m1 == m2 => {
                         // same user type
                     }
                     _ => {
-                        self.error_token(&name, &format!(
-                            "Invalid cast from `{}` to `{}`",
-                            obj_ty.kind, type_.kind
-                        ));
+                        self.error_token(
+                            &name,
+                            &format!(
+                                "Invalid cast from `{}` to `{}`",
+                                obj_ty.kind, target_ty.kind
+                            ),
+                        );
                     }
                 }
             }
-            self.set_expr_type(expr, type_.clone());
+            self.set_expr_type(expr, target_ty);
         }
     }
 
     fn visit_class_init(&mut self, expr: &Expr) {
-        if let Expr::ClassInit { name, generics, arguments } = expr {
+        if let Expr::ClassInit {
+            name,
+            generics,
+            arguments,
+        } = expr
+        {
             for arg in arguments {
                 arg.accept(self);
             }
@@ -2684,16 +3279,44 @@ impl<'a> Visitor for TypeChecker<'a> {
                 })
                 .collect();
 
-            let Some(Symbol::Class {
-                generics: class_generics,
-                constructor_params,
-                fully_defined,
-                ..
-            }) = self.symtable.lookup_class(&name.lexeme)
-            else {
-                self.error_token(name, &format!("Unknown class `{}`", name.lexeme));
-                self.set_expr_type(expr, self.error_type(name));
-                return;
+            let (owner, class_name) = match name.lexeme.rsplit_once('.') {
+                Some((module, class)) => {
+                    (self.resolve_module_name(module), class.to_string())
+                }
+                None => (self.module_name.clone(), name.lexeme.clone()),
+            };
+
+            let (class_generics, constructor_params, fully_defined) = if owner == self.module_name {
+                match self.symtable.lookup_class(&class_name) {
+                    Some(Symbol::Class {
+                        generics,
+                        constructor_params,
+                        fully_defined,
+                        ..
+                    }) => (generics.clone(), constructor_params.clone(), *fully_defined),
+                    _ => {
+                        self.error_token(name, &format!("Unknown class `{}`", name.lexeme));
+                        self.set_expr_type(expr, self.error_type(name));
+                        return;
+                    }
+                }
+            } else {
+                match self
+                    .module_exports
+                    .get(&owner)
+                    .and_then(|exports| exports.classes.get(&class_name))
+                {
+                    Some(class) => (
+                        class.generics.clone(),
+                        class.constructor_params.clone(),
+                        true,
+                    ),
+                    None => {
+                        self.error_token(name, &format!("Unknown public class `{}`", name.lexeme));
+                        self.set_expr_type(expr, self.error_type(name));
+                        return;
+                    }
+                }
             };
 
             if !fully_defined {
@@ -2702,10 +3325,6 @@ impl<'a> Visitor for TypeChecker<'a> {
                     &format!("Class `{}` is not fully defined yet", name.lexeme),
                 );
             }
-
-            let class_generics = class_generics.clone();
-
-            let constructor_params = constructor_params.clone();
 
             if arg_tys.len() != constructor_params.len() {
                 self.error_token(
@@ -2733,7 +3352,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                 &arg_tys,
             );
 
-            for (i, (expected, actual)) in constructor_params.iter().zip(arg_tys.iter()).enumerate() {
+            for (i, (expected, actual)) in constructor_params.iter().zip(arg_tys.iter()).enumerate()
+            {
                 let expected = expected.apply_substitution(&subs);
 
                 if !actual.is_compatible_with(&expected) {
@@ -2742,15 +3362,21 @@ impl<'a> Visitor for TypeChecker<'a> {
                         .map(|argument| get_token(argument))
                         .unwrap_or_else(|| name.clone());
 
-                    self.error_token(&token, &format!(
-                        "Constructor argument mismatch for `{}`: expected `{}`, got `{}`",
-                        name.lexeme, expected.kind, actual.kind
-                    ));
+                    self.error_token(
+                        &token,
+                        &format!(
+                            "Constructor argument mismatch for `{}`: expected `{}`, got `{}`",
+                            name.lexeme, expected.kind, actual.kind
+                        ),
+                    );
                 }
             }
 
             let class_ty = if class_generics.is_empty() {
-                Type::new(name.clone(), TypeKind::User(name.lexeme.clone()))
+                Type::new(
+                    name.clone(),
+                    TypeKind::User(owner.clone(), class_name.clone()),
+                )
             } else {
                 let arguments: Vec<Type> = class_generics
                     .iter()
@@ -2759,18 +3385,18 @@ impl<'a> Visitor for TypeChecker<'a> {
                             name.clone(),
                             subs.get(parameter)
                                 .cloned()
-                                .unwrap_or(TypeKind::User("error".to_string())),
+                                .unwrap_or(TypeKind::User(String::new(), "error".to_string())),
                         )
                     })
                     .collect();
 
                 Type::new(
                     name.clone(),
-                    TypeKind::GenericInstance(name.lexeme.clone(), arguments),
+                    TypeKind::GenericInstance(owner.clone(), class_name.clone(), arguments),
                 )
             };
 
-            self.record_class_instantiation(&name.lexeme, &class_generics, &subs);
+            self.record_class_instantiation(&owner, &class_name, &class_generics, &subs);
             self.set_expr_type(expr, class_ty);
         }
     }
@@ -2784,16 +3410,13 @@ impl<'a> Visitor for TypeChecker<'a> {
             let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
                 Type::new(
                     name.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
             obj_ty.derived.push(Derived::Ref);
 
-            let ref_ty = Type::new(
-                obj_ty.name.clone(),
-                TypeKind::Reference(Box::new(obj_ty)),
-            );
+            let ref_ty = Type::new(obj_ty.name.clone(), TypeKind::Reference(Box::new(obj_ty)));
 
             self.set_expr_type(expr, ref_ty);
         }
@@ -2802,21 +3425,18 @@ impl<'a> Visitor for TypeChecker<'a> {
     fn visit_mut_reference(&mut self, expr: &Expr) {
         if let Expr::MutReference { object } = expr {
             object.accept(self);
-            
+
             let name = get_token(object);
             let mut obj_ty = self.get_expr_type(object).cloned().unwrap_or_else(|| {
                 Type::new(
                     name.clone(),
-                    TypeKind::User("error".to_string()),
+                    TypeKind::User("".to_string(), "error".to_string()),
                 )
             });
 
             obj_ty.derived.push(Derived::MutRef);
 
-            let ref_ty = Type::new(
-                obj_ty.name.clone(),
-                TypeKind::MutRef(Box::new(obj_ty)),
-            );
+            let ref_ty = Type::new(obj_ty.name.clone(), TypeKind::MutRef(Box::new(obj_ty)));
             self.set_expr_type(expr, ref_ty);
         }
     }
@@ -2827,20 +3447,20 @@ impl<'a> Visitor for TypeChecker<'a> {
             parameters,
             body,
             return_type,
-            param_types
+            param_types,
         } = expr
         {
             // Enter a new scope for the closure body
             self.symtable.begin_scope();
-    
+
             // Save the old function return type context, then set the closure's
-            // declared return type as the "current function return type" 
+            // declared return type as the "current function return type"
             // (so `return` statements inside the closure are checked).
             let old_ret = self.current_function_return_type.take();
             let old_has_valid_return = self.function_has_valid_return;
             self.current_function_return_type = Some(return_type.clone());
             self.function_has_valid_return = false;
-    
+
             // Check if we are currently in an assignment.
             // If we are, then we can lookup the variable we are assigning to
             // and check if the type of the closure matches the expected type
@@ -2875,7 +3495,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                         &format!(
                             "Closure takes {} parameter(s) but `{}` expects {}",
                             parameters.len(),
-                            expected_type.as_ref().map(|t| t.kind.to_string()).unwrap_or_default(),
+                            expected_type
+                                .as_ref()
+                                .map(|t| t.kind.to_string())
+                                .unwrap_or_default(),
                             params.len()
                         ),
                     );
@@ -2912,7 +3535,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 self.filename.clone(),
                             )],
                         );
-                        Type::new(param_token.clone(), TypeKind::User("error".to_string()))
+                        Type::new(
+                            param_token.clone(),
+                            TypeKind::User(self.module_name.clone(), "error".to_string()),
+                        )
                     }
                 };
 
@@ -2948,15 +3574,15 @@ impl<'a> Visitor for TypeChecker<'a> {
                     )],
                 );
             }
-    
+
             // End the closure scope
             self.symtable.end_scope();
-    
+
             // Restore the old function return type
             self.current_function_return_type = old_ret;
             self.function_has_valid_return = old_has_valid_return;
-    
-            // Finally, set the closure's type. We treat the closure 
+
+            // Finally, set the closure's type. We treat the closure
             // as a function with `param_types -> return_type`.
             // `tys` already holds the resolved parameter types, whether they came from
             // annotations or were inferred, so it is the single source of truth here.
@@ -2966,7 +3592,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             );
             self.set_expr_type(expr, closure_type);
         }
-    }    
+    }
 
     fn visit_array(&mut self, expr: &Expr) {
         if let Expr::Array { elements, .. } = expr {
@@ -2988,7 +3614,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                 });
 
                 let ty = self.get_expr_type(e).cloned().unwrap_or_else(|| {
-                    Type::new(name.clone(), TypeKind::User("error".to_string()))
+                    Type::new(
+                        name.clone(),
+                        TypeKind::User(self.module_name.clone(), "error".to_string()),
+                    )
                 });
                 elem_tys.push(ty);
             }
@@ -3019,7 +3648,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                         );
                         self.set_expr_type(
                             expr,
-                            Type::new(name, TypeKind::User("error".to_string())),
+                            Type::new(
+                                name,
+                                TypeKind::User(self.module_name.clone(), "error".to_string()),
+                            ),
                         );
                     }
                 }
@@ -3028,10 +3660,13 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                 for other in &elem_tys[1..] {
                     if !other.is_compatible_with(first_ty) {
-                        self.error_token(&name, &format!(
-                            "Inconsistent array element types: `{}` vs `{}`",
-                            first_ty.kind, other.kind
-                        ));
+                        self.error_token(
+                            &name,
+                            &format!(
+                                "Inconsistent array element types: `{}` vs `{}`",
+                                first_ty.kind, other.kind
+                            ),
+                        );
                     }
                 }
 
@@ -3052,21 +3687,19 @@ impl<'a> Visitor for TypeChecker<'a> {
             let name = get_token(expr);
             for e in elements {
                 e.accept(self);
-                tuple_elems.push(
-                    self.get_expr_type(e).cloned().unwrap_or_else(|| {
-                        Type::new(name.clone(), TypeKind::User("error".to_string()))
-                    })
-                );
+                tuple_elems.push(self.get_expr_type(e).cloned().unwrap_or_else(|| {
+                    Type::new(
+                        name.clone(),
+                        TypeKind::User(self.module_name.clone(), "error".to_string()),
+                    )
+                }));
             }
             if tuple_elems.is_empty() {
                 self.error_token(&name, "Cannot infer the type of an empty tuple literal");
                 self.set_expr_type(expr, self.error_type(&name));
                 return;
             }
-            let tuple_ty = Type::new(
-                tuple_elems[0].name.clone(),
-                TypeKind::Tuple(tuple_elems),
-            );
+            let tuple_ty = Type::new(tuple_elems[0].name.clone(), TypeKind::Tuple(tuple_elems));
             self.set_expr_type(expr, tuple_ty);
         }
     }
@@ -3139,13 +3772,13 @@ impl<'a> Visitor for TypeChecker<'a> {
                 self.get_expr_type(val).cloned().unwrap_or_else(|| {
                     Type::new(
                         get_token(val),
-                        TypeKind::User("error".to_string()),
+                        TypeKind::User(self.module_name.clone(), "error".to_string()),
                     )
                 })
             } else {
                 Type::new(Token::dummy("void"), TypeKind::Void)
             };
-    
+
             if let Some(expected) = &self.current_function_return_type {
                 if !ret_ty.is_compatible_with(expected) {
                     self.error_with_notes(
@@ -3158,23 +3791,26 @@ impl<'a> Visitor for TypeChecker<'a> {
                             format!("Function declares return type `{}`", expected.kind),
                             expected.name.line,
                             expected.name.span.clone(),
-                            self.filename.clone()
+                            self.filename.clone(),
                         )],
                         vec![Help::new(
                             format!("Try returning a value of type `{}`", expected.kind),
                             get_token_s(stmt).line,
                             get_token_s(stmt).span.clone(),
-                            self.filename.clone()
-                        )]
+                            self.filename.clone(),
+                        )],
                     );
                 } else {
                     self.function_has_valid_return = true;
                 }
             } else {
-                self.error_token(&get_token_s(stmt), "Return statement outside of a function or closure");
+                self.error_token(
+                    &get_token_s(stmt),
+                    "Return statement outside of a function or closure",
+                );
             }
         }
-    }    
+    }
 
     fn visit_break(&mut self, _stmt: &Stmt) {
         // Could check if inside loop
@@ -3191,12 +3827,12 @@ impl<'a> Visitor for TypeChecker<'a> {
             body,
             return_type,
             generics,
-            modifiers
+            modifiers,
         } = stmt
         {
             // Begin scope, set up parameters, etc. (same as before)
             self.symtable.begin_scope();
-    
+
             let old_ret = self.current_function_return_type.take();
             let old_has_valid_return = self.function_has_valid_return;
 
@@ -3215,18 +3851,14 @@ impl<'a> Visitor for TypeChecker<'a> {
             // The body is checked with type parameters marked as such, so the return
             // type has to be generalised the same way for `return` to match.
             self.current_function_return_type =
-                Some(Self::generalise(return_type, &generic_names));
+                Some(self.qualify_type(&Self::generalise(return_type, &generic_names)));
             for g in generics {
-                self.symtable.declare_symbol(
-                    &g.lexeme,
-                    Symbol::new_generic_param(g.clone())
-                );
+                self.symtable
+                    .declare_symbol(&g.lexeme, Symbol::new_generic_param(g.clone()));
             }
 
-            let old_generics = std::mem::replace(
-                &mut self.current_function_generics,
-                generic_names.clone(),
-            );
+            let old_generics =
+                std::mem::replace(&mut self.current_function_generics, generic_names.clone());
             let old_function =
                 std::mem::replace(&mut self.current_function, Some(name.lexeme.clone()));
 
@@ -3242,27 +3874,30 @@ impl<'a> Visitor for TypeChecker<'a> {
             // parameter is recognised as such inside the body, rather than looking like
             // an ordinary user type named `T`.
             for p in params {
-                if let Stmt::Variable { name: param_name, type_, .. } = &**p {
+                if let Stmt::Variable {
+                    name: param_name,
+                    type_,
+                    ..
+                } = &**p
+                {
+                    let param_type = self.qualify_type(&Self::generalise(type_, &generic_names));
                     self.symtable.declare_symbol(
                         &param_name.lexeme,
-                        Symbol::new_variable(
-                            param_name.clone(),
-                            Self::generalise(type_, &generic_names),
-                        ),
+                        Symbol::new_variable(param_name.clone(), param_type),
                     );
                 }
             }
-    
-            // Now visit each statement in the body, 
+
+            // Now visit each statement in the body,
             for b in body {
                 b.accept(self);
             }
-    
+
             // End scope
             self.current_function_generics = old_generics;
             self.current_function = old_function;
             self.symtable.end_scope();
-    
+
             // restore old function return
             self.current_function_return_type = old_ret;
             let has_guaranteed_return = self.statements_guarantee_return(body);
@@ -3272,7 +3907,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 // If the function is extern, we don't need a return statement.
                 return;
             }
-    
+
             // If the function returns void, we don't need a return statement.
             if return_type.kind == TypeKind::Void {
                 // add the function to the current scope
@@ -3280,48 +3915,53 @@ impl<'a> Visitor for TypeChecker<'a> {
                     &name.lexeme,
                     Symbol::new_function(
                         name.clone(),
-                        params.iter().map(|p| {
-                            if let Stmt::Variable { type_, .. } = &**p {
-                                type_.clone()
-                            } else {
-                                Type::new(
-                                    name.clone(),
-                                    TypeKind::User("error".to_string()),
-                                )
-                            }
-                        }).collect(),
-                        return_type.clone(),
+                        params
+                            .iter()
+                            .map(|p| {
+                                if let Stmt::Variable { type_, .. } = &**p {
+                                    self.qualify_type(type_)
+                                } else {
+                                    Type::new(
+                                        name.clone(),
+                                        TypeKind::User(
+                                            self.module_name.clone(),
+                                            "error".to_string(),
+                                        ),
+                                    )
+                                }
+                            })
+                            .collect(),
+                        self.qualify_type(return_type),
                         self.current_class.is_some(),
-                    )
+                    ),
                 );
                 return;
             }
-    
+
             // If we haven't seen a valid return statement, produce an error
             if !has_guaranteed_return {
                 self.error_with_notes(
                     name.clone(),
                     &format!(
                         "Function `{}` (return type `{}`) does not return a value on all paths",
-                        name.lexeme,
-                        return_type.kind
+                        name.lexeme, return_type.kind
                     ),
                     vec![Note::new(
                         format!("Function declares non-void return type here"),
                         return_type.name.line,
                         return_type.name.span.clone(),
-                        self.filename.clone()
+                        self.filename.clone(),
                     )],
                     vec![Help::new(
                         "Add a return statement at the end of the function".to_string(),
                         name.line,
                         name.span.clone(),
-                        self.filename.clone()
-                    )]
+                        self.filename.clone(),
+                    )],
                 );
             }
         }
-    }    
+    }
 
     fn visit_variable(&mut self, stmt: &Stmt) {
         if let Stmt::Variable {
@@ -3334,12 +3974,17 @@ impl<'a> Visitor for TypeChecker<'a> {
             // Inside a generic function or class, a declared type may name one of the
             // type parameters in scope, so mark those before anything compares against
             // it.
-            let type_ = &Self::generalise(type_, &self.current_function_generics);
+            let declared =
+                self.qualify_type(&Self::generalise(type_, &self.current_function_generics));
+            let type_ = &declared;
 
             if let Some(init) = initialiser {
                 // Temporarily define the variable
                 self.symtable.begin_scope();
-                self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), type_.clone()));
+                self.symtable.declare_symbol(
+                    &name.lexeme,
+                    Symbol::new_variable(name.clone(), type_.clone()),
+                );
 
                 // check if the type exists
                 if !self.type_exists(type_) {
@@ -3350,9 +3995,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                             "Double check the type definition".to_string(),
                             type_.name.line,
                             type_.name.span.clone(),
-                            self.filename.clone()
+                            self.filename.clone(),
                         )],
-                        vec![]
+                        vec![],
                     );
                 }
 
@@ -3360,7 +4005,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                 // closure parameter types get inferred), then restore the previous context so
                 // an unrelated expression later on cannot pick up a stale expectation.
                 let old_assignment = self.current_assignment.take();
-                self.current_assignment = Some(Expr::Assignment { name: name.clone(), value: init.clone(), op: Token::dummy("=") });
+                self.current_assignment = Some(Expr::Assignment {
+                    name: name.clone(),
+                    value: init.clone(),
+                    op: Token::dummy("="),
+                });
                 self.with_expected_type(Some(type_.clone()), |checker| {
                     init.accept(checker);
                 });
@@ -3370,7 +4019,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 let init_ty = self.get_expr_type(init).cloned().unwrap_or_else(|| {
                     Type::new(
                         name.clone(),
-                        TypeKind::User("error".to_string()),
+                        TypeKind::User(self.module_name.clone(), "error".to_string()),
                     )
                 });
                 if !init_ty.is_compatible_with(type_) {
@@ -3381,36 +4030,46 @@ impl<'a> Visitor for TypeChecker<'a> {
                             name.lexeme, type_.kind, init_ty.kind
                         ),
                         vec![Note::new(
-                            format!("Variable `{}` is declared here with type `{}`", 
-                                name.lexeme, type_.kind),
+                            format!(
+                                "Variable `{}` is declared here with type `{}`",
+                                name.lexeme, type_.kind
+                            ),
                             name.line,
                             name.span.clone(),
-                            self.filename.clone()
+                            self.filename.clone(),
                         )],
                         vec![Help::new(
                             format!("Try initializing with a value of type `{}`", type_.kind),
                             name.line,
                             name.span.clone(),
-                            self.filename.clone()
-                        )]
+                            self.filename.clone(),
+                        )],
                     );
                 }
             }
 
             // A borrow has to refer to something from the moment it exists, so it
             // cannot be declared and assigned later.
-            if initialiser.is_none() && matches!(type_.kind, TypeKind::Reference(_) | TypeKind::MutRef(_)) {
+            if initialiser.is_none()
+                && matches!(type_.kind, TypeKind::Reference(_) | TypeKind::MutRef(_))
+            {
                 self.error_with_notes(
                     name.clone(),
                     &format!("Borrow `{}` must be initialised when declared", name.lexeme),
                     vec![Note::new(
-                        format!("`{}` borrows, so it needs something to borrow from", type_.kind),
+                        format!(
+                            "`{}` borrows, so it needs something to borrow from",
+                            type_.kind
+                        ),
                         name.line,
                         name.span.clone(),
                         self.filename.clone(),
                     )],
                     vec![Help::new(
-                        format!("Give it a value, e.g. `let {}: {} = &other;`", name.lexeme, type_.kind),
+                        format!(
+                            "Give it a value, e.g. `let {}: {} = &other;`",
+                            name.lexeme, type_.kind
+                        ),
                         name.line,
                         name.span.clone(),
                         self.filename.clone(),
@@ -3427,14 +4086,26 @@ impl<'a> Visitor for TypeChecker<'a> {
                         "Double check the type definition".to_string(),
                         type_.name.line,
                         type_.name.span.clone(),
-                        self.filename.clone()
+                        self.filename.clone(),
                     )],
-                    vec![]
+                    vec![],
                 );
 
-                self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), Type::new(name.clone(), TypeKind::User("error".to_string()))));
+                self.symtable.declare_symbol(
+                    &name.lexeme,
+                    Symbol::new_variable(
+                        name.clone(),
+                        Type::new(
+                            name.clone(),
+                            TypeKind::User(self.module_name.clone(), "error".to_string()),
+                        ),
+                    ),
+                );
             } else {
-                self.symtable.declare_symbol(&name.lexeme, Symbol::new_variable(name.clone(), type_.clone()));
+                self.symtable.declare_symbol(
+                    &name.lexeme,
+                    Symbol::new_variable(name.clone(), type_.clone()),
+                );
             }
         }
     }
@@ -3443,9 +4114,7 @@ impl<'a> Visitor for TypeChecker<'a> {
         if let Expr::Intrinsic { name, arguments } = expr {
             // Intrinsics are the compiler's own escape hatch, so their arguments must be
             // literals it can act on at compile time rather than arbitrary expressions.
-            let literal_argument = |arg: &Expr| {
-                matches!(arg, Expr::Literal { value } if value.kind == TokenKind::String)
-            };
+            let literal_argument = |arg: &Expr| matches!(arg, Expr::Literal { value } if value.kind == TokenKind::String);
 
             match name.lexeme.as_str() {
                 "cpp" | "include" => {
@@ -3496,7 +4165,13 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_class(&mut self, stmt: &Stmt) {
-        if let Stmt::Class { name, generics, fields, methods, .. } = stmt
+        if let Stmt::Class {
+            name,
+            generics,
+            fields,
+            methods,
+            ..
+        } = stmt
         {
             // Set the current_class so we know which class we're in
             let class_name = name.lexeme.clone();
@@ -3511,29 +4186,30 @@ impl<'a> Visitor for TypeChecker<'a> {
                 self.symtable
                     .declare_symbol(&g.lexeme, Symbol::new_generic_param(g.clone()));
             }
-            let old_generics = std::mem::replace(
-                &mut self.current_function_generics,
-                generic_names.clone(),
-            );
+            let old_generics =
+                std::mem::replace(&mut self.current_function_generics, generic_names.clone());
 
             for field in fields {
-                field.accept(self); 
+                field.accept(self);
             }
-    
+
             // Construct a Type that represents this class, e.g. `User(className)`
-            let class_type = Type::new(name.clone(), TypeKind::User(class_name.clone()));
-    
+            let class_type = Type::new(
+                name.clone(),
+                TypeKind::User(self.module_name.clone(), class_name.clone()),
+            );
+
             for method in methods {
                 // Start a new scope for the method
                 self.symtable.begin_scope();
-    
+
                 // Declare `this` in the symbol table, pointing to `class_type`
                 let this_symbol = Symbol::new_variable(name.clone(), class_type.clone());
 
-                self.symtable.declare_symbol("this", this_symbol);    
+                self.symtable.declare_symbol("this", this_symbol);
                 // Now visit the method AST node itself
                 method.accept(self);
-    
+
                 // End the scope
                 self.symtable.end_scope();
             }
@@ -3564,8 +4240,6 @@ impl ToString for Visibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::Lexer;
-    use crate::parser::Parser;
 
     /// Type checks a fixture and everything it imports, returning the error count.
     fn typecheck_fixture(relative_path: &str) -> usize {
@@ -3588,6 +4262,7 @@ mod tests {
                 module.path.to_string_lossy().to_string(),
                 module.source.clone(),
             );
+            checker.set_module_name(module.name.clone());
             checker.set_module_exports(exports.clone());
             checker.set_is_library(module.name != root);
             checker.check_module(&module.ast);
@@ -3612,27 +4287,28 @@ mod tests {
     /// Collects every `.crdm` fixture in a directory, so new fixtures are picked up
     /// automatically instead of needing to be listed by hand.
     fn fixtures_in(directory: &str) -> Vec<String> {
-        let mut fixtures: Vec<String> = std::fs::read_dir(format!(
-            "{}/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            directory
-        ))
-        .expect("fixture directory should be readable")
-        .filter_map(|entry| {
-            let path = entry.expect("directory entry should be readable").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("crdm") {
-                return None;
-            }
-            Some(format!(
-                "{}/{}",
-                directory,
-                path.file_name().unwrap().to_string_lossy()
-            ))
-        })
-        .collect();
+        let mut fixtures: Vec<String> =
+            std::fs::read_dir(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), directory))
+                .expect("fixture directory should be readable")
+                .filter_map(|entry| {
+                    let path = entry.expect("directory entry should be readable").path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("crdm") {
+                        return None;
+                    }
+                    Some(format!(
+                        "{}/{}",
+                        directory,
+                        path.file_name().unwrap().to_string_lossy()
+                    ))
+                })
+                .collect();
 
         fixtures.sort();
-        assert!(!fixtures.is_empty(), "`{}` should contain fixtures", directory);
+        assert!(
+            !fixtures.is_empty(),
+            "`{}` should contain fixtures",
+            directory
+        );
         fixtures
     }
 

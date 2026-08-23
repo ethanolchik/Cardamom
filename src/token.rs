@@ -9,7 +9,7 @@ pub struct Token {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Span {
     pub start: usize,
-    pub end: usize
+    pub end: usize,
 }
 
 impl Span {
@@ -23,34 +23,109 @@ pub enum TokenKind {
     EndOfFile,
 
     // Literals
-    Integer, Float, String, Identifier,
+    Integer,
+    Float,
+    String,
+    Identifier,
 
     // Operators
-    Plus, Minus, Mul, Div, Mod, Amp, Pipe, Caret, Tilde,
-    Bang, Question, Eq, Neq, Lt, Gt, Lte, Gte, EqEq, And, Or,
-    PlusEq, MinusEq, MulEq, DivEq, ModEq, AmpEq, PipeEq, CaretEq,
-    QuestionQuestion, Pow, PowEq, LShift, RShift, LShiftEq, RShiftEq,
-    Range, Arrow, StaticAccess, At,
+    Plus,
+    Minus,
+    Mul,
+    Div,
+    Mod,
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Bang,
+    Question,
+    Eq,
+    Neq,
+    Lt,
+    Gt,
+    Lte,
+    Gte,
+    EqEq,
+    And,
+    Or,
+    PlusEq,
+    MinusEq,
+    MulEq,
+    DivEq,
+    ModEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    QuestionQuestion,
+    Pow,
+    PowEq,
+    LShift,
+    RShift,
+    LShiftEq,
+    RShiftEq,
+    Range,
+    Arrow,
+    StaticAccess,
+    At,
 
     // Delimiters
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket, Comma, Dot, Colon, Semicolon,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Dot,
+    Colon,
+    Semicolon,
 
     // Keywords
-    If, Else, While, For, Break, Continue, Return,
-    Class, Fn, Let, Const, Public, Private, Protected, Static,
-    Import, As, New, Extern, Extend, Mut,
+    If,
+    Else,
+    While,
+    For,
+    Break,
+    Continue,
+    Return,
+    Class,
+    Fn,
+    Let,
+    Const,
+    Public,
+    Private,
+    Protected,
+    Static,
+    Import,
+    As,
+    New,
+    Extern,
+    Extend,
+    Mut,
 
     // Misc
-    Error
+    Error,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, lexeme: String, line: usize, span: Span) -> Token {
-        Token { kind, lexeme, line, span }
+        Token {
+            kind,
+            lexeme,
+            line,
+            span,
+        }
     }
 
     pub fn to_string(&self) -> String {
-        format!("{} {} at {}:{}", self.kind.clone().to_string(), self.lexeme, self.line, self.span.start)
+        format!(
+            "{} {} at {}:{}",
+            self.kind.clone().to_string(),
+            self.lexeme,
+            self.line,
+            self.span.start
+        )
     }
 
     pub fn dummy(lexeme: &str) -> Token {
@@ -58,7 +133,7 @@ impl Token {
             kind: TokenKind::EndOfFile,
             lexeme: lexeme.to_string(),
             line: 0,
-            span: Span::new(0, 0)
+            span: Span::new(0, 0),
         }
     }
 }
@@ -141,7 +216,7 @@ impl TokenKind {
             TokenKind::Extern => "Extern".to_string(),
             TokenKind::Extend => "Extend".to_string(),
             TokenKind::Mut => "Mut".to_string(),
-            TokenKind::Error => "Error".to_string()
+            TokenKind::Error => "Error".to_string(),
         }
     }
 }

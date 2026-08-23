@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::ty::{Type, TypeKind};
 use crate::token::Token;
+use crate::ty::{Type, TypeKind};
 
 // Add a static counter for generating unique IDs
 static NEXT_SYMBOL_ID: AtomicUsize = AtomicUsize::new(0);
@@ -69,7 +69,12 @@ impl Symbol {
         Self::new_variable_with_visibility(name, ty, None, false)
     }
 
-    pub fn new_function(name: Token, params: Vec<Type>, return_type: Type, is_method: bool) -> Self {
+    pub fn new_function(
+        name: Token,
+        params: Vec<Type>,
+        return_type: Type,
+        is_method: bool,
+    ) -> Self {
         Self::new_function_with_visibility(name, params, return_type, is_method, None, false)
     }
 
@@ -108,13 +113,22 @@ impl Symbol {
     }
 
     // New constructor for variables with visibility
-    pub fn new_variable_with_visibility(name: Token, ty: Type, visibility: Option<Visibility>, is_static: bool) -> Self {
+    pub fn new_variable_with_visibility(
+        name: Token,
+        ty: Type,
+        visibility: Option<Visibility>,
+        is_static: bool,
+    ) -> Self {
         let id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::SeqCst);
         Symbol::Variable(id, name, ty, visibility, is_static)
     }
 
     // Add helper methods forvisibility checks
-    pub fn is_visible_from(&self, current_class: Option<&str>, accessing_class: Option<&str>) -> bool {
+    pub fn is_visible_from(
+        &self,
+        current_class: Option<&str>,
+        accessing_class: Option<&str>,
+    ) -> bool {
         match self {
             Symbol::Function { visibility, .. } | Symbol::Variable(_, _, _, visibility, _) => {
                 match visibility {
@@ -157,7 +171,10 @@ impl Symbol {
     }
 
     pub fn new_generic_param(name: Token) -> Self {
-        Self::new_variable(name.clone(), Type::new(name.clone(), TypeKind::GenericParam(name.lexeme.clone())))
+        Self::new_variable(
+            name.clone(),
+            Type::new(name.clone(), TypeKind::GenericParam(name.lexeme.clone())),
+        )
     }
 
     pub fn get_name(&self) -> String {
@@ -233,7 +250,6 @@ impl SymbolTable {
         None
     }
 
-
     /// Store a top-level function
     pub fn declare_function(&mut self, name: &str, sym: Symbol) {
         self.functions.insert(name.to_string(), sym);
@@ -255,8 +271,13 @@ impl SymbolTable {
 
     pub fn user_defined_type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
-            TypeKind::Reference(inner) | TypeKind::MutRef(inner) | TypeKind::Array(inner, _) => self.user_defined_type_exists(inner),
-            TypeKind::Function(params, ret) => params.iter().any(|p| self.user_defined_type_exists(p)) || self.user_defined_type_exists(ret),
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) | TypeKind::Array(inner, _) => {
+                self.user_defined_type_exists(inner)
+            }
+            TypeKind::Function(params, ret) => {
+                params.iter().any(|p| self.user_defined_type_exists(p))
+                    || self.user_defined_type_exists(ret)
+            }
             _ => self.classes.contains_key(&ty.name.lexeme),
         }
     }
@@ -279,7 +300,10 @@ impl SymbolTable {
     pub fn register_extension_method(&mut self, target: &str, method: Symbol) {
         if let Some(class_sym) = self.classes.get_mut(target) {
             // If the target type already exists as a class, merge the method.
-            if let Symbol::Class { ref mut methods, .. } = class_sym {
+            if let Symbol::Class {
+                ref mut methods, ..
+            } = class_sym
+            {
                 methods.insert(method.get_name().clone(), method);
             }
         } else {
@@ -288,7 +312,10 @@ impl SymbolTable {
             // and insert the extension method.
             let dummy_token = Token::dummy(target);
             let mut new_class = Symbol::new_class(dummy_token);
-            if let Symbol::Class { ref mut methods, .. } = new_class {
+            if let Symbol::Class {
+                ref mut methods, ..
+            } = new_class
+            {
                 methods.insert(method.get_name().clone(), method);
             }
             self.classes.insert(target.to_string(), new_class);

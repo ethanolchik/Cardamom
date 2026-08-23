@@ -23,7 +23,12 @@ pub enum Modifier {
 pub fn member_visibility(modifiers: &[Modifier]) -> Modifier {
     modifiers
         .iter()
-        .find(|m| matches!(m, Modifier::Public | Modifier::Private | Modifier::Protected))
+        .find(|m| {
+            matches!(
+                m,
+                Modifier::Public | Modifier::Private | Modifier::Protected
+            )
+        })
         .cloned()
         // Members are private unless they say otherwise.
         .unwrap_or(Modifier::Private)
@@ -124,7 +129,7 @@ pub enum Expr {
         index: Box<Expr>,
         value: Box<Expr>,
         op: Token,
-        token: Token
+        token: Token,
     },
     Call {
         callee: Box<Expr>,
@@ -148,7 +153,7 @@ pub enum Expr {
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
-        token: Token
+        token: Token,
     },
     Cast {
         object: Box<Expr>,
@@ -182,7 +187,7 @@ pub enum Expr {
     Intrinsic {
         name: Token,
         arguments: Vec<Box<Expr>>,
-    }
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -231,7 +236,7 @@ pub enum Stmt {
         body: Vec<Box<Stmt>>,
         return_type: Type,
         modifiers: Vec<Modifier>,
-        generics: Vec<Token>
+        generics: Vec<Token>,
     },
     Import {
         /// The module being imported, e.g. `io` in `import io;`.
@@ -252,7 +257,7 @@ pub enum Stmt {
     Extension {
         target: Box<Type>,
         methods: Vec<Box<Stmt>>,
-    }
+    },
 }
 
 pub struct Module {
@@ -304,7 +309,6 @@ pub trait Visitor {
     fn visit_extension(&mut self, stmt: &Stmt);
 }
 
-
 impl Node for Expr {
     fn accept(&self, visitor: &mut dyn Visitor) {
         match self {
@@ -343,8 +347,8 @@ impl Stmt {
             Stmt::While { .. } => visitor.visit_while(self),
             Stmt::For { .. } => visitor.visit_for(self),
             Stmt::Return { .. } => visitor.visit_return(self),
-            Stmt::Break { .. }=> visitor.visit_break(self),
-            Stmt::Continue { .. }=> visitor.visit_continue(self),
+            Stmt::Break { .. } => visitor.visit_break(self),
+            Stmt::Continue { .. } => visitor.visit_continue(self),
             Stmt::Variable { .. } => visitor.visit_variable(self),
             Stmt::Function { .. } => visitor.visit_function(self),
             Stmt::Import { .. } => visitor.visit_import(self),

@@ -1,0 +1,14 @@
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+
+    // A method may use the class's `T`, but cannot add its own type parameter.
+    public map<U>(f: fn(T) -> U) -> U {
+        return f(this.value);
+    }
+}
+
+fn main() {
+    let b: Box<int> = new Box<int>(7);
+}

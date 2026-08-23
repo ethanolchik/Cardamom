@@ -35,7 +35,11 @@ impl Visitor for AstPrinter {
         println!("{}Literal: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Expr::Literal { value, .. } = expr {
-            println!("{}Value: {}", String::from("\t").repeat(self.indent), value.to_string());
+            println!(
+                "{}Value: {}",
+                String::from("\t").repeat(self.indent),
+                value.to_string()
+            );
         }
         self.indent -= 1;
     }
@@ -53,7 +57,11 @@ impl Visitor for AstPrinter {
         println!("{}Variable: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Expr::Variable { name, .. } = expr {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
         }
         self.indent -= 1;
     }
@@ -62,7 +70,11 @@ impl Visitor for AstPrinter {
         println!("{}Assignment: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Expr::Assignment { name, value, .. } = expr {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             value.accept(self);
         }
         self.indent -= 1;
@@ -71,7 +83,10 @@ impl Visitor for AstPrinter {
     fn visit_call(&mut self, expr: &Expr) {
         println!("{}Call: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Expr::Call { callee, arguments, .. } = expr {
+        if let Expr::Call {
+            callee, arguments, ..
+        } = expr
+        {
             callee.accept(self);
             for arg in arguments.iter() {
                 arg.accept(self);
@@ -83,7 +98,13 @@ impl Visitor for AstPrinter {
     fn visit_generic_call(&mut self, expr: &Expr) {
         println!("{}GenericCall: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Expr::GenericCall { callee, generics, arguments, .. } = expr {
+        if let Expr::GenericCall {
+            callee,
+            generics,
+            arguments,
+            ..
+        } = expr
+        {
             callee.accept(self);
             for g in generics.iter() {
                 printtype(g.clone(), self.indent);
@@ -100,7 +121,11 @@ impl Visitor for AstPrinter {
         self.indent += 1;
         if let Expr::MemberAccess { object, name, .. } = expr {
             object.accept(self);
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
         }
         self.indent -= 1;
     }
@@ -109,7 +134,11 @@ impl Visitor for AstPrinter {
         println!("{}StaticAccess: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Expr::StaticAccess { name, .. } = expr {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
         }
         self.indent -= 1;
     }
@@ -130,7 +159,7 @@ impl Visitor for AstPrinter {
         if let Expr::Cast { object, type_, .. } = expr {
             object.accept(self);
             println!("{}Type: ", String::from("\t").repeat(self.indent));
-            printtype(type_.clone(), self.indent+1);
+            printtype(type_.clone(), self.indent + 1);
         }
         self.indent -= 1;
     }
@@ -138,8 +167,15 @@ impl Visitor for AstPrinter {
     fn visit_class_init(&mut self, expr: &Expr) {
         println!("{}ClassInit: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Expr::ClassInit { name, arguments, .. } = expr {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        if let Expr::ClassInit {
+            name, arguments, ..
+        } = expr
+        {
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             for arg in arguments.iter() {
                 arg.accept(self);
             }
@@ -188,30 +224,59 @@ impl Visitor for AstPrinter {
     }
 
     fn visit_member_assignment(&mut self, stmt: &Expr) {
-        println!("{}MemberAssignment: ", String::from("\t").repeat(self.indent));
+        println!(
+            "{}MemberAssignment: ",
+            String::from("\t").repeat(self.indent)
+        );
         self.indent += 1;
-        if let Expr::MemberAssignment { object, name, value, .. } = stmt {
+        if let Expr::MemberAssignment {
+            object,
+            name,
+            value,
+            ..
+        } = stmt
+        {
             object.accept(self);
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             value.accept(self);
         }
         self.indent -= 1;
     }
 
     fn visit_static_assignment(&mut self, stmt: &Expr) {
-        println!("{}StaticAssignment: ", String::from("\t").repeat(self.indent));
+        println!(
+            "{}StaticAssignment: ",
+            String::from("\t").repeat(self.indent)
+        );
         self.indent += 1;
         if let Expr::StaticAssignment { name, value, .. } = stmt {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             value.accept(self);
         }
         self.indent -= 1;
     }
 
     fn visit_index_assignment(&mut self, stmt: &Expr) {
-        println!("{}IndexAssignment: ", String::from("\t").repeat(self.indent));
+        println!(
+            "{}IndexAssignment: ",
+            String::from("\t").repeat(self.indent)
+        );
         self.indent += 1;
-        if let Expr::IndexAssignment { object, index, value, .. } = stmt {
+        if let Expr::IndexAssignment {
+            object,
+            index,
+            value,
+            ..
+        } = stmt
+        {
             object.accept(self);
             index.accept(self);
             value.accept(self);
@@ -222,13 +287,23 @@ impl Visitor for AstPrinter {
     fn visit_closure(&mut self, expr: &Expr) {
         println!("{}Closure: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Expr::Closure { parameters, body, return_type, .. } = expr {
+        if let Expr::Closure {
+            parameters,
+            body,
+            return_type,
+            ..
+        } = expr
+        {
             for param in parameters.iter() {
-                println!("{}Name: {}", String::from("\t").repeat(self.indent), param.lexeme);
+                println!(
+                    "{}Name: {}",
+                    String::from("\t").repeat(self.indent),
+                    param.lexeme
+                );
             }
             body.accept(self);
             println!("{}Type: ", String::from("\t").repeat(self.indent));
-            printtype(return_type.clone(), self.indent+1);
+            printtype(return_type.clone(), self.indent + 1);
         }
         self.indent -= 1;
     }
@@ -256,7 +331,13 @@ impl Visitor for AstPrinter {
     fn visit_if(&mut self, stmt: &Stmt) {
         println!("{}If: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::If { condition, then_branch, else_branch, .. } = stmt {
+        if let Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } = stmt
+        {
             condition.accept(self);
             then_branch.accept(self);
             if let Some(else_branch) = else_branch {
@@ -269,7 +350,10 @@ impl Visitor for AstPrinter {
     fn visit_while(&mut self, stmt: &Stmt) {
         println!("{}While: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::While { condition, body, .. } = stmt {
+        if let Stmt::While {
+            condition, body, ..
+        } = stmt
+        {
             condition.accept(self);
             body.accept(self);
         }
@@ -279,7 +363,14 @@ impl Visitor for AstPrinter {
     fn visit_for(&mut self, stmt: &Stmt) {
         println!("{}For: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::For { initialiser, condition, increment, body, .. } = stmt {
+        if let Stmt::For {
+            initialiser,
+            condition,
+            increment,
+            body,
+            ..
+        } = stmt
+        {
             if let Some(initialiser) = initialiser {
                 initialiser.accept(self);
             }
@@ -316,8 +407,19 @@ impl Visitor for AstPrinter {
     fn visit_function(&mut self, stmt: &Stmt) {
         println!("{}Function: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Function { name, params, body, return_type, .. } = stmt {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        if let Stmt::Function {
+            name,
+            params,
+            body,
+            return_type,
+            ..
+        } = stmt
+        {
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             for param in params.iter() {
                 param.accept(self);
             }
@@ -325,7 +427,7 @@ impl Visitor for AstPrinter {
                 stmt.accept(self);
             }
             println!("{}Type: ", String::from("\t").repeat(self.indent));
-            printtype(return_type.clone(), self.indent+1);
+            printtype(return_type.clone(), self.indent + 1);
         }
         self.indent -= 1;
     }
@@ -333,18 +435,38 @@ impl Visitor for AstPrinter {
     fn visit_variable(&mut self, stmt: &Stmt) {
         println!("{}Variable: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Variable { name, initialiser, type_, modifiers, derived, .. } = stmt {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        if let Stmt::Variable {
+            name,
+            initialiser,
+            type_,
+            modifiers,
+            derived,
+            ..
+        } = stmt
+        {
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             if let Some(initialiser) = initialiser {
                 initialiser.accept(self);
             }
             println!("{}Type: ", String::from("\t").repeat(self.indent));
-            printtype(type_.clone(), self.indent+1);
+            printtype(type_.clone(), self.indent + 1);
             for modifier in modifiers.iter() {
-                println!("{}Modifier: {}", String::from("\t").repeat(self.indent), modifier.to_string());
+                println!(
+                    "{}Modifier: {}",
+                    String::from("\t").repeat(self.indent),
+                    modifier.to_string()
+                );
             }
             for der in derived.iter() {
-                println!("{}Derived: {}", String::from("\t").repeat(self.indent), der.to_string());
+                println!(
+                    "{}Derived: {}",
+                    String::from("\t").repeat(self.indent),
+                    der.to_string()
+                );
             }
         }
         self.indent -= 1;
@@ -352,7 +474,11 @@ impl Visitor for AstPrinter {
 
     fn visit_intrinsic(&mut self, expr: &Expr) {
         if let Expr::Intrinsic { name, arguments } = expr {
-            println!("{}Intrinsic: @{}", String::from("\t").repeat(self.indent), name.lexeme);
+            println!(
+                "{}Intrinsic: @{}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             self.indent += 1;
             for argument in arguments.iter() {
                 argument.accept(self);
@@ -365,8 +491,16 @@ impl Visitor for AstPrinter {
         println!("{}Import: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
         if let Stmt::Import { name, alias, .. } = stmt {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
-            println!("{}Alias: {}", String::from("\t").repeat(self.indent), alias.lexeme);
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
+            println!(
+                "{}Alias: {}",
+                String::from("\t").repeat(self.indent),
+                alias.lexeme
+            );
         }
         self.indent -= 1;
     }
@@ -383,13 +517,33 @@ impl Visitor for AstPrinter {
     fn visit_class(&mut self, stmt: &Stmt) {
         println!("{}Class: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Class { name, generics, modifier, fields, methods, .. } = stmt {
-            println!("{}Name: {}", String::from("\t").repeat(self.indent), name.lexeme);
+        if let Stmt::Class {
+            name,
+            generics,
+            modifier,
+            fields,
+            methods,
+            ..
+        } = stmt
+        {
+            println!(
+                "{}Name: {}",
+                String::from("\t").repeat(self.indent),
+                name.lexeme
+            );
             for g in generics.iter() {
-                println!("{}Generic: {}", String::from("\t").repeat(self.indent), g.lexeme);
+                println!(
+                    "{}Generic: {}",
+                    String::from("\t").repeat(self.indent),
+                    g.lexeme
+                );
             }
             for modi in modifier.iter() {
-                println!("{}Modifier: {:?}", String::from("\t").repeat(self.indent), modi);
+                println!(
+                    "{}Modifier: {:?}",
+                    String::from("\t").repeat(self.indent),
+                    modi
+                );
             }
             for field in fields.iter() {
                 field.accept(self);
@@ -432,7 +586,7 @@ fn printtype(type_: Type, indent: usize) {
         TypeKind::Array(ref inner, size) => {
             println!("{}Array: ", String::from("\t").repeat(indent));
             printtype(*inner.clone(), indent + 1);
-            println!("{}Size: {}", String::from("\t").repeat(indent+1), size);
+            println!("{}Size: {}", String::from("\t").repeat(indent + 1), size);
         }
         TypeKind::Function(ref params, ref return_type) => {
             println!("{}Function: ", String::from("\t").repeat(indent));
@@ -458,17 +612,27 @@ fn printtype(type_: Type, indent: usize) {
         TypeKind::Void => {
             println!("{}Void", String::from("\t").repeat(indent));
         }
-        TypeKind::User(ref name) => {
+        TypeKind::User(ref module, ref name) => {
             println!("{}User: ", String::from("\t").repeat(indent));
-            println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
+            println!(
+                "{}Module: {}",
+                String::from("\t").repeat(indent + 1),
+                module
+            );
+            println!("{}Name: {}", String::from("\t").repeat(indent + 1), name);
         }
         TypeKind::GenericParam(ref name) => {
             println!("{}Generic: ", String::from("\t").repeat(indent));
-            println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
+            println!("{}Name: {}", String::from("\t").repeat(indent + 1), name);
         }
-        TypeKind::GenericInstance(ref name, ref generics) => {
+        TypeKind::GenericInstance(ref module, ref name, ref generics) => {
             println!("{}GenericInstance: ", String::from("\t").repeat(indent));
-            println!("{}Name: {}", String::from("\t").repeat(indent+1), name);
+            println!(
+                "{}Module: {}",
+                String::from("\t").repeat(indent + 1),
+                module
+            );
+            println!("{}Name: {}", String::from("\t").repeat(indent + 1), name);
             for g in generics.iter() {
                 printtype(g.clone(), indent + 1);
             }

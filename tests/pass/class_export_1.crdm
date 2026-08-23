@@ -1,0 +1,18 @@
+import exported_class as boxes;
+
+// Deliberately shares a source-level name with the imported class. Module ownership
+// must keep their generated C++ names distinct.
+class Box(private value: string) {
+    public get() -> string {
+        return this.value;
+    }
+}
+
+fn main() {
+    let remote: boxes.Box<int> = new boxes.Box<int>(7);
+    let counter: boxes.Counter = new boxes.Counter(8);
+    let local: Box = new Box("local");
+    let n: int = remote.get();
+    let next: int = counter.get();
+    let text: string = local.get();
+}

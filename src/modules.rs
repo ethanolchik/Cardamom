@@ -226,7 +226,10 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
         let local_dirs = local_roots(&module.path);
 
         for stmt in &module.ast.statements {
-            let Stmt::Import { name: import_name, .. } = &**stmt else {
+            let Stmt::Import {
+                name: import_name, ..
+            } = &**stmt
+            else {
                 continue;
             };
 

@@ -146,7 +146,8 @@ impl<'a> CallCollector<'a> {
             // `foo()` refers to a function of the module being walked.
             Expr::Variable { name } => {
                 if self.context.locals.contains(&name.lexeme) {
-                    self.found.push((self.module.to_string(), name.lexeme.clone()));
+                    self.found
+                        .push((self.module.to_string(), name.lexeme.clone()));
                 }
             }
             // `io.println()` refers to a function of an imported module.
@@ -169,7 +170,11 @@ impl<'a> CallCollector<'a> {
                     self.walk_stmt(s);
                 }
             }
-            Stmt::If { condition, then_branch, else_branch } => {
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.walk_expr(condition);
                 self.walk_stmt(then_branch);
                 if let Some(else_branch) = else_branch {
@@ -180,7 +185,12 @@ impl<'a> CallCollector<'a> {
                 self.walk_expr(condition);
                 self.walk_stmt(body);
             }
-            Stmt::For { initialiser, condition, increment, body } => {
+            Stmt::For {
+                initialiser,
+                condition,
+                increment,
+                body,
+            } => {
                 if let Some(initialiser) = initialiser {
                     self.walk_stmt(initialiser);
                 }
@@ -217,14 +227,18 @@ impl<'a> CallCollector<'a> {
 
     fn walk_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Call { callee, arguments, .. } => {
+            Expr::Call {
+                callee, arguments, ..
+            } => {
                 self.record_callee(callee);
                 self.walk_expr(callee);
                 for argument in arguments {
                     self.walk_expr(argument);
                 }
             }
-            Expr::GenericCall { callee, arguments, .. } => {
+            Expr::GenericCall {
+                callee, arguments, ..
+            } => {
                 self.record_callee(callee);
                 self.walk_expr(callee);
                 for argument in arguments {
@@ -245,7 +259,12 @@ impl<'a> CallCollector<'a> {
             Expr::Assignment { value, .. }
             | Expr::MemberAssignment { value, .. }
             | Expr::StaticAssignment { value, .. } => self.walk_expr(value),
-            Expr::IndexAssignment { object, index, value, .. } => {
+            Expr::IndexAssignment {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 self.walk_expr(object);
                 self.walk_expr(index);
                 self.walk_expr(value);
