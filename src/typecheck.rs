@@ -38,9 +38,12 @@ pub struct TypeChecker<'a> {
     current_expected_type: Option<Type>,
     in_static_context: bool,
     in_call: bool,
-    /// The name of the function being checked, for attributing generic call sites.
+    /// The name of the function being checked, for diagnostics and call-site metadata.
     current_function: Option<String>,
-    /// Type parameters of the function being checked. A call made inside a generic
+    /// The generic function or class whose specialisation causes dependencies found in
+    /// the current body. Keys share the instantiation namespace (`foo`, `class Foo`).
+    current_generic_owner: Option<String>,
+    /// Type parameters of the function or class being checked. A use made inside a generic
     /// function is not a concrete instantiation, so these names mark types that are
     /// still standing in for something else.
     current_function_generics: Vec<String>,
@@ -65,11 +68,11 @@ pub struct TypeChecker<'a> {
     is_library: bool,
 }
 
-/// A generic call appearing inside a generic function.
+/// A generic dependency appearing inside another generic owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GenericCallSite {
     pub caller_module: String,
-    /// The generic function containing the call.
+    /// The generic function or class containing the dependency.
     pub caller: String,
     pub callee_module: String,
     /// The generic function being called.
@@ -139,6 +142,7 @@ impl<'a> TypeChecker<'a> {
             in_static_context: false,
             in_call: false,
             current_function: None,
+            current_generic_owner: None,
             current_function_generics: Vec::new(),
 
             module_exports: HashMap::new(),
@@ -1009,6 +1013,63 @@ impl<'a> TypeChecker<'a> {
         Type { kind, ..ty.clone() }
     }
 
+    /// Records generic classes mentioned by a type declaration.
+    ///
+    /// This catches dependencies that have no constructor expression to visit, such as
+    /// `class Outer<T> { private values: Inner<T>[]; }`.
+    fn record_type_instantiations(&mut self, ty: &Type) {
+        match &ty.kind {
+            TypeKind::GenericInstance(module, name, arguments) => {
+                for argument in arguments {
+                    self.record_type_instantiations(argument);
+                }
+
+                let owner = if module.is_empty() {
+                    self.module_name.clone()
+                } else {
+                    module.clone()
+                };
+                let generics = if owner == self.module_name {
+                    match self.symtable.lookup_class(name) {
+                        Some(Symbol::Class { generics, .. }) => generics.clone(),
+                        _ => return,
+                    }
+                } else {
+                    match self
+                        .module_exports
+                        .get(&owner)
+                        .and_then(|exports| exports.classes.get(name))
+                    {
+                        Some(class) => class.generics.clone(),
+                        None => return,
+                    }
+                };
+                let substitutions: HashMap<String, TypeKind> = generics
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().map(|argument| argument.kind.clone()))
+                    .collect();
+
+                self.record_class_instantiation(&owner, name, &generics, &substitutions);
+            }
+            TypeKind::Array(inner, _)
+            | TypeKind::Reference(inner)
+            | TypeKind::MutRef(inner) => self.record_type_instantiations(inner),
+            TypeKind::Function(params, return_type) => {
+                for param in params {
+                    self.record_type_instantiations(param);
+                }
+                self.record_type_instantiations(return_type);
+            }
+            TypeKind::Tuple(elements) => {
+                for element in elements {
+                    self.record_type_instantiations(element);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Binds a class's type parameters to the arguments of one of its instantiations.
     fn class_substitution(
         &self,
@@ -1078,10 +1139,10 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .any(|argument| self.is_unresolved(argument))
         {
-            if let Some(caller) = self.current_function.clone() {
+            if let Some(caller) = self.current_generic_owner.clone() {
                 let site = GenericCallSite {
                     caller_module: self.module_name.clone(),
-                    caller: Self::function_key(&caller),
+                    caller,
                     callee_module: module_name.to_string(),
                     callee: Self::class_key(name),
                     arguments,
@@ -1148,7 +1209,7 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .any(|argument| self.is_unresolved(argument))
         {
-            if let Some(caller) = self.current_function.clone() {
+            if let Some(caller) = self.current_generic_owner.clone() {
                 let site = GenericCallSite {
                     caller_module: self.module_name.clone(),
                     caller,
@@ -3862,12 +3923,24 @@ impl<'a> Visitor for TypeChecker<'a> {
             let old_function =
                 std::mem::replace(&mut self.current_function, Some(name.lexeme.clone()));
 
-            if !generic_names.is_empty() {
-                let module = self.module_name.clone();
-                self.function_generics
-                    .entry(module)
-                    .or_default()
-                    .insert(name.lexeme.clone(), generic_names.clone());
+            // A free generic function owns dependencies found in its body. An ordinary
+            // method of a generic class keeps the class as its owner, because all such
+            // methods are emitted as part of each class specialisation.
+            let owner = if self.current_class.is_none() && !generics.is_empty() {
+                Some(Self::function_key(&name.lexeme))
+            } else {
+                self.current_generic_owner.clone()
+            };
+            let old_generic_owner =
+                std::mem::replace(&mut self.current_generic_owner, owner.clone());
+
+            if let Some(owner) = owner {
+                if self.current_class.is_none() && !generics.is_empty() {
+                    self.function_generics
+                        .entry(self.module_name.clone())
+                        .or_default()
+                        .insert(owner, generic_names.clone());
+                }
             }
 
             // Insert parameters. Their declared types are generalised so that a type
@@ -3896,6 +3969,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             // End scope
             self.current_function_generics = old_generics;
             self.current_function = old_function;
+            self.current_generic_owner = old_generic_owner;
             self.symtable.end_scope();
 
             // restore old function return
@@ -4188,8 +4262,27 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
             let old_generics =
                 std::mem::replace(&mut self.current_function_generics, generic_names.clone());
+            let class_owner = if generic_names.is_empty() {
+                None
+            } else {
+                Some(Self::class_key(&class_name))
+            };
+            let old_generic_owner =
+                std::mem::replace(&mut self.current_generic_owner, class_owner.clone());
+
+            if let Some(owner) = class_owner {
+                self.function_generics
+                    .entry(self.module_name.clone())
+                    .or_default()
+                    .insert(owner, generic_names.clone());
+            }
 
             for field in fields {
+                if let Stmt::Variable { type_, .. } = &**field {
+                    let field_type =
+                        self.qualify_type(&Self::generalise(type_, &generic_names));
+                    self.record_type_instantiations(&field_type);
+                }
                 field.accept(self);
             }
 
@@ -4215,6 +4308,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             }
 
             self.current_function_generics = old_generics;
+            self.current_generic_owner = old_generic_owner;
             self.symtable.end_scope();
             self.class_stack.pop();
             self.current_class = self.class_stack.last().cloned();

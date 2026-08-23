@@ -289,6 +289,19 @@ impl CppCodeGenerator {
                     .iter()
                     .filter(|stmt| matches!(&***stmt, Stmt::Class { .. }))
                     .collect();
+                let classes = Self::order_classes_by_dependencies(
+                    &classes,
+                    &gen.current_module,
+                );
+
+                // Forward-declare every concrete class name first. A generic class may
+                // store another specialised class declared later in the source.
+                for class in &classes {
+                    gen.write_class_forward_declaration(class);
+                }
+                if !classes.is_empty() {
+                    gen.writeln("");
+                }
 
                 for class in &classes {
                     gen.write_class_declaration(class);
@@ -543,6 +556,110 @@ impl CppCodeGenerator {
                 return candidates;
             }
         }
+    }
+
+    /// Orders classes so a class used as a field is complete before its owner is
+    /// defined. Forward declarations alone are insufficient for by-value fields.
+    fn order_classes_by_dependencies<'b>(
+        classes: &[&'b Box<Stmt>],
+        current_module: &str,
+    ) -> Vec<&'b Box<Stmt>> {
+        fn type_dependencies(ty: &Type, current_module: &str, output: &mut HashSet<String>) {
+            match &ty.kind {
+                TypeKind::User(module, name) => {
+                    if module.is_empty() || module == current_module {
+                        output.insert(name.clone());
+                    }
+                }
+                TypeKind::GenericInstance(module, name, arguments) => {
+                    if module.is_empty() || module == current_module {
+                        output.insert(name.clone());
+                    }
+                    for argument in arguments {
+                        type_dependencies(argument, current_module, output);
+                    }
+                }
+                TypeKind::Array(inner, _)
+                | TypeKind::Reference(inner)
+                | TypeKind::MutRef(inner) => type_dependencies(inner, current_module, output),
+                TypeKind::Function(params, return_type) => {
+                    for param in params {
+                        type_dependencies(param, current_module, output);
+                    }
+                    type_dependencies(return_type, current_module, output);
+                }
+                TypeKind::Tuple(elements) => {
+                    for element in elements {
+                        type_dependencies(element, current_module, output);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn visit(
+            index: usize,
+            dependencies: &[Vec<usize>],
+            state: &mut [u8],
+            ordered: &mut Vec<usize>,
+        ) {
+            if state[index] == 2 {
+                return;
+            }
+            // Leave cycles in a deterministic source-based order; a recursive by-value
+            // layout will then be rejected by C++ until Cardamom diagnoses it directly.
+            if state[index] == 1 {
+                return;
+            }
+            state[index] = 1;
+            for dependency in &dependencies[index] {
+                visit(*dependency, dependencies, state, ordered);
+            }
+            state[index] = 2;
+            ordered.push(index);
+        }
+
+        let names: HashMap<String, usize> = classes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, stmt)| match &***stmt {
+                Stmt::Class { name, .. } => Some((name.lexeme.clone(), index)),
+                _ => None,
+            })
+            .collect();
+        let dependencies: Vec<Vec<usize>> = classes
+            .iter()
+            .map(|stmt| {
+                let mut found = HashSet::new();
+                if let Stmt::Class { fields, .. } = &***stmt {
+                    for field in fields {
+                        if let Stmt::Variable { type_, .. } = &**field {
+                            type_dependencies(type_, current_module, &mut found);
+                        }
+                    }
+                }
+                found
+                    .into_iter()
+                    .filter_map(|name| names.get(&name).copied())
+                    .collect()
+            })
+            .collect();
+
+        let mut state = vec![0; classes.len()];
+        let mut ordered = Vec::with_capacity(classes.len());
+        for index in 0..classes.len() {
+            visit(index, &dependencies, &mut state, &mut ordered);
+        }
+        ordered.into_iter().map(|index| classes[index]).collect()
+    }
+
+    /// Emits forward declarations for every concrete specialisation of a class.
+    fn write_class_forward_declaration(&mut self, stmt: &Stmt) {
+        self.for_each_class_specialisation(stmt, Self::write_class_forward_declaration_body);
+    }
+
+    fn write_class_forward_declaration_body(&mut self, _stmt: &Stmt, class_name: &str) {
+        self.writeln(&format!("class {};", class_name));
     }
 
     /// Emits the `class X { .. };` block: fields, method prototypes, constructor.

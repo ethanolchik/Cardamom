@@ -1,0 +1,27 @@
+public fn echo<T>(value: T) -> T {
+    return value;
+}
+
+public class Outer<T>(private inner: Inner<T>) {
+    public get() -> T {
+        return echo(this.inner.get());
+    }
+}
+
+public class Inner<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+}
+
+public class Root<T> {
+    private values: Middle<T>[] = [];
+}
+
+public class Middle<T> {
+    private values: Leaf<T>[] = [];
+}
+
+public class Leaf<T> {
+    private values: T[] = [];
+}

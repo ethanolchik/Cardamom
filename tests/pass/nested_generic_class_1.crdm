@@ -1,0 +1,11 @@
+import io;
+import nested_generic;
+
+fn main() {
+    let value: nested_generic.Outer<string> =
+        new nested_generic.Outer<string>(
+            new nested_generic.Inner<string>("nested")
+        );
+    let root: nested_generic.Root<int> = new nested_generic.Root<int>();
+    io.println(value.get());
+}
