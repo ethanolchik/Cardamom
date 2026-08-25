@@ -1,0 +1,26 @@
+trait Eq {
+    equals(other: &Self) -> int;
+}
+
+class Bad {}
+
+class Holder<T> where T: Eq {}
+
+class Factory {
+    public make<T>(value: T) -> T where T: Eq {
+        return value;
+    }
+}
+
+fn equal<T>(left: &T, right: &T) -> int where T: Eq {
+    return left.equals(right);
+}
+
+fn main() {
+    let left: Bad = new Bad();
+    let right: Bad = new Bad();
+    let result: int = equal(&left, &right);
+    let holder: Holder<Bad> = new Holder<Bad>();
+    let factory: Factory = new Factory();
+    let made: Bad = factory.make(new Bad());
+}

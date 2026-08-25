@@ -6,6 +6,7 @@ use crate::modules::Program;
 use crate::reachable::{self, FunctionRef};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
+use crate::typecheck::TraitCallSite;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
@@ -18,6 +19,14 @@ pub type ExprTypes = HashMap<*const Expr, Type>;
 
 /// The type arguments each generic call site resolved to, keyed by AST node.
 pub type CallInstantiations = HashMap<*const Expr, Vec<TypeKind>>;
+pub type TraitCallSites = HashMap<*const Expr, TraitCallSite>;
+
+#[derive(Clone)]
+struct ExplicitImpl {
+    module: String,
+    trait_type: TypeKind,
+    target: TypeKind,
+}
 
 /// Every distinct instantiation of each generic function, keyed by module then name.
 pub use crate::typecheck::Instantiations;
@@ -41,6 +50,9 @@ pub struct CppCodeGenerator {
     extra_includes: BTreeSet<String>,
     /// Type arguments resolved at each generic call site.
     call_instantiations: CallInstantiations,
+    trait_call_sites: TraitCallSites,
+    explicit_impls: Vec<ExplicitImpl>,
+    in_impl_method: bool,
     /// Which specialisations of each generic function need emitting.
     instantiations: Instantiations,
     /// Type parameter bindings for the specialisation currently being emitted, applied
@@ -61,6 +73,9 @@ impl CppCodeGenerator {
             expr_types: ExprTypes::new(),
             in_synthesised_int_main: false,
             call_instantiations: CallInstantiations::new(),
+            trait_call_sites: TraitCallSites::new(),
+            explicit_impls: Vec::new(),
+            in_impl_method: false,
             instantiations: Instantiations::new(),
             current_substitution: HashMap::new(),
             imports: HashMap::new(),
@@ -87,6 +102,10 @@ impl CppCodeGenerator {
     ) {
         self.call_instantiations = call_instantiations;
         self.instantiations = instantiations;
+    }
+
+    pub fn set_trait_call_sites(&mut self, sites: TraitCallSites) {
+        self.trait_call_sites = sites;
     }
 
     /// The C++ symbol for one specialisation of a generic function.
@@ -304,12 +323,177 @@ impl CppCodeGenerator {
         }
     }
 
+    fn generalise_impl_kind(kind: &TypeKind, generics: &[String]) -> TypeKind {
+        match kind {
+            TypeKind::User(_, name) if generics.contains(name) => {
+                TypeKind::GenericParam(name.clone())
+            }
+            TypeKind::GenericInstance(module, name, arguments) => TypeKind::GenericInstance(
+                module.clone(),
+                name.clone(),
+                arguments
+                    .iter()
+                    .map(|argument| Type::new(
+                        argument.name.clone(),
+                        Self::generalise_impl_kind(&argument.kind, generics),
+                    ))
+                    .collect(),
+            ),
+            TypeKind::Array(inner, depth) => TypeKind::Array(
+                Box::new(Type::new(
+                    inner.name.clone(),
+                    Self::generalise_impl_kind(&inner.kind, generics),
+                )),
+                *depth,
+            ),
+            _ => kind.clone(),
+        }
+    }
+
+    fn match_impl_type(
+        pattern: &TypeKind,
+        actual: &TypeKind,
+        substitutions: &mut HashMap<String, TypeKind>,
+    ) -> bool {
+        match (pattern, actual) {
+            (TypeKind::GenericParam(name), actual) => {
+                if let Some(existing) = substitutions.get(name) {
+                    existing == actual
+                } else {
+                    substitutions.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+            (
+                TypeKind::GenericInstance(pm, pn, pa),
+                TypeKind::GenericInstance(am, an, aa),
+            ) if pm == am && pn == an && pa.len() == aa.len() => pa
+                .iter()
+                .zip(aa)
+                .all(|(p, a)| Self::match_impl_type(&p.kind, &a.kind, substitutions)),
+            (TypeKind::Array(pattern, pd), TypeKind::Array(actual, ad)) if pd == ad => {
+                Self::match_impl_type(&pattern.kind, &actual.kind, substitutions)
+            }
+            (TypeKind::Reference(pattern), TypeKind::Reference(actual))
+            | (TypeKind::MutRef(pattern), TypeKind::MutRef(actual)) => {
+                Self::match_impl_type(&pattern.kind, &actual.kind, substitutions)
+            }
+            _ => pattern == actual,
+        }
+    }
+
+    fn impl_key(trait_type: &TypeKind, target: &TypeKind) -> String {
+        format!("impl {} for {}", trait_type, target)
+    }
+
+    fn owned_type_kind(module: &str, kind: &TypeKind) -> TypeKind {
+        match kind {
+            TypeKind::User(owner, name) if owner.is_empty() => {
+                TypeKind::User(module.to_string(), name.clone())
+            }
+            TypeKind::GenericInstance(owner, name, arguments) if owner.is_empty() => {
+                TypeKind::GenericInstance(
+                    module.to_string(),
+                    name.clone(),
+                    arguments.clone(),
+                )
+            }
+            _ => kind.clone(),
+        }
+    }
+
+    fn impl_specialisations(
+        &self,
+        trait_type: &TypeKind,
+        target: &TypeKind,
+        generics: &[Token],
+    ) -> Vec<HashMap<String, TypeKind>> {
+        if generics.is_empty() {
+            return vec![HashMap::new()];
+        }
+        self.instantiations
+            .get(&self.current_module)
+            .and_then(|module| module.get(&Self::impl_key(trait_type, target)))
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|arguments| {
+                generics
+                    .iter()
+                    .map(|generic| generic.lexeme.clone())
+                    .zip(arguments)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn impl_name(module: &str, trait_type: &TypeKind, target: &TypeKind, method: &str) -> String {
+        format!(
+            "{}_impl_{}_{}_{}",
+            Self::mangled(module, "trait"),
+            Self::type_tag(trait_type),
+            Self::type_tag(target),
+            Self::ident(method)
+        )
+    }
+
     /// Generate C++ code for a whole program: every imported module, then the program
     /// itself, in dependency order so definitions precede their uses.
     pub fn generate_program(&mut self, program: &Program) -> String {
         self.live_functions = Some(reachable::analyse(program));
+        self.explicit_impls = program
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module.ast.statements.iter().filter_map(move |stmt| match &**stmt {
+                    Stmt::Impl {
+                        trait_type,
+                        target,
+                        generics,
+                        ..
+                    } => {
+                        let generic_names: Vec<String> = generics
+                            .iter()
+                            .map(|generic| generic.lexeme.clone())
+                            .collect();
+                        Some(ExplicitImpl {
+                            module: module.name.clone(),
+                            trait_type: Self::owned_type_kind(
+                                &module.name,
+                                &Self::generalise_impl_kind(
+                                    &trait_type.kind,
+                                    &generic_names,
+                                ),
+                            ),
+                            target: Self::owned_type_kind(
+                                &module.name,
+                                &Self::generalise_impl_kind(&target.kind, &generic_names),
+                            ),
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
 
         let mut body = String::new();
+
+        // Generic functions in an earlier dependency can be specialised with a class
+        // from a later, unrelated module. Forward-declare every concrete class across
+        // the whole program before emitting any module prototypes.
+        let forward_declarations = self.capture_output(|gen| {
+            for module in &program.modules {
+                gen.current_module = module.name.clone();
+                gen.imports = module.imports.clone();
+                for stmt in &module.ast.statements {
+                    if matches!(&**stmt, Stmt::Class { .. }) {
+                        gen.write_class_forward_declaration(stmt);
+                    }
+                }
+            }
+            gen.writeln("");
+        });
+        body.push_str(&forward_declarations);
 
         for module in &program.modules {
             self.current_module = module.name.clone();
@@ -343,33 +527,51 @@ impl CppCodeGenerator {
                     &gen.current_module,
                 );
 
-                // Forward-declare every concrete class name first. A generic class may
-                // store another specialised class declared later in the source.
-                for class in &classes {
-                    gen.write_class_forward_declaration(class);
-                }
-                if !classes.is_empty() {
-                    gen.writeln("");
-                }
-
                 for class in &classes {
                     gen.write_class_declaration(class);
                 }
 
                 gen.write_function_prototypes(&module.ast);
+                gen.write_impl_prototypes(&module.ast);
+            });
 
+            body.push_str(&module_code);
+        }
+
+        // Only emit bodies after every class is complete. A generic function in one
+        // module may be specialised with a class from an unrelated later module.
+        for module in &program.modules {
+            self.current_module = module.name.clone();
+            self.imports = module.imports.clone();
+            self.local_functions = module
+                .ast
+                .statements
+                .iter()
+                .filter_map(|stmt| match &**stmt {
+                    Stmt::Function { name, .. } => Some(name.lexeme.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let definitions = self.capture_output(|gen| {
+                let classes: Vec<&Box<Stmt>> = module
+                    .ast
+                    .statements
+                    .iter()
+                    .filter(|stmt| matches!(&***stmt, Stmt::Class { .. }))
+                    .collect();
+                let classes =
+                    Self::order_classes_by_dependencies(&classes, &gen.current_module);
                 for class in &classes {
                     gen.write_class_definitions(class);
                 }
-
                 for stmt in &module.ast.statements {
                     if !matches!(&**stmt, Stmt::Class { .. }) {
                         stmt.accept(gen);
                     }
                 }
             });
-
-            body.push_str(&module_code);
+            body.push_str(&definitions);
         }
 
         // A C++ program needs an entry point even when the source has none.
@@ -1076,6 +1278,74 @@ impl CppCodeGenerator {
             .any(|stmt| matches!(&**stmt, Stmt::Function { name, .. } if name.lexeme == "main"))
     }
 
+    fn write_impl_prototypes(&mut self, module: &Module) {
+        for stmt in &module.statements {
+            let Stmt::Impl {
+                trait_type,
+                target,
+                generics,
+                methods,
+                ..
+            } = &**stmt
+            else {
+                continue;
+            };
+            let generic_names: Vec<String> =
+                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let trait_pattern = Self::owned_type_kind(
+                &self.current_module,
+                &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
+            );
+            let target_pattern = Self::owned_type_kind(
+                &self.current_module,
+                &Self::generalise_impl_kind(&target.kind, &generic_names),
+            );
+            for substitution in
+                self.impl_specialisations(&trait_pattern, &target_pattern, generics)
+            {
+                let previous = std::mem::replace(
+                    &mut self.current_substitution,
+                    substitution.clone(),
+                );
+                let resolved_trait = Type::new(trait_type.name.clone(), trait_pattern.clone())
+                    .apply_substitution(&substitution)
+                    .kind;
+                let resolved_target = Type::new(target.name.clone(), target_pattern.clone())
+                    .apply_substitution(&substitution)
+                    .kind;
+                for method in methods {
+                    if let Stmt::Function {
+                        name,
+                        params,
+                        return_type,
+                        ..
+                    } = &**method
+                    {
+                        let mut parameters =
+                            format!("const {}& self", self.translate_type(target));
+                        let rest = self.translate_params(params);
+                        if !rest.is_empty() {
+                            parameters.push_str(", ");
+                            parameters.push_str(&rest);
+                        }
+                        self.writeln(&format!(
+                            "{} {}({});",
+                            self.translate_type(return_type),
+                            Self::impl_name(
+                                &self.current_module,
+                                &resolved_trait,
+                                &resolved_target,
+                                &name.lexeme,
+                            ),
+                            parameters
+                        ));
+                    }
+                }
+                self.current_substitution = previous;
+            }
+        }
+    }
+
     fn write_function_prototypes(&mut self, module: &Module) {
         let mut wrote_any = false;
         for stmt in &module.statements {
@@ -1245,10 +1515,10 @@ impl CppCodeGenerator {
 
     /// Chooses `.` or `->` for a member access. `this` is a pointer in C++, and
     /// references/pointers are dereferenced, so those all use `->`.
-    fn member_access_operator(object: &Expr) -> &'static str {
+    fn member_access_operator(&self, object: &Expr) -> &'static str {
         match object {
             Expr::Reference { .. } | Expr::MutReference { .. } => "->",
-            Expr::Variable { name } if name.lexeme == "this" => "->",
+            Expr::Variable { name } if name.lexeme == "this" && !self.in_impl_method => "->",
             _ => ".",
         }
     }
@@ -1294,6 +1564,59 @@ impl CppCodeGenerator {
         let is_array = matches!(receiver_kind, Some(TypeKind::Array(_, _)));
         let is_string = matches!(receiver_kind, Some(TypeKind::String));
 
+        if let Some(site) = self.trait_call_sites.get(&(call as *const Expr)) {
+            let concrete_trait = Type::new(
+                Token::dummy("<trait>"),
+                site.trait_type.kind.clone(),
+            )
+            .apply_substitution(&self.current_substitution)
+            .kind;
+            let concrete = receiver_kind.map(|kind| self.resolve_type_argument(kind));
+            if let Some(concrete) = concrete {
+                if let Some((implementation, substitutions)) = self
+                    .explicit_impls
+                    .iter()
+                    .find_map(|implementation| {
+                        let mut substitutions = HashMap::new();
+                        if Self::match_impl_type(
+                            &implementation.trait_type,
+                            &concrete_trait,
+                            &mut substitutions,
+                        ) && Self::match_impl_type(
+                            &implementation.target,
+                            &concrete,
+                            &mut substitutions,
+                        ) {
+                            Some((implementation, substitutions))
+                        } else {
+                            None
+                        }
+                    })
+                {
+                    let resolved_trait = Type::new(
+                        Token::dummy("<trait>"),
+                        implementation.trait_type.clone(),
+                    )
+                    .apply_substitution(&substitutions)
+                    .kind;
+                    self.output.push_str(&Self::impl_name(
+                        &implementation.module,
+                        &resolved_trait,
+                        &concrete,
+                        &site.method,
+                    ));
+                    self.output.push('(');
+                    object.accept(self);
+                    if !arguments.is_empty() {
+                        self.output.push_str(", ");
+                    }
+                    self.write_call_arguments(arguments);
+                    self.output.push(')');
+                    return;
+                }
+            }
+        }
+
         match (name.lexeme.as_str(), is_array, is_string) {
             ("push", true, _) => {
                 object.accept(self);
@@ -1329,9 +1652,9 @@ impl CppCodeGenerator {
             }
             _ => {
                 object.accept(self);
-                // `this` is a pointer in C++, so calling a method on it needs `->`,
-                // exactly as plain member access does.
-                self.output.push_str(Self::member_access_operator(object));
+                // `this` is a pointer in class methods; explicit impls lower it to the
+                // free function's `self` reference instead.
+                self.output.push_str(self.member_access_operator(object));
                 self.output
                     .push_str(&self.method_call_name(call, &name.lexeme));
                 self.output.push('(');
@@ -1660,7 +1983,11 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_variable_expr(&mut self, expr: &Expr) {
         if let Expr::Variable { name } = expr {
-            self.output.push_str(&Self::ident(&name.lexeme));
+            if self.in_impl_method && name.lexeme == "this" {
+                self.output.push_str("self");
+            } else {
+                self.output.push_str(&Self::ident(&name.lexeme));
+            }
         }
     }
 
@@ -1747,7 +2074,7 @@ impl Visitor for CppCodeGenerator {
     fn visit_member_access(&mut self, expr: &Expr) {
         if let Expr::MemberAccess { object, name } = expr {
             object.accept(self);
-            self.output.push_str(Self::member_access_operator(object));
+            self.output.push_str(self.member_access_operator(object));
             self.output.push_str(&Self::ident(&name.lexeme));
         }
     }
@@ -1932,7 +2259,7 @@ impl Visitor for CppCodeGenerator {
         } = expr
         {
             object.accept(self);
-            self.output.push_str(Self::member_access_operator(object));
+            self.output.push_str(self.member_access_operator(object));
             self.output.push_str(&Self::ident(&name.lexeme));
             self.output.push(' ');
             self.output.push_str(&op.lexeme);
@@ -1976,6 +2303,79 @@ impl Visitor for CppCodeGenerator {
             self.output.push_str(&op.lexeme);
             self.output.push(' ');
             value.accept(self);
+        }
+    }
+
+    fn visit_impl(&mut self, stmt: &Stmt) {
+        let Stmt::Impl {
+            trait_type,
+            target,
+            generics,
+            methods,
+            ..
+        } = stmt
+        else {
+            return;
+        };
+        let generic_names: Vec<String> =
+            generics.iter().map(|generic| generic.lexeme.clone()).collect();
+        let trait_pattern = Self::owned_type_kind(
+            &self.current_module,
+            &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
+        );
+        let target_pattern = Self::owned_type_kind(
+            &self.current_module,
+            &Self::generalise_impl_kind(&target.kind, &generic_names),
+        );
+        for substitution in self.impl_specialisations(&trait_pattern, &target_pattern, generics) {
+            let previous =
+                std::mem::replace(&mut self.current_substitution, substitution.clone());
+            let resolved_trait = Type::new(trait_type.name.clone(), trait_pattern.clone())
+                .apply_substitution(&substitution)
+                .kind;
+            let resolved_target = Type::new(target.name.clone(), target_pattern.clone())
+                .apply_substitution(&substitution)
+                .kind;
+            for method in methods {
+                let Stmt::Function {
+                    name,
+                    params,
+                    return_type,
+                    body,
+                    ..
+                } = &**method
+                else {
+                    continue;
+                };
+                let mut parameters = format!("const {}& self", self.translate_type(target));
+                let rest = self.translate_params(params);
+                if !rest.is_empty() {
+                    parameters.push_str(", ");
+                    parameters.push_str(&rest);
+                }
+                self.writeln(&format!(
+                    "{} {}({})",
+                    self.translate_type(return_type),
+                    Self::impl_name(
+                        &self.current_module,
+                        &resolved_trait,
+                        &resolved_target,
+                        &name.lexeme,
+                    ),
+                    parameters
+                ));
+                self.writeln("{");
+                self.indent_level += 1;
+                let old = self.in_impl_method;
+                self.in_impl_method = true;
+                for statement in body {
+                    statement.accept(self);
+                }
+                self.in_impl_method = old;
+                self.indent_level -= 1;
+                self.writeln("}");
+            }
+            self.current_substitution = previous;
         }
     }
 
@@ -2052,6 +2452,7 @@ mod tests {
         let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
         let mut expr_types = ExprTypes::new();
         let mut call_instantiations = CallInstantiations::new();
+        let mut trait_call_sites = TraitCallSites::new();
         let mut instantiations = Instantiations::new();
         let mut generic_call_sites: Vec<crate::typecheck::GenericCallSite> = Vec::new();
         let mut function_generics = crate::typecheck::FunctionGenerics::new();
@@ -2078,6 +2479,7 @@ mod tests {
             exports.insert(module.name.clone(), checker.exports(&module.ast));
             expr_types.extend(checker.expr_types.clone());
             call_instantiations.extend(checker.call_instantiations.clone());
+            trait_call_sites.extend(checker.trait_call_sites.clone());
             generic_call_sites.extend(checker.generic_call_sites.clone());
 
             for (module_name, functions) in checker.instantiations.clone() {
@@ -2102,6 +2504,7 @@ mod tests {
 
         let mut generator = CppCodeGenerator::with_types(expr_types);
         generator.set_instantiations(call_instantiations, instantiations);
+        generator.set_trait_call_sites(trait_call_sites);
         generator.generate_program(&program)
     }
 

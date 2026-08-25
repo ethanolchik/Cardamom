@@ -57,6 +57,7 @@ fn run_file(options: cli::Options) -> bool {
     let mut exports: HashMap<String, ModuleExports> = HashMap::new();
     let mut expr_types = codegen::ExprTypes::new();
     let mut call_instantiations = codegen::CallInstantiations::new();
+    let mut trait_call_sites = codegen::TraitCallSites::new();
     let mut instantiations = typecheck::Instantiations::new();
     let mut generic_call_sites: Vec<typecheck::GenericCallSite> = Vec::new();
     let mut function_generics = typecheck::FunctionGenerics::new();
@@ -86,6 +87,7 @@ fn run_file(options: cli::Options) -> bool {
         // kept alive by `program`, so the maps can simply be merged.
         expr_types.extend(tc.expr_types.clone());
         call_instantiations.extend(tc.call_instantiations.clone());
+        trait_call_sites.extend(tc.trait_call_sites.clone());
         generic_call_sites.extend(tc.generic_call_sites.clone());
 
         for (module_name, functions) in tc.instantiations.clone() {
@@ -113,6 +115,7 @@ fn run_file(options: cli::Options) -> bool {
 
     let mut cg = CppCodeGenerator::with_types(expr_types);
     cg.set_instantiations(call_instantiations, instantiations);
+    cg.set_trait_call_sites(trait_call_sites);
     let code = cg.generate_program(&program);
 
     match compile_cpp(&options, &program, &code) {

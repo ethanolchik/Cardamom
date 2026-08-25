@@ -1,0 +1,41 @@
+public trait Eq {
+    equals(other: &Self) -> int;
+}
+
+public class Key(private value: int) {
+    public equals(other: &Key) -> int {
+        return this.value == other.value;
+    }
+}
+
+fn identity<T>(value: T) -> T
+where
+    T: Eq
+{
+    return value;
+}
+
+fn equal<T>(left: &T, right: &T) -> int
+where
+    T: Eq
+{
+    return left.equals(right);
+}
+
+public class Holder<T>(private value: T)
+where
+    T: Eq
+{
+    public convert<U>(f: fn(T) -> U) -> U
+    where U:
+        Eq
+    {
+        return f(this.value);
+    }
+}
+
+fn main() {
+    let key: Key = new Key(1);
+    let same: Key = identity(key);
+    let result: int = equal(&key, &same);
+}

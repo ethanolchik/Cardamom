@@ -1,0 +1,44 @@
+import io;
+
+public trait Printable {
+    text() -> string;
+}
+
+public impl Printable for int {
+    public text() -> string {
+        return "int";
+    }
+}
+
+public impl Printable for string {
+    public text() -> string {
+        return this;
+    }
+}
+
+public class Box<T>(public value: T) {}
+
+public impl<T> Printable for Box<T>
+where
+    T: Printable
+{
+    public text() -> string {
+        return this.value.text();
+    }
+}
+
+fn print<T>(value: &T) -> string
+where
+    T: Printable
+{
+    return value.text();
+}
+
+fn main() {
+    let number: Box<int> = new Box<int>(7);
+    let word: Box<string> = new Box<string>("word");
+    let nested: Box<Box<int>> = new Box<Box<int>>(number);
+    io.println(print(&number));
+    io.println(print(&word));
+    io.println(print(&nested));
+}

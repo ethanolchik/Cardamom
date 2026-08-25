@@ -48,6 +48,17 @@ pub struct TypeChecker<'a> {
     /// still standing in for something else.
     current_function_generics: Vec<String>,
 
+    /// Traits declared in the module currently being checked.
+    traits: HashMap<String, ExportedTrait>,
+    /// Trait bounds currently in scope, keyed by generic parameter name.
+    current_constraints: HashMap<String, Vec<Type>>,
+    function_constraints: HashMap<String, Vec<GenericConstraint>>,
+    class_constraints: HashMap<String, Vec<GenericConstraint>>,
+    method_constraints: HashMap<(String, String), Vec<GenericConstraint>>,
+    explicit_impls: Vec<ExportedImpl>,
+    /// Trait method calls whose concrete dispatch is selected during monomorphisation.
+    pub trait_call_sites: HashMap<*const Expr, TraitCallSite>,
+
     /// Public exports of every module compiled so far, keyed by module name.
     pub module_exports: HashMap<String, ModuleExports>,
     /// The type arguments each generic call site resolved to, keyed by AST node.
@@ -86,6 +97,8 @@ pub struct GenericCallSite {
 pub struct ModuleExports {
     pub functions: HashMap<String, ExportedFunction>,
     pub classes: HashMap<String, ExportedClass>,
+    pub traits: HashMap<String, ExportedTrait>,
+    pub implementations: Vec<ExportedImpl>,
 }
 
 /// The signature an importing module sees.
@@ -95,6 +108,7 @@ pub struct ExportedFunction {
     pub return_type: Type,
     /// Names of the function's type parameters, in declaration order.
     pub generics: Vec<String>,
+    pub constraints: Vec<GenericConstraint>,
 }
 
 /// The members of a class that are visible to importing modules.
@@ -105,6 +119,29 @@ pub struct ExportedClass {
     pub fields: HashMap<String, (Type, Visibility, bool)>,
     pub methods: HashMap<String, ExportedMethod>,
     pub constructor_params: Vec<Type>,
+    pub constraints: Vec<GenericConstraint>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportedTrait {
+    pub generics: Vec<String>,
+    pub methods: HashMap<String, ExportedMethod>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportedImpl {
+    pub module: String,
+    pub trait_type: Type,
+    pub target: Type,
+    pub generics: Vec<String>,
+    pub constraints: Vec<GenericConstraint>,
+    pub methods: HashMap<String, ExportedMethod>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TraitCallSite {
+    pub trait_type: Type,
+    pub method: String,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +153,7 @@ pub struct ExportedMethod {
     pub generics: Vec<String>,
     pub visibility: Visibility,
     pub is_static: bool,
+    pub constraints: Vec<GenericConstraint>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +166,7 @@ struct MethodSignature {
     method_generics: Vec<String>,
     params: Vec<Type>,
     return_type: Type,
+    constraints: Vec<GenericConstraint>,
 }
 
 impl ModuleExports {
@@ -168,6 +207,13 @@ impl<'a> TypeChecker<'a> {
             current_generic_owner: None,
             current_function_generics: Vec::new(),
 
+            traits: HashMap::new(),
+            current_constraints: HashMap::new(),
+            function_constraints: HashMap::new(),
+            class_constraints: HashMap::new(),
+            method_constraints: HashMap::new(),
+            explicit_impls: Vec::new(),
+            trait_call_sites: HashMap::new(),
             module_exports: HashMap::new(),
             call_instantiations: HashMap::new(),
             instantiations: HashMap::new(),
@@ -196,8 +242,10 @@ impl<'a> TypeChecker<'a> {
     /// Main entry point for type-checking a module.
     pub fn check_module(&mut self, module: &Module) {
         self.resolve_imports(module);
+        self.collect_traits(module);
         self.collect_declarations(module);
         self.define_class_members(module);
+        self.validate_explicit_impls(module);
         self.register_extensions(module);
 
         module.accept(self);
@@ -221,9 +269,24 @@ impl<'a> TypeChecker<'a> {
             } = &**stmt
             {
                 let function =
-                    self.collect_exported_function(params, return_type, modifiers, generics);
+                    self.collect_exported_function(
+                        params,
+                        return_type,
+                        modifiers,
+                        generics,
+                        self.function_constraints
+                            .get(&name.lexeme)
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
                 if let Some(function) = function {
                     exports.functions.insert(name.lexeme.clone(), function);
+                }
+            } else if let Stmt::Trait { name, modifier, .. } = &**stmt {
+                if modifier.contains(&Modifier::Public) {
+                    if let Some(trait_) = self.traits.get(&name.lexeme) {
+                        exports.traits.insert(name.lexeme.clone(), trait_.clone());
+                    }
                 }
             } else if let Stmt::Class {
                 name,
@@ -234,13 +297,24 @@ impl<'a> TypeChecker<'a> {
                 ..
             } = &**stmt
             {
-                let class = self.collect_exported_class(generics, fields, methods, modifier);
+                let class = self.collect_exported_class(
+                    &name.lexeme,
+                    generics,
+                    fields,
+                    methods,
+                    modifier,
+                    self.class_constraints
+                        .get(&name.lexeme)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 if let Some(class) = class {
                     exports.classes.insert(name.lexeme.clone(), class);
                 }
             };
         }
 
+        exports.implementations = self.explicit_impls.clone();
         exports
     }
 
@@ -250,6 +324,7 @@ impl<'a> TypeChecker<'a> {
         return_type: &Type,
         modifiers: &[Modifier],
         generics: &[Token],
+        constraints: Vec<GenericConstraint>,
     ) -> Option<ExportedFunction> {
         if !modifiers.contains(&Modifier::Public) {
             return None;
@@ -273,15 +348,18 @@ impl<'a> TypeChecker<'a> {
             params: param_types,
             return_type: self.qualify_type(&Self::generalise(return_type, &generic_names)),
             generics: generic_names,
+            constraints,
         })
     }
 
     fn collect_exported_class(
         &self,
+        class_name: &str,
         generics: &[Token],
         fields: &[Box<Stmt>],
         methods: &[Box<Stmt>],
         modifier: &[Modifier],
+        constraints: Vec<GenericConstraint>,
     ) -> Option<ExportedClass> {
         if !modifier.contains(&Modifier::Public) {
             return None;
@@ -355,6 +433,11 @@ impl<'a> TypeChecker<'a> {
                             generics: method_generic_names,
                             visibility: self.visibility_of(modifiers),
                             is_static: is_static_member(modifiers),
+                            constraints: self
+                                .method_constraints
+                                .get(&(class_name.to_string(), method_name.lexeme.clone()))
+                                .cloned()
+                                .unwrap_or_default(),
                         },
                     );
                 }
@@ -366,6 +449,7 @@ impl<'a> TypeChecker<'a> {
             fields: field_exports,
             methods: method_exports,
             constructor_params,
+            constraints,
         })
     }
 
@@ -510,13 +594,194 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Collect trait signatures before checking any generic bodies. Trait satisfaction
+    /// is structural, so this records requirements rather than explicit implementors.
+    fn collect_traits(&mut self, module: &Module) {
+        for stmt in &module.statements {
+            let Stmt::Trait {
+                name,
+                generics,
+                methods,
+                ..
+            } = &**stmt
+            else {
+                continue;
+            };
+            let trait_generics: Vec<String> =
+                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let mut exported_methods = HashMap::new();
+            for method in methods {
+                let Stmt::Function {
+                    name: method_name,
+                    params,
+                    return_type,
+                    generics: method_generics,
+                    modifiers,
+                    ..
+                } = &**method
+                else {
+                    continue;
+                };
+                let method_generic_names: Vec<String> = method_generics
+                    .iter()
+                    .map(|generic| generic.lexeme.clone())
+                    .collect();
+                let mut all_generics = trait_generics.clone();
+                all_generics.extend(method_generic_names.iter().cloned());
+                all_generics.push("Self".to_string());
+                let params = params
+                    .iter()
+                    .filter_map(|param| match &**param {
+                        Stmt::Variable { type_, .. } => Some(
+                            self.qualify_type(&Self::generalise(type_, &all_generics)),
+                        ),
+                        _ => None,
+                    })
+                    .collect();
+                exported_methods.insert(
+                    method_name.lexeme.clone(),
+                    ExportedMethod {
+                        params,
+                        return_type: self
+                            .qualify_type(&Self::generalise(return_type, &all_generics)),
+                        generics: method_generic_names,
+                        visibility: self.visibility_of(modifiers),
+                        is_static: is_static_member(modifiers),
+                        constraints: Vec::new(),
+                    },
+                );
+            }
+            self.traits.insert(
+                name.lexeme.clone(),
+                ExportedTrait {
+                    generics: trait_generics,
+                    methods: exported_methods,
+                },
+            );
+        }
+
+        for stmt in &module.statements {
+            let Stmt::Impl {
+                trait_type,
+                target,
+                generics,
+                methods,
+                ..
+            } = &**stmt
+            else {
+                continue;
+            };
+            let generic_names: Vec<String> =
+                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let mut exported_methods = HashMap::new();
+            for method in methods {
+                let Stmt::Function {
+                    name,
+                    params,
+                    return_type,
+                    generics: method_generics,
+                    modifiers,
+                    constraints,
+                    ..
+                } = &**method
+                else {
+                    continue;
+                };
+                let method_generic_names: Vec<String> = method_generics
+                    .iter()
+                    .map(|generic| generic.lexeme.clone())
+                    .collect();
+                let mut all_generics = generic_names.clone();
+                all_generics.extend(method_generic_names.iter().cloned());
+                exported_methods.insert(
+                    name.lexeme.clone(),
+                    ExportedMethod {
+                        params: params
+                            .iter()
+                            .filter_map(|param| match &**param {
+                                Stmt::Variable { type_, .. } => Some(
+                                    self.qualify_type(&Self::generalise(type_, &all_generics)),
+                                ),
+                                _ => None,
+                            })
+                            .collect(),
+                        return_type: self
+                            .qualify_type(&Self::generalise(return_type, &all_generics)),
+                        generics: method_generic_names,
+                        visibility: self.visibility_of(modifiers),
+                        is_static: false,
+                        constraints: self.normalise_constraints(constraints, &all_generics),
+                    },
+                );
+            }
+            self.explicit_impls.push(ExportedImpl {
+                module: self.module_name.clone(),
+                trait_type: self.qualify_type(&Self::generalise(trait_type, &generic_names)),
+                target: self.qualify_type(&Self::generalise(target, &generic_names)),
+                generics: generic_names.clone(),
+                constraints: match &**stmt {
+                    Stmt::Impl { constraints, .. } => {
+                        self.normalise_constraints(constraints, &generic_names)
+                    }
+                    _ => Vec::new(),
+                },
+                methods: exported_methods,
+            });
+        }
+    }
+
+    fn validate_explicit_impls(&self, module: &Module) {
+        for stmt in &module.statements {
+            let Stmt::Impl {
+                trait_type,
+                target,
+                generics,
+                ..
+            } = &**stmt
+            else {
+                continue;
+            };
+            let generic_names: Vec<String> =
+                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let trait_type =
+                self.qualify_type(&Self::generalise(trait_type, &generic_names));
+            let target = self.qualify_type(&Self::generalise(target, &generic_names));
+            if let Err(reason) = self.type_satisfies_trait(&target.kind, &trait_type) {
+                self.error_with_notes(
+                    trait_type.name.clone(),
+                    &format!(
+                        "Invalid implementation of `{}` for `{}`",
+                        trait_type.kind, target.kind
+                    ),
+                    vec![Note::new(
+                        reason,
+                        trait_type.name.line,
+                        trait_type.name.span.clone(),
+                        self.filename.clone(),
+                    )],
+                    vec![],
+                );
+            }
+        }
+    }
+
     // Forward declarations
     fn collect_declarations(&mut self, module: &Module) {
         for stmt in &module.statements {
             match &**stmt {
-                Stmt::Class { name, generics, .. } => {
+                Stmt::Class {
+                    name,
+                    generics,
+                    constraints,
+                    ..
+                } => {
                     let class_name = name.lexeme.clone();
-                    let generic_names = generics.iter().map(|g| g.lexeme.clone()).collect();
+                    let generic_names: Vec<String> =
+                        generics.iter().map(|g| g.lexeme.clone()).collect();
+                    self.class_constraints.insert(
+                        class_name.clone(),
+                        self.normalise_constraints(constraints, &generic_names),
+                    );
                     let sym = Symbol::new_generic_class(name.clone(), generic_names);
                     self.symtable.declare_class(&class_name, sym);
                 }
@@ -525,6 +790,7 @@ impl<'a> TypeChecker<'a> {
                     params,
                     return_type,
                     generics,
+                    constraints,
                     ..
                 } => {
                     let fn_name = name.lexeme.clone();
@@ -543,6 +809,10 @@ impl<'a> TypeChecker<'a> {
 
                     let return_type =
                         self.qualify_type(&Self::generalise(return_type, &generic_names));
+                    self.function_constraints.insert(
+                        fn_name.clone(),
+                        self.normalise_constraints(constraints, &generic_names),
+                    );
                     let sym = Symbol::new_generic_function(
                         name.clone(),
                         param_types,
@@ -602,6 +872,7 @@ impl<'a> TypeChecker<'a> {
                         return_type,
                         modifiers,
                         generics: method_generics,
+                        constraints,
                         ..
                     } = &**m
                     {
@@ -611,6 +882,10 @@ impl<'a> TypeChecker<'a> {
                             .collect();
                         let mut all_generics = class_generics.clone();
                         all_generics.extend(method_generic_names.iter().cloned());
+                        self.method_constraints.insert(
+                            (class_name.clone(), method_name.lexeme.clone()),
+                            self.normalise_constraints(constraints, &all_generics),
+                        );
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
@@ -721,6 +996,7 @@ impl<'a> TypeChecker<'a> {
         module: &str,
         name: &str,
         generics: &[String],
+        constraints: &[GenericConstraint],
         params: &[Type],
         return_type: &Type,
         explicit: &[Type],
@@ -748,6 +1024,7 @@ impl<'a> TypeChecker<'a> {
         }
 
         let subs = self.resolve_generics(token, name, generics, params, explicit, arg_tys);
+        self.validate_constraints(token, constraints, &subs);
 
         for (i, (expected, actual)) in params.iter().zip(arg_tys.iter()).enumerate() {
             let expected = expected.apply_substitution(&subs);
@@ -857,13 +1134,18 @@ impl<'a> TypeChecker<'a> {
             };
             Some(MethodSignature {
                 module,
-                class_name,
+                class_name: class_name.clone(),
                 class_generics: class_generics.clone(),
                 class_arguments,
                 method_name: name.lexeme.clone(),
                 method_generics: method_generics.clone(),
                 params: params.clone(),
                 return_type: return_type.clone(),
+                constraints: self
+                    .method_constraints
+                    .get(&(class_name.clone(), name.lexeme.clone()))
+                    .cloned()
+                    .unwrap_or_default(),
             })
         } else {
             let class = self.module_exports.get(&module)?.classes.get(&class_name)?;
@@ -877,6 +1159,7 @@ impl<'a> TypeChecker<'a> {
                 method_generics: method.generics.clone(),
                 params: method.params.clone(),
                 return_type: method.return_type.clone(),
+                constraints: method.constraints.clone(),
             })
         }
     }
@@ -982,6 +1265,306 @@ impl<'a> TypeChecker<'a> {
                 _ => qualifier.to_string(),
             },
             _ => qualifier.to_string(),
+        }
+    }
+
+    fn normalise_constraints(
+        &self,
+        constraints: &[GenericConstraint],
+        generics: &[String],
+    ) -> Vec<GenericConstraint> {
+        constraints
+            .iter()
+            .map(|constraint| GenericConstraint {
+                parameter: constraint.parameter.clone(),
+                traits: constraint
+                    .traits
+                    .iter()
+                    .map(|trait_| {
+                        self.qualify_type(&Self::generalise(trait_, generics))
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn constraints_by_parameter(
+        constraints: &[GenericConstraint],
+    ) -> HashMap<String, Vec<Type>> {
+        constraints
+            .iter()
+            .map(|constraint| {
+                (
+                    constraint.parameter.lexeme.clone(),
+                    constraint.traits.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn trait_declaration(&self, trait_type: &Type) -> Option<&ExportedTrait> {
+        let (module, name) = match &trait_type.kind {
+            TypeKind::User(module, name)
+            | TypeKind::GenericInstance(module, name, _) => (module, name),
+            _ => return None,
+        };
+        if module.is_empty() || module == &self.module_name {
+            self.traits.get(name)
+        } else {
+            self.module_exports.get(module)?.traits.get(name)
+        }
+    }
+
+    fn type_satisfies_trait(
+        &self,
+        concrete: &TypeKind,
+        trait_type: &Type,
+    ) -> Result<(), String> {
+        let trait_ = self
+            .trait_declaration(trait_type)
+            .ok_or_else(|| format!("unknown trait `{}`", trait_type.kind))?;
+
+        if let Some((implementation, impl_substitutions)) =
+            self.matching_explicit_impl(concrete, trait_type)
+        {
+            for constraint in &implementation.constraints {
+                let Some(bound) = impl_substitutions.get(&constraint.parameter.lexeme) else {
+                    continue;
+                };
+                if self.is_unresolved(bound) {
+                    continue;
+                }
+                for required_trait in &constraint.traits {
+                    let required_trait = required_trait.apply_substitution(&impl_substitutions);
+                    self.type_satisfies_trait(bound, &required_trait)?;
+                }
+            }
+
+            for (name, required) in &trait_.methods {
+                let candidate = implementation
+                    .methods
+                    .get(name)
+                    .ok_or_else(|| format!("explicit impl is missing method `{}`", name))?;
+                let mut required_substitutions =
+                    HashMap::from([("Self".to_string(), concrete.clone())]);
+                if let TypeKind::GenericInstance(_, _, arguments) = &trait_type.kind {
+                    for (generic, argument) in trait_.generics.iter().zip(arguments) {
+                        required_substitutions.insert(generic.clone(), argument.kind.clone());
+                    }
+                }
+                let required_params: Vec<Type> = required
+                    .params
+                    .iter()
+                    .map(|param| param.apply_substitution(&required_substitutions))
+                    .collect();
+                let candidate_params: Vec<Type> = candidate
+                    .params
+                    .iter()
+                    .map(|param| param.apply_substitution(&impl_substitutions))
+                    .collect();
+                if required_params.len() != candidate_params.len()
+                    || !required_params.iter().zip(&candidate_params).all(|(a, b)| {
+                        a.is_compatible_with(b) && b.is_compatible_with(a)
+                    })
+                {
+                    return Err(format!("impl method `{}` has an incompatible signature", name));
+                }
+                let required_return = required
+                    .return_type
+                    .apply_substitution(&required_substitutions);
+                let candidate_return = candidate
+                    .return_type
+                    .apply_substitution(&impl_substitutions);
+                if !required_return.is_compatible_with(&candidate_return)
+                    || !candidate_return.is_compatible_with(&required_return)
+                {
+                    return Err(format!("impl method `{}` has an incompatible return type", name));
+                }
+            }
+            return Ok(());
+        }
+
+        let (module, class_name, class_arguments) = match concrete {
+            TypeKind::User(module, name) => (module.clone(), name.clone(), Vec::new()),
+            TypeKind::GenericInstance(module, name, arguments) => {
+                (module.clone(), name.clone(), arguments.clone())
+            }
+            _ => return Err(format!("`{}` has no methods", concrete)),
+        };
+        let module = if module.is_empty() {
+            self.module_name.clone()
+        } else {
+            module
+        };
+
+        let (class_generics, methods): (Vec<String>, HashMap<String, ExportedMethod>) =
+            if module == self.module_name {
+                let Symbol::Class {
+                    generics, methods, ..
+                } = self
+                    .symtable
+                    .lookup_class(&class_name)
+                    .ok_or_else(|| format!("unknown class `{}`", class_name))?
+                else {
+                    return Err(format!("unknown class `{}`", class_name));
+                };
+                let methods = methods
+                    .iter()
+                    .filter_map(|(name, symbol)| match symbol {
+                        Symbol::Function {
+                            params,
+                            return_type,
+                            generics,
+                            visibility: Some(Visibility::Public),
+                            is_static,
+                            ..
+                        } => Some((
+                            name.clone(),
+                            ExportedMethod {
+                                params: params.clone(),
+                                return_type: return_type.clone(),
+                                generics: generics.clone(),
+                                visibility: Visibility::Public,
+                                is_static: *is_static,
+                                constraints: Vec::new(),
+                            },
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                (generics.clone(), methods)
+            } else {
+                let class = self
+                    .module_exports
+                    .get(&module)
+                    .and_then(|exports| exports.classes.get(&class_name))
+                    .ok_or_else(|| format!("unknown class `{}.{}`", module, class_name))?;
+                (class.generics.clone(), class.methods.clone())
+            };
+
+        let class_substitutions: HashMap<String, TypeKind> = class_generics
+            .into_iter()
+            .zip(class_arguments.iter().map(|argument| argument.kind.clone()))
+            .collect();
+        let mut required_substitutions = HashMap::from([("Self".to_string(), concrete.clone())]);
+        if let TypeKind::GenericInstance(_, _, arguments) = &trait_type.kind {
+            for (generic, argument) in trait_.generics.iter().zip(arguments) {
+                required_substitutions.insert(generic.clone(), argument.kind.clone());
+            }
+        }
+
+        for (name, required) in &trait_.methods {
+            let candidate = methods
+                .get(name)
+                .ok_or_else(|| format!("missing method `{}`", name))?;
+            let required_params: Vec<Type> = required
+                .params
+                .iter()
+                .map(|param| param.apply_substitution(&required_substitutions))
+                .collect();
+            let candidate_params: Vec<Type> = candidate
+                .params
+                .iter()
+                .map(|param| param.apply_substitution(&class_substitutions))
+                .collect();
+            let required_return = required
+                .return_type
+                .apply_substitution(&required_substitutions);
+            let candidate_return = candidate
+                .return_type
+                .apply_substitution(&class_substitutions);
+            let params_match = required_params.len() == candidate_params.len()
+                && required_params.iter().zip(&candidate_params).all(|(a, b)| {
+                    a.is_compatible_with(b) && b.is_compatible_with(a)
+                });
+            if candidate.is_static != required.is_static
+                || candidate.generics.len() != required.generics.len()
+                || !params_match
+                || !required_return.is_compatible_with(&candidate_return)
+                || !candidate_return.is_compatible_with(&required_return)
+            {
+                return Err(format!("method `{}` has an incompatible signature", name));
+            }
+        }
+        Ok(())
+    }
+
+    fn record_explicit_impl_instantiations(
+        &mut self,
+        concrete: &TypeKind,
+        trait_type: &Type,
+    ) {
+        let Some((implementation, substitutions)) =
+            self.matching_explicit_impl(concrete, trait_type)
+        else {
+            return;
+        };
+
+        for constraint in &implementation.constraints {
+            let Some(bound) = substitutions.get(&constraint.parameter.lexeme) else {
+                continue;
+            };
+            for required_trait in &constraint.traits {
+                let required_trait = required_trait.apply_substitution(&substitutions);
+                self.record_explicit_impl_instantiations(bound, &required_trait);
+            }
+        }
+
+        if implementation.generics.is_empty() {
+            return;
+        }
+        let arguments: Vec<TypeKind> = implementation
+            .generics
+            .iter()
+            .filter_map(|generic| substitutions.get(generic).cloned())
+            .collect();
+        if arguments.len() != implementation.generics.len() {
+            return;
+        }
+        let key = Self::impl_key(&implementation.trait_type, &implementation.target);
+        let instances = self
+            .instantiations
+            .entry(implementation.module)
+            .or_default()
+            .entry(key)
+            .or_default();
+        if !instances.contains(&arguments) {
+            instances.push(arguments);
+        }
+    }
+
+    fn validate_constraints(
+        &mut self,
+        token: &Token,
+        constraints: &[GenericConstraint],
+        substitutions: &HashMap<String, TypeKind>,
+    ) {
+        for constraint in constraints {
+            let Some(concrete) = substitutions.get(&constraint.parameter.lexeme) else {
+                continue;
+            };
+            if self.is_unresolved(concrete) {
+                continue;
+            }
+            for trait_type in &constraint.traits {
+                let trait_type = trait_type.apply_substitution(substitutions);
+                if let Err(reason) = self.type_satisfies_trait(concrete, &trait_type) {
+                    self.error_with_notes(
+                        token.clone(),
+                        &format!("Type `{}` does not satisfy trait `{}`", concrete, trait_type.kind),
+                        vec![Note::new(
+                            reason,
+                            token.line,
+                            token.span.clone(),
+                            self.filename.clone(),
+                        )],
+                        vec![],
+                    );
+                    continue;
+                }
+
+                self.record_explicit_impl_instantiations(concrete, &trait_type);
+            }
         }
     }
 
@@ -1163,6 +1746,54 @@ impl<'a> TypeChecker<'a> {
         format!("method {}.{}", class_name, method_name)
     }
 
+    fn impl_key(trait_type: &Type, target: &Type) -> String {
+        format!("impl {} for {}", trait_type.kind, target.kind)
+    }
+
+    fn matching_explicit_impl(
+        &self,
+        concrete: &TypeKind,
+        trait_type: &Type,
+    ) -> Option<(ExportedImpl, HashMap<String, TypeKind>)> {
+        let actual = Type::new(Token::dummy("<impl target>"), concrete.clone());
+        self.explicit_impls
+            .iter()
+            .chain(
+                self.module_exports
+                    .values()
+                    .flat_map(|exports| exports.implementations.iter()),
+            )
+            .find_map(|implementation| {
+                let mut substitutions = HashMap::new();
+                Self::infer_substitution(
+                    &implementation.trait_type,
+                    trait_type,
+                    &mut substitutions,
+                );
+                let resolved_trait = implementation
+                    .trait_type
+                    .apply_substitution(&substitutions);
+                if !resolved_trait.is_compatible_with(trait_type)
+                    || !trait_type.is_compatible_with(&resolved_trait)
+                {
+                    return None;
+                }
+                Self::infer_substitution(
+                    &implementation.target,
+                    &actual,
+                    &mut substitutions,
+                );
+                let resolved = implementation.target.apply_substitution(&substitutions);
+                if resolved.is_compatible_with(&actual)
+                    && actual.is_compatible_with(&resolved)
+                {
+                    Some((implementation.clone(), substitutions))
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Records that a generic class is used at a particular instantiation.
     fn record_class_instantiation(
         &mut self,
@@ -1324,6 +1955,9 @@ impl<'a> TypeChecker<'a> {
             explicit,
             argument_types,
         );
+        let mut all_substitutions = class_substitutions;
+        all_substitutions.extend(method_substitutions.iter().map(|(k, v)| (k.clone(), v.clone())));
+        self.validate_constraints(token, &signature.constraints, &all_substitutions);
         for (index, (expected, actual)) in params.iter().zip(argument_types).enumerate() {
             let expected = expected.apply_substitution(&method_substitutions);
             if let Some(argument) = arguments.get(index) {
@@ -1738,7 +2372,10 @@ impl<'a> TypeChecker<'a> {
 
     fn type_exists(&self, ty: &Type) -> bool {
         match &ty.kind {
-            TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::String
+            | TypeKind::Void => true,
             // A module is a namespace, not something a variable can be declared as.
             TypeKind::Module(_) => false,
             TypeKind::User(module, name) => {
@@ -2671,6 +3308,13 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
+            if let Some(site) = self
+                .trait_call_sites
+                .get(&(&**callee as *const Expr))
+                .cloned()
+            {
+                self.trait_call_sites.insert(expr as *const Expr, site);
+            }
 
             // Knowing the parameter types up front lets each argument be checked against
             // what it is expected to be, so `f([])` can infer the empty literal.
@@ -2706,6 +3350,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     &module,
                     &name,
                     &function.generics,
+                    &function.constraints,
                     &function.params,
                     &function.return_type,
                     &[],
@@ -2818,6 +3463,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                         {
                             let (params, return_type, generics) =
                                 (params.clone(), return_type.clone(), generics.clone());
+                            let constraints = self
+                                .function_constraints
+                                .get(name)
+                                .cloned()
+                                .unwrap_or_default();
 
                             let result = self.check_call_signature(
                                 expr,
@@ -2825,6 +3475,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 &module,
                                 name,
                                 &generics,
+                                &constraints,
                                 &params,
                                 &return_type,
                                 &[],
@@ -2892,6 +3543,13 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.in_call = true;
             callee.accept(self);
             self.in_call = false;
+            if let Some(site) = self
+                .trait_call_sites
+                .get(&(&**callee as *const Expr))
+                .cloned()
+            {
+                self.trait_call_sites.insert(expr as *const Expr, site);
+            }
 
             let arg_tys: Vec<Type> = arguments
                 .iter()
@@ -2926,6 +3584,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     &module,
                     &name,
                     &function.generics,
+                    &function.constraints,
                     &function.params,
                     &function.return_type,
                     &explicit,
@@ -3026,6 +3685,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                         {
                             let (params, return_type, fn_generics) =
                                 (params.clone(), return_type.clone(), declared.clone());
+                            let constraints = self
+                                .function_constraints
+                                .get(name)
+                                .cloned()
+                                .unwrap_or_default();
                             let token = get_token(callee);
 
                             // Reporting "not generic" is clearer than an arity
@@ -3051,6 +3715,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 &module,
                                 name,
                                 &fn_generics,
+                                &constraints,
                                 &params,
                                 &return_type,
                                 &explicit,
@@ -3240,6 +3905,68 @@ impl<'a> Visitor for TypeChecker<'a> {
                         self.set_expr_type(expr, self.error_type(name));
                     }
                     return;
+                }
+                TypeKind::GenericParam(parameter) => {
+                    let required_method = self
+                        .current_constraints
+                        .get(parameter)
+                        .into_iter()
+                        .flatten()
+                        .find_map(|trait_type| {
+                            self.trait_declaration(trait_type)
+                                .and_then(|trait_| trait_.methods.get(&name.lexeme))
+                                .cloned()
+                                .map(|method| (trait_type.clone(), method))
+                        });
+
+                    if let Some((trait_type, method)) = required_method {
+                        self.trait_call_sites.insert(
+                            expr as *const Expr,
+                            TraitCallSite {
+                                trait_type: trait_type.clone(),
+                                method: name.lexeme.clone(),
+                            },
+                        );
+                        let mut substitutions = HashMap::from([(
+                            "Self".to_string(),
+                            TypeKind::GenericParam(parameter.clone()),
+                        )]);
+                        if let Some(trait_) = self.trait_declaration(&trait_type) {
+                            if let TypeKind::GenericInstance(_, _, arguments) = &trait_type.kind {
+                                for (generic, argument) in trait_.generics.iter().zip(arguments) {
+                                    substitutions
+                                        .insert(generic.clone(), argument.kind.clone());
+                                }
+                            }
+                        }
+                        self.set_expr_type(
+                            expr,
+                            Type::new(
+                                name.clone(),
+                                TypeKind::Function(
+                                    method
+                                        .params
+                                        .iter()
+                                        .map(|param| param.apply_substitution(&substitutions))
+                                        .collect(),
+                                    Box::new(
+                                        method
+                                            .return_type
+                                            .apply_substitution(&substitutions),
+                                    ),
+                                ),
+                            ),
+                        );
+                    } else {
+                        self.error_token(
+                            name,
+                            &format!(
+                                "No trait bound provides member `{}` for `{}`",
+                                name.lexeme, parameter
+                            ),
+                        );
+                        self.set_expr_type(expr, self.error_type(name));
+                    }
                 }
                 TypeKind::User(module_name, class_name) => {
                     if !module_name.is_empty() && module_name != &self.module_name {
@@ -3567,14 +4294,23 @@ impl<'a> Visitor for TypeChecker<'a> {
                 None => (self.module_name.clone(), name.lexeme.clone()),
             };
 
-            let (class_generics, constructor_params, fully_defined) = if owner == self.module_name {
+            let (class_generics, constructor_params, fully_defined, class_constraints) =
+                if owner == self.module_name {
                 match self.symtable.lookup_class(&class_name) {
                     Some(Symbol::Class {
                         generics,
                         constructor_params,
                         fully_defined,
                         ..
-                    }) => (generics.clone(), constructor_params.clone(), *fully_defined),
+                    }) => (
+                        generics.clone(),
+                        constructor_params.clone(),
+                        *fully_defined,
+                        self.class_constraints
+                            .get(&class_name)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
                     _ => {
                         self.error_token(name, &format!("Unknown class `{}`", name.lexeme));
                         self.set_expr_type(expr, self.error_type(name));
@@ -3591,6 +4327,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         class.generics.clone(),
                         class.constructor_params.clone(),
                         true,
+                        class.constraints.clone(),
                     ),
                     None => {
                         self.error_token(name, &format!("Unknown public class `{}`", name.lexeme));
@@ -3632,6 +4369,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 &explicit,
                 &arg_tys,
             );
+            self.validate_constraints(name, &class_constraints, &subs);
 
             for (i, (expected, actual)) in constructor_params.iter().zip(arg_tys.iter()).enumerate()
             {
@@ -4109,7 +4847,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             return_type,
             generics,
             modifiers,
-            ..
+            constraints,
         } = stmt
         {
             // Begin scope, set up parameters, etc. (same as before)
@@ -4157,6 +4895,14 @@ impl<'a> Visitor for TypeChecker<'a> {
             };
             let old_generic_owner =
                 std::mem::replace(&mut self.current_generic_owner, owner.clone());
+            let mut active_constraints = self.current_constraints.clone();
+            let normalised_constraints =
+                self.normalise_constraints(constraints, &generic_names);
+            active_constraints.extend(Self::constraints_by_parameter(
+                &normalised_constraints,
+            ));
+            let old_constraints =
+                std::mem::replace(&mut self.current_constraints, active_constraints);
 
             if let Some(owner) = owner {
                 if !generics.is_empty() {
@@ -4194,6 +4940,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.current_function_generics = old_generics;
             self.current_function = old_function;
             self.current_generic_owner = old_generic_owner;
+            self.current_constraints = old_constraints;
             self.symtable.end_scope();
 
             // restore old function return
@@ -4466,6 +5213,7 @@ impl<'a> Visitor for TypeChecker<'a> {
         if let Stmt::Class {
             name,
             generics,
+            constraints,
             fields,
             methods,
             ..
@@ -4493,6 +5241,14 @@ impl<'a> Visitor for TypeChecker<'a> {
             };
             let old_generic_owner =
                 std::mem::replace(&mut self.current_generic_owner, class_owner.clone());
+            let mut active_constraints = self.current_constraints.clone();
+            let normalised_constraints =
+                self.normalise_constraints(constraints, &generic_names);
+            active_constraints.extend(Self::constraints_by_parameter(
+                &normalised_constraints,
+            ));
+            let old_constraints =
+                std::mem::replace(&mut self.current_constraints, active_constraints);
 
             if let Some(owner) = class_owner {
                 self.function_generics
@@ -4552,9 +5308,51 @@ impl<'a> Visitor for TypeChecker<'a> {
 
             self.current_function_generics = old_generics;
             self.current_generic_owner = old_generic_owner;
+            self.current_constraints = old_constraints;
             self.symtable.end_scope();
             self.class_stack.pop();
             self.current_class = self.class_stack.last().cloned();
+        }
+    }
+
+    fn visit_impl(&mut self, stmt: &Stmt) {
+        if let Stmt::Impl {
+            target,
+            generics,
+            constraints,
+            methods,
+            ..
+        } = stmt
+        {
+            let generic_names: Vec<String> =
+                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let target = self.qualify_type(&Self::generalise(target, &generic_names));
+            let old_generics = std::mem::replace(
+                &mut self.current_function_generics,
+                generic_names.clone(),
+            );
+            let mut active_constraints = self.current_constraints.clone();
+            let normalised = self.normalise_constraints(constraints, &generic_names);
+            active_constraints.extend(Self::constraints_by_parameter(&normalised));
+            let old_constraints =
+                std::mem::replace(&mut self.current_constraints, active_constraints);
+            self.symtable.begin_scope();
+            for generic in generics {
+                self.symtable
+                    .declare_symbol(&generic.lexeme, Symbol::new_generic_param(generic.clone()));
+            }
+            for method in methods {
+                self.symtable.begin_scope();
+                self.symtable.declare_symbol(
+                    "this",
+                    Symbol::new_variable(target.name.clone(), target.clone()),
+                );
+                method.accept(self);
+                self.symtable.end_scope();
+            }
+            self.symtable.end_scope();
+            self.current_function_generics = old_generics;
+            self.current_constraints = old_constraints;
         }
     }
 

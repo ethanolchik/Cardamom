@@ -52,7 +52,7 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
                         }
                     }
                 }
-                Stmt::Extension { methods, .. } => {
+                Stmt::Extension { methods, .. } | Stmt::Impl { methods, .. } => {
                     for method in methods {
                         if let Stmt::Function { body, .. } = &**method {
                             always_live.push(body.clone());

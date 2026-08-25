@@ -1,0 +1,10 @@
+import io;
+import str;
+import trait_contract;
+import trait_model;
+
+fn main() {
+    let left: trait_model.Key = new trait_model.Key(1);
+    let right: trait_model.Key = new trait_model.Key(1);
+    io.println(str.fromInt(trait_contract.equal(&left, &right)));
+}

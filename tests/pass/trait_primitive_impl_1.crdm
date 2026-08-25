@@ -1,0 +1,25 @@
+import io;
+import str;
+
+public trait Eq {
+    equals(other: &Self) -> int;
+}
+
+public impl Eq for int {
+    public equals(other: &int) -> int {
+        return this == other;
+    }
+}
+
+fn equal<T>(left: &T, right: &T) -> int
+where
+    T: Eq
+{
+    return left.equals(right);
+}
+
+fn main() {
+    let left: int = 7;
+    let right: int = 7;
+    io.println(str.fromInt(equal(&left, &right)));
+}

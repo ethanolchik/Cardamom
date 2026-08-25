@@ -1,0 +1,10 @@
+public trait Eq {
+    equals(other: &Self) -> int;
+}
+
+public fn equal<T>(left: &T, right: &T) -> int
+where
+    T: Eq
+{
+    return left.equals(right);
+}
