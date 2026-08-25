@@ -1,0 +1,27 @@
+import generic_method;
+import io;
+import str;
+
+fn show(value: int) -> string {
+    return str.fromInt(value);
+}
+
+fn twice(value: int) -> int {
+    return value * 2;
+}
+
+fn greeting() -> string {
+    return "hello";
+}
+
+fn main() {
+    let box: generic_method.Box<int> = new generic_method.Box<int>(8);
+
+    // Explicit and inferred method arguments produce separate specialisations.
+    io.println(box.map<string>(show));
+    io.println(str.fromInt(box.map(twice)));
+    io.println(generic_method.apply(box, show));
+
+    let factory: generic_method.Factory = new generic_method.Factory();
+    io.println(factory.make(greeting));
+}

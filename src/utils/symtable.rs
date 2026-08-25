@@ -86,8 +86,34 @@ impl Symbol {
         is_method: bool,
         generics: Vec<String>,
     ) -> Self {
-        let mut symbol =
-            Self::new_function_with_visibility(name, params, return_type, is_method, None, false);
+        Self::new_generic_function_with_visibility(
+            name,
+            params,
+            return_type,
+            is_method,
+            None,
+            false,
+            generics,
+        )
+    }
+
+    pub fn new_generic_function_with_visibility(
+        name: Token,
+        params: Vec<Type>,
+        return_type: Type,
+        is_method: bool,
+        visibility: Option<Visibility>,
+        is_static: bool,
+        generics: Vec<String>,
+    ) -> Self {
+        let mut symbol = Self::new_function_with_visibility(
+            name,
+            params,
+            return_type,
+            is_method,
+            visibility,
+            is_static,
+        );
         if let Symbol::Function { generics: slot, .. } = &mut symbol {
             *slot = generics;
         }

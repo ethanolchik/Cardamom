@@ -1,0 +1,21 @@
+public fn identity<X>(value: X) -> X {
+    return value;
+}
+
+public class Box<T>(private value: T) {
+    public map<U>(f: fn(T) -> U) -> U {
+        // The dependency must be instantiated using the method's U.
+        return identity(f(this.value));
+    }
+}
+
+public fn apply<T, U>(box: Box<T>, f: fn(T) -> U) -> U {
+    // A symbolic method use becomes concrete when apply<T, U> is instantiated.
+    return box.map<U>(f);
+}
+
+public class Factory {
+    public make<U>(f: fn() -> U) -> U {
+        return f();
+    }
+}

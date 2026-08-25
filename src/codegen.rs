@@ -121,6 +121,55 @@ impl CppCodeGenerator {
         }
     }
 
+    /// The emitted name of a method at this call site. Generic method type arguments
+    /// are recorded by the type checker and resolved against any enclosing class or
+    /// method specialisation here.
+    fn method_call_name(&self, call: &Expr, name: &str) -> String {
+        let mut emitted = Self::ident(name);
+        if let Some(arguments) = self.call_instantiations.get(&(call as *const Expr)) {
+            for argument in arguments {
+                emitted.push('_');
+                emitted.push_str(&Self::type_tag(&self.resolve_type_argument(argument)));
+            }
+        }
+        emitted
+    }
+
+    /// Method-specific argument lists needed for the active class specialisation.
+    fn method_specialisations(
+        &self,
+        class_name: &str,
+        class_generics: &[Token],
+        method_name: &str,
+    ) -> Vec<Vec<TypeKind>> {
+        let key = format!("method {}.{}", class_name, method_name);
+        let Some(instances) = self
+            .instantiations
+            .get(&self.current_module)
+            .and_then(|module| module.get(&key))
+        else {
+            return Vec::new();
+        };
+        let class_arguments: Vec<TypeKind> = class_generics
+            .iter()
+            .map(|generic| {
+                self.current_substitution
+                    .get(&generic.lexeme)
+                    .cloned()
+                    .unwrap_or(TypeKind::GenericParam(generic.lexeme.clone()))
+            })
+            .collect();
+
+        instances
+            .iter()
+            .filter(|arguments| {
+                arguments.len() >= class_arguments.len()
+                    && arguments[..class_arguments.len()] == class_arguments
+            })
+            .map(|arguments| arguments[class_arguments.len()..].to_vec())
+            .collect()
+    }
+
     /// Applies the active specialisation to a type argument.
     fn resolve_type_argument(&self, kind: &TypeKind) -> TypeKind {
         match kind {
@@ -701,7 +750,8 @@ impl CppCodeGenerator {
 
     fn write_class_declaration_body(&mut self, stmt: &Stmt, class_name: &str) {
         if let Stmt::Class {
-            generics: _,
+            name: source_class_name,
+            generics: class_generics,
             modifier: _,
             fields,
             methods,
@@ -767,25 +817,44 @@ impl CppCodeGenerator {
                             name: method_name,
                             params,
                             return_type,
+                            generics: method_generics,
                             ..
                         } => {
-                            let ret_type = self.translate_type(return_type);
-                            let param_str = self.translate_params(params);
-                            // A method that never mutates is `const`, so it can be
-                            // called through an immutable borrow (`&T` -> `const T&`).
-                            let suffix = if const_methods.contains(&method_name.lexeme) {
-                                " const"
+                            let specialisations = if method_generics.is_empty() {
+                                vec![Vec::new()]
                             } else {
-                                ""
+                                self.method_specialisations(
+                                    &source_class_name.lexeme,
+                                    class_generics,
+                                    &method_name.lexeme,
+                                )
                             };
-                            self.writeln(&format!(
-                                "{}{} {}({}){};",
-                                prefix,
-                                ret_type,
-                                Self::ident(&method_name.lexeme),
-                                param_str,
-                                suffix
-                            ));
+                            for arguments in specialisations {
+                                let previous = self.current_substitution.clone();
+                                for (generic, argument) in
+                                    method_generics.iter().zip(arguments.iter())
+                                {
+                                    self.current_substitution
+                                        .insert(generic.lexeme.clone(), argument.clone());
+                                }
+                                let ret_type = self.translate_type(return_type);
+                                let param_str = self.translate_params(params);
+                                let suffix = if const_methods.contains(&method_name.lexeme) {
+                                    " const"
+                                } else {
+                                    ""
+                                };
+                                let mut emitted_name = Self::ident(&method_name.lexeme);
+                                for argument in &arguments {
+                                    emitted_name.push('_');
+                                    emitted_name.push_str(&Self::type_tag(argument));
+                                }
+                                self.writeln(&format!(
+                                    "{}{} {}({}){};",
+                                    prefix, ret_type, emitted_name, param_str, suffix
+                                ));
+                                self.current_substitution = previous;
+                            }
                         }
                         _ => {}
                     }
@@ -870,7 +939,11 @@ impl CppCodeGenerator {
     /// Static data members and out-of-line method definitions.
     fn write_class_definitions_body(&mut self, stmt: &Stmt, class_name: &str) {
         if let Stmt::Class {
-            fields, methods, ..
+            name: source_class_name,
+            generics: class_generics,
+            fields,
+            methods,
+            ..
         } = stmt
         {
             let const_methods = Self::const_methods(methods);
@@ -914,31 +987,50 @@ impl CppCodeGenerator {
                     params,
                     body,
                     return_type,
+                    generics: method_generics,
                     ..
                 } = &**method
                 {
-                    let ret_type = self.translate_type(return_type);
-                    let param_str = self.translate_params(params);
-                    let suffix = if const_methods.contains(&method_name.lexeme) {
-                        " const"
+                    let specialisations = if method_generics.is_empty() {
+                        vec![Vec::new()]
                     } else {
-                        ""
+                        self.method_specialisations(
+                            &source_class_name.lexeme,
+                            class_generics,
+                            &method_name.lexeme,
+                        )
                     };
-                    self.writeln(&format!(
-                        "{} {}::{}({}){}",
-                        ret_type,
-                        class_name,
-                        Self::ident(&method_name.lexeme),
-                        param_str,
-                        suffix
-                    ));
-                    self.writeln("{");
-                    self.indent_level += 1;
-                    for s in body {
-                        s.accept(self);
+                    for arguments in specialisations {
+                        let previous = self.current_substitution.clone();
+                        for (generic, argument) in method_generics.iter().zip(arguments.iter()) {
+                            self.current_substitution
+                                .insert(generic.lexeme.clone(), argument.clone());
+                        }
+                        let ret_type = self.translate_type(return_type);
+                        let param_str = self.translate_params(params);
+                        let suffix = if const_methods.contains(&method_name.lexeme) {
+                            " const"
+                        } else {
+                            ""
+                        };
+                        let mut emitted_name = Self::ident(&method_name.lexeme);
+                        for argument in &arguments {
+                            emitted_name.push('_');
+                            emitted_name.push_str(&Self::type_tag(argument));
+                        }
+                        self.writeln(&format!(
+                            "{} {}::{}({}){}",
+                            ret_type, class_name, emitted_name, param_str, suffix
+                        ));
+                        self.writeln("{");
+                        self.indent_level += 1;
+                        for s in body {
+                            s.accept(self);
+                        }
+                        self.indent_level -= 1;
+                        self.writeln("}");
+                        self.current_substitution = previous;
                     }
-                    self.indent_level -= 1;
-                    self.writeln("}");
                 }
             }
         }
@@ -1240,7 +1332,8 @@ impl CppCodeGenerator {
                 // `this` is a pointer in C++, so calling a method on it needs `->`,
                 // exactly as plain member access does.
                 self.output.push_str(Self::member_access_operator(object));
-                self.output.push_str(&Self::ident(&name.lexeme));
+                self.output
+                    .push_str(&self.method_call_name(call, &name.lexeme));
                 self.output.push('(');
                 self.write_call_arguments(arguments);
                 self.output.push(')');

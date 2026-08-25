@@ -103,8 +103,31 @@ pub struct ExportedClass {
     /// Names of the class's type parameters, in declaration order.
     pub generics: Vec<String>,
     pub fields: HashMap<String, (Type, Visibility, bool)>,
-    pub methods: HashMap<String, (Vec<Type>, Type, Visibility, bool)>,
+    pub methods: HashMap<String, ExportedMethod>,
     pub constructor_params: Vec<Type>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportedMethod {
+    pub params: Vec<Type>,
+    pub return_type: Type,
+    /// Type parameters declared by the method itself; class parameters are stored on
+    /// `ExportedClass` and are supplied by the receiver.
+    pub generics: Vec<String>,
+    pub visibility: Visibility,
+    pub is_static: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MethodSignature {
+    module: String,
+    class_name: String,
+    class_generics: Vec<String>,
+    class_arguments: Vec<Type>,
+    method_name: String,
+    method_generics: Vec<String>,
+    params: Vec<Type>,
+    return_type: Type,
 }
 
 impl ModuleExports {
@@ -176,7 +199,6 @@ impl<'a> TypeChecker<'a> {
         self.collect_declarations(module);
         self.define_class_members(module);
         self.register_extensions(module);
-        self.reject_generic_methods(module);
 
         module.accept(self);
 
@@ -295,23 +317,28 @@ impl<'a> TypeChecker<'a> {
         }
 
         let mut method_exports = HashMap::new();
-        // TODO: a method's own type parameters are not exported; `ExportedClass` has
-        // nowhere to record them. `reject_generic_methods` rejects such methods for now.
         for m in methods {
             if let Stmt::Function {
                 name: method_name,
                 params,
                 return_type,
                 modifiers,
+                generics: method_generics,
                 ..
             } = &**m
             {
                 if modifiers.contains(&Modifier::Public) {
+                    let method_generic_names: Vec<String> = method_generics
+                        .iter()
+                        .map(|generic| generic.lexeme.clone())
+                        .collect();
+                    let mut all_generics = generic_names.clone();
+                    all_generics.extend(method_generic_names.iter().cloned());
                     let param_types = params
                         .iter()
                         .filter_map(|p| {
                             if let Stmt::Variable { type_, .. } = &**p {
-                                Some(self.qualify_type(&Self::generalise(type_, &generic_names)))
+                                Some(self.qualify_type(&Self::generalise(type_, &all_generics)))
                             } else {
                                 None
                             }
@@ -320,12 +347,14 @@ impl<'a> TypeChecker<'a> {
 
                     method_exports.insert(
                         method_name.lexeme.clone(),
-                        (
-                            param_types,
-                            self.qualify_type(&Self::generalise(return_type, &generic_names)),
-                            self.visibility_of(modifiers),
-                            is_static_member(modifiers),
-                        ),
+                        ExportedMethod {
+                            params: param_types,
+                            return_type: self
+                                .qualify_type(&Self::generalise(return_type, &all_generics)),
+                            generics: method_generic_names,
+                            visibility: self.visibility_of(modifiers),
+                            is_static: is_static_member(modifiers),
+                        },
                     );
                 }
             }
@@ -337,70 +366,6 @@ impl<'a> TypeChecker<'a> {
             methods: method_exports,
             constructor_params,
         })
-    }
-
-    /// Rejects methods that declare their own type parameters.
-    ///
-    /// A method may use the type parameters of the class it belongs to, but not add its
-    /// own: nothing records a method's own type parameters, member access drops them,
-    /// and code generation has no per-method specialisation. Without this check such a
-    /// method type checks and then emits an undeclared type name into the generated
-    /// C++, so it is rejected at the declaration where the cause is obvious.
-    ///
-    /// TODO: support generic methods; see `reject_generic_methods` for what is missing.
-    fn reject_generic_methods(&mut self, module: &Module) {
-        for stmt in &module.statements {
-            let Stmt::Class {
-                name: class_name,
-                methods,
-                ..
-            } = &**stmt
-            else {
-                continue;
-            };
-
-            for method in methods {
-                let Stmt::Function { name, generics, .. } = &**method else {
-                    continue;
-                };
-
-                if generics.is_empty() {
-                    continue;
-                }
-
-                let parameters = generics
-                    .iter()
-                    .map(|g| g.lexeme.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                self.error_with_notes(
-                    name.clone(),
-                    &format!(
-                        "Method `{}` cannot declare its own type parameters",
-                        name.lexeme
-                    ),
-                    vec![Note::new(
-                        format!(
-                            "`{}<{}>` is declared on a method; only a class or a top-level function may take type parameters",
-                            name.lexeme, parameters
-                        ),
-                        name.line,
-                        name.span.clone(),
-                        self.filename.clone(),
-                    )],
-                    vec![Help::new(
-                        format!(
-                            "Move `{}` to a top-level generic function, or add it to `class {}<..>`",
-                            parameters, class_name.lexeme
-                        ),
-                        name.line,
-                        name.span.clone(),
-                        self.filename.clone(),
-                    )],
-                );
-            }
-        }
     }
 
     /// `main` is the program entry point, so it has a fixed shape: it takes no
@@ -635,25 +600,33 @@ impl<'a> TypeChecker<'a> {
                         params,
                         return_type,
                         modifiers,
+                        generics: method_generics,
                         ..
                     } = &**m
                     {
+                        let method_generic_names: Vec<String> = method_generics
+                            .iter()
+                            .map(|generic| generic.lexeme.clone())
+                            .collect();
+                        let mut all_generics = class_generics.clone();
+                        all_generics.extend(method_generic_names.iter().cloned());
                         let mut param_types = Vec::new();
                         for p in params {
                             if let Stmt::Variable { type_, .. } = &**p {
                                 param_types.push(
-                                    self.qualify_type(&Self::generalise(type_, &class_generics)),
+                                    self.qualify_type(&Self::generalise(type_, &all_generics)),
                                 );
                             }
                         }
                         let qualified_return =
-                            self.qualify_type(&Self::generalise(return_type, &class_generics));
+                            self.qualify_type(&Self::generalise(return_type, &all_generics));
                         method_declarations.push((
                             method_name.clone(),
                             param_types,
                             qualified_return,
                             self.visibility_of(modifiers),
                             is_static_member(modifiers),
+                            method_generic_names,
                         ));
                     }
                 }
@@ -700,18 +673,25 @@ impl<'a> TypeChecker<'a> {
                             ));
                         }
 
-                        for (method_name, param_types, return_type, visibility, is_static) in
-                            method_declarations
+                        for (
+                            method_name,
+                            param_types,
+                            return_type,
+                            visibility,
+                            is_static,
+                            method_generics,
+                        ) in method_declarations
                         {
                             methods.insert(
                                 method_name.lexeme.clone(),
-                                Symbol::new_function_with_visibility(
+                                Symbol::new_generic_function_with_visibility(
                                     method_name,
                                     param_types,
                                     return_type,
                                     true,
                                     Some(visibility),
                                     is_static,
+                                    method_generics,
                                 ),
                             );
                         }
@@ -834,6 +814,70 @@ impl<'a> TypeChecker<'a> {
 
         let class = self.module_exports.get(module)?.classes.get(&name.lexeme)?;
         Some((module.clone(), name.lexeme.clone(), class.clone()))
+    }
+
+    /// Resolves a method call while preserving both the receiver's class arguments and
+    /// the type parameters declared by the method itself.
+    fn method_callee(&self, callee: &Expr) -> Option<MethodSignature> {
+        let Expr::MemberAccess { object, name } = callee else {
+            return None;
+        };
+        let object_type = Self::without_borrows(self.get_expr_type(object)?);
+        let (module, class_name, class_arguments) = match object_type.kind {
+            TypeKind::User(module, class_name) => (module, class_name, Vec::new()),
+            TypeKind::GenericInstance(module, class_name, arguments) => {
+                (module, class_name, arguments)
+            }
+            _ => return None,
+        };
+        let module = if module.is_empty() {
+            self.module_name.clone()
+        } else {
+            module
+        };
+
+        if module == self.module_name {
+            let Symbol::Class {
+                generics: class_generics,
+                methods,
+                ..
+            } = self.symtable.lookup_class(&class_name)?
+            else {
+                return None;
+            };
+            let Symbol::Function {
+                params,
+                return_type,
+                generics: method_generics,
+                ..
+            } = methods.get(&name.lexeme)?
+            else {
+                return None;
+            };
+            Some(MethodSignature {
+                module,
+                class_name,
+                class_generics: class_generics.clone(),
+                class_arguments,
+                method_name: name.lexeme.clone(),
+                method_generics: method_generics.clone(),
+                params: params.clone(),
+                return_type: return_type.clone(),
+            })
+        } else {
+            let class = self.module_exports.get(&module)?.classes.get(&class_name)?;
+            let method = class.methods.get(&name.lexeme)?;
+            Some(MethodSignature {
+                module,
+                class_name,
+                class_generics: class.generics.clone(),
+                class_arguments,
+                method_name: name.lexeme.clone(),
+                method_generics: method.generics.clone(),
+                params: method.params.clone(),
+                return_type: method.return_type.clone(),
+            })
+        }
     }
 
     /// Resolves a call to a generic function, reporting any problem with its type
@@ -1112,6 +1156,12 @@ impl<'a> TypeChecker<'a> {
         name.to_string()
     }
 
+    /// Key under which a generic method's instantiations are recorded. Its argument
+    /// list contains class arguments followed by method arguments.
+    fn method_key(class_name: &str, method_name: &str) -> String {
+        format!("method {}.{}", class_name, method_name)
+    }
+
     /// Records that a generic class is used at a particular instantiation.
     fn record_class_instantiation(
         &mut self,
@@ -1165,6 +1215,132 @@ impl<'a> TypeChecker<'a> {
         if !instantiations.contains(&arguments) {
             instantiations.push(arguments);
         }
+    }
+
+    /// Records one generic method specialisation. Class arguments come first so the
+    /// code generator can select the method instances belonging to each class instance.
+    fn record_method_instantiation(
+        &mut self,
+        expr: &Expr,
+        signature: &MethodSignature,
+        method_substitutions: &HashMap<String, TypeKind>,
+    ) {
+        let method_arguments: Vec<TypeKind> = signature
+            .method_generics
+            .iter()
+            .map(|parameter| {
+                method_substitutions
+                    .get(parameter)
+                    .cloned()
+                    .unwrap_or(TypeKind::User(String::new(), "error".to_string()))
+            })
+            .collect();
+        self.call_instantiations
+            .insert(expr as *const Expr, method_arguments.clone());
+
+        let mut arguments: Vec<TypeKind> = signature
+            .class_arguments
+            .iter()
+            .map(|argument| argument.kind.clone())
+            .collect();
+        arguments.extend(method_arguments);
+        let callee = Self::method_key(&signature.class_name, &signature.method_name);
+
+        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+            if let Some(caller) = self.current_generic_owner.clone() {
+                let site = GenericCallSite {
+                    caller_module: self.module_name.clone(),
+                    caller,
+                    callee_module: signature.module.clone(),
+                    callee,
+                    arguments,
+                };
+                if !self.generic_call_sites.contains(&site) {
+                    self.generic_call_sites.push(site);
+                }
+            }
+            return;
+        }
+
+        let instances = self
+            .instantiations
+            .entry(signature.module.clone())
+            .or_default()
+            .entry(callee)
+            .or_default();
+        if !instances.contains(&arguments) {
+            instances.push(arguments);
+        }
+    }
+
+    fn check_method_signature(
+        &mut self,
+        expr: &Expr,
+        token: &Token,
+        signature: &MethodSignature,
+        explicit: &[Type],
+        arguments: &[Box<Expr>],
+        argument_types: &[Type],
+    ) -> Type {
+        let class_substitutions: HashMap<String, TypeKind> = signature
+            .class_generics
+            .iter()
+            .cloned()
+            .zip(
+                signature
+                    .class_arguments
+                    .iter()
+                    .map(|argument| argument.kind.clone()),
+            )
+            .collect();
+        let params: Vec<Type> = signature
+            .params
+            .iter()
+            .map(|param| param.apply_substitution(&class_substitutions))
+            .collect();
+        let return_type = signature
+            .return_type
+            .apply_substitution(&class_substitutions);
+
+        if params.len() != argument_types.len() {
+            self.error_token(
+                token,
+                &format!(
+                    "Method `{}` expects {} args, got {}",
+                    signature.method_name,
+                    params.len(),
+                    argument_types.len()
+                ),
+            );
+            return return_type;
+        }
+
+        let method_substitutions = self.resolve_generics(
+            token,
+            &signature.method_name,
+            &signature.method_generics,
+            &params,
+            explicit,
+            argument_types,
+        );
+        for (index, (expected, actual)) in params.iter().zip(argument_types).enumerate() {
+            let expected = expected.apply_substitution(&method_substitutions);
+            if let Some(argument) = arguments.get(index) {
+                self.check_mutable_borrow(&expected, argument, actual);
+            }
+            if !actual.is_compatible_with(&expected) {
+                self.error_token(
+                    &get_token(&arguments[index]),
+                    &format!(
+                        "Argument mismatch in call to `{}`: expected `{}`, got `{}`",
+                        signature.method_name, expected.kind, actual.kind
+                    ),
+                );
+            }
+        }
+
+        self.record_method_instantiation(expr, signature, &method_substitutions);
+        return_type.apply_substitution(&method_substitutions)
     }
 
     /// Records that `expr` calls a generic function at a particular instantiation, so
@@ -2539,6 +2715,21 @@ impl<'a> Visitor for TypeChecker<'a> {
                 return;
             }
 
+            if let Some(signature) = self.method_callee(callee) {
+                if !signature.method_generics.is_empty() {
+                    let result = self.check_method_signature(
+                        expr,
+                        &get_token(callee),
+                        &signature,
+                        &[],
+                        arguments,
+                        &arg_tys,
+                    );
+                    self.set_expr_type(expr, result);
+                    return;
+                }
+            }
+
             let callee_ty = self.get_expr_type(callee).cloned().unwrap_or_else(|| {
                 Type::new(
                     paren.clone(),
@@ -2736,6 +2927,33 @@ impl<'a> Visitor for TypeChecker<'a> {
                     &function.generics,
                     &function.params,
                     &function.return_type,
+                    &explicit,
+                    arguments,
+                    &arg_tys,
+                );
+                self.set_expr_type(expr, result);
+                return;
+            }
+
+            if let Some(signature) = self.method_callee(callee) {
+                let token = get_token(callee);
+                let explicit: &[Type] = if signature.method_generics.is_empty() {
+                    self.error_token(
+                        &token,
+                        &format!(
+                            "`{}` is not generic, so it takes no type arguments",
+                            signature.method_name
+                        ),
+                    );
+                    &[]
+                } else {
+                    generics
+                };
+                let explicit = self.generalise_explicit(explicit);
+                let result = self.check_method_signature(
+                    expr,
+                    &token,
+                    &signature,
                     &explicit,
                     arguments,
                     &arg_tys,
@@ -3042,10 +3260,8 @@ impl<'a> Visitor for TypeChecker<'a> {
                                 );
                                 }
                                 self.set_expr_type(expr, field_ty.apply_substitution(&class_subs));
-                            } else if let Some((params, return_type, _, is_static)) =
-                                class.methods.get(&name.lexeme)
-                            {
-                                if *is_static && !self.in_static_context {
+                            } else if let Some(method) = class.methods.get(&name.lexeme) {
+                                if method.is_static && !self.in_static_context {
                                     self.error_token(
                                     name,
                                     &format!(
@@ -3059,11 +3275,14 @@ impl<'a> Visitor for TypeChecker<'a> {
                                     Type::new(
                                         name.clone(),
                                         TypeKind::Function(
-                                            params
+                                            method
+                                                .params
                                                 .iter()
                                                 .map(|p| p.apply_substitution(&class_subs))
                                                 .collect(),
-                                            Box::new(return_type.apply_substitution(&class_subs)),
+                                            Box::new(
+                                                method.return_type.apply_substitution(&class_subs),
+                                            ),
                                         ),
                                     ),
                                 );
@@ -3926,8 +4145,11 @@ impl<'a> Visitor for TypeChecker<'a> {
             // A free generic function owns dependencies found in its body. An ordinary
             // method of a generic class keeps the class as its owner, because all such
             // methods are emitted as part of each class specialisation.
-            let owner = if self.current_class.is_none() && !generics.is_empty() {
-                Some(Self::function_key(&name.lexeme))
+            let owner = if !generics.is_empty() {
+                match &self.current_class {
+                    Some(class_name) => Some(Self::method_key(class_name, &name.lexeme)),
+                    None => Some(Self::function_key(&name.lexeme)),
+                }
             } else {
                 self.current_generic_owner.clone()
             };
@@ -3935,7 +4157,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 std::mem::replace(&mut self.current_generic_owner, owner.clone());
 
             if let Some(owner) = owner {
-                if self.current_class.is_none() && !generics.is_empty() {
+                if !generics.is_empty() {
                     self.function_generics
                         .entry(self.module_name.clone())
                         .or_default()
@@ -4286,11 +4508,30 @@ impl<'a> Visitor for TypeChecker<'a> {
                 field.accept(self);
             }
 
-            // Construct a Type that represents this class, e.g. `User(className)`
-            let class_type = Type::new(
-                name.clone(),
-                TypeKind::User(self.module_name.clone(), class_name.clone()),
-            );
+            // `this` carries the symbolic class arguments while a generic class body is
+            // checked, allowing calls to generic methods to retain the class part of
+            // their eventual specialisation.
+            let class_type = if generic_names.is_empty() {
+                Type::new(
+                    name.clone(),
+                    TypeKind::User(self.module_name.clone(), class_name.clone()),
+                )
+            } else {
+                let arguments = generic_names
+                    .iter()
+                    .map(|generic| {
+                        Type::new(name.clone(), TypeKind::GenericParam(generic.clone()))
+                    })
+                    .collect();
+                Type::new(
+                    name.clone(),
+                    TypeKind::GenericInstance(
+                        self.module_name.clone(),
+                        class_name.clone(),
+                        arguments,
+                    ),
+                )
+            };
 
             for method in methods {
                 // Start a new scope for the method
