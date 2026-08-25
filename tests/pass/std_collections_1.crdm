@@ -1,0 +1,11 @@
+import collections;
+import io;
+
+fn main() {
+    let values: collections.Hashmap<int, string> =
+        new collections.Hashmap<int, string>();
+
+    values.add(1, "one");
+    values.add(1, "ONE");
+    io.println(values.get(1, "missing"));
+}

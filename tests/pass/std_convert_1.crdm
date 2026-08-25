@@ -1,0 +1,9 @@
+import convert;
+import io;
+import str;
+
+fn main() {
+    let source: float = 3.75;
+    let value: int = convert.into<float, int>(&source);
+    io.println(str.fromInt(value));
+}

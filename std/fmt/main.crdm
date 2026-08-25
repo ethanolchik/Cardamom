@@ -1,0 +1,75 @@
+import io;
+import str;
+
+// Converts a value into human-readable text.
+public trait Printable {
+    text() -> string;
+}
+
+public impl Printable for int {
+    public text() -> string {
+        return str.fromInt(this);
+    }
+}
+
+public impl Printable for float {
+    public text() -> string {
+        return str.fromFloat(this);
+    }
+}
+
+public impl Printable for bool {
+    public text() -> string {
+        if (this) {
+            return "true";
+        }
+        return "false";
+    }
+}
+
+public impl Printable for string {
+    public text() -> string {
+        return this;
+    }
+}
+
+// Arrays become printable whenever their elements are printable.
+public impl<T> Printable for T[]
+where
+    T: Printable
+{
+    public text() -> string {
+        let result: string = "[";
+
+        for (let i: int = 0; i < this.len(); i += 1) {
+            if (i > 0) {
+                result += ", ";
+            }
+            result += this[i].text();
+        }
+
+        result += "]";
+        return result;
+    }
+}
+
+public fn text<T>(value: &T) -> string
+where
+    T: Printable
+{
+    return value.text();
+}
+
+public fn print<T>(value: &T)
+where
+    T: Printable
+{
+    io.print(value.text());
+}
+
+public fn println<T>(value: &T)
+where
+    T: Printable
+{
+    io.println(value.text());
+}

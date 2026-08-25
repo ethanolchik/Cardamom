@@ -1,10 +1,16 @@
-public class Hashmap<K, V> {
+import cmp;
+import hash;
+
+public class Hashmap<K, V>
+where
+    K: cmp.Eq + hash.Hash
+{
     private keys: K[] = [];
     private values: V[] = [];
 
     public add(key: K, value: V) {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i] == key) {
+            if (this.keys[i].equals(key)) {
                 this.values[i] = value;
                 return;
             }
@@ -16,7 +22,7 @@ public class Hashmap<K, V> {
 
     public get(key: K, fallback: V) -> V {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i] == key) {
+            if (this.keys[i].equals(key)) {
                 return this.values[i];
             }
         }
@@ -27,7 +33,7 @@ public class Hashmap<K, V> {
     // Returns 1 when the key was removed and 0 when it was not present.
     public remove(key: K) -> int {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i] == key) {
+            if (this.keys[i].equals(key)) {
                 for (let j: int = i; j < this.keys.len() - 1; j += 1) {
                     this.keys[j] = this.keys[j + 1];
                     this.values[j] = this.values[j + 1];

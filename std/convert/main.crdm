@@ -1,0 +1,42 @@
+import str;
+
+public trait From<T> {
+    from(value: T) -> Self;
+}
+
+public trait Into<T> {
+    into() -> T;
+}
+
+// Receiver-based conversion works with today's static trait dispatch.
+public impl Into<int> for float {
+    public into() -> int {
+        @cpp("return static_cast<int>(self);");
+    }
+}
+
+// `From` models the associated-constructor side of conversion. Its implementation is
+// validated today; direct associated trait calls will become available with static
+// trait-method dispatch.
+public impl From<float> for int {
+    public from(value: float) -> int {
+        let strRepr: string = str.fromFloat(value);
+        
+        let dotIdx: int = 0;
+
+        for (let i: int = 0; i < str.len(strRepr); i += 1) {
+            if (str.charAt(strRepr, i) == ".") {
+                dotIdx = i;
+                break;
+            }
+        }
+
+        strRepr = str.substring(strRepr, 0, dotIdx);
+
+        return str.toInt(strRepr);
+    }
+}
+
+public fn into<T, U>(value: &T) -> U where T: Into<U> {
+    return value.into();
+}

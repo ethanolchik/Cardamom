@@ -1,0 +1,95 @@
+// Structural equality. Implementations return 1 for equal and 0 otherwise.
+public trait Eq {
+    equals(other: &Self) -> int;
+}
+
+// Strict ordering. A type may satisfy this structurally or through an explicit impl.
+public trait Comparable {
+    less(other: &Self) -> int;
+    greater(other: &Self) -> int;
+}
+
+public impl Eq for int {
+    public equals(other: &int) -> int {
+        return this == other;
+    }
+}
+
+public impl Comparable for int {
+    public less(other: &int) -> int {
+        return this < other;
+    }
+
+    public greater(other: &int) -> int {
+        return this > other;
+    }
+}
+
+public impl Eq for float {
+    public equals(other: &float) -> int {
+        return this == other;
+    }
+}
+
+public impl Comparable for float {
+    public less(other: &float) -> int {
+        return this < other;
+    }
+
+    public greater(other: &float) -> int {
+        return this > other;
+    }
+}
+
+public impl Eq for bool {
+    public equals(other: &bool) -> int {
+        return this == other;
+    }
+}
+
+public impl Comparable for bool {
+    public less(other: &bool) -> int {
+        return this < other;
+    }
+
+    public greater(other: &bool) -> int {
+        return this > other;
+    }
+}
+
+public impl Eq for string {
+    public equals(other: &string) -> int {
+        return this == other;
+    }
+}
+
+public impl Comparable for string {
+    public less(other: &string) -> int {
+        return this < other;
+    }
+
+    public greater(other: &string) -> int {
+        return this > other;
+    }
+}
+
+public fn equal<T>(left: &T, right: &T) -> int
+where
+    T: Eq
+{
+    return left.equals(right);
+}
+
+public fn less<T>(left: &T, right: &T) -> int
+where
+    T: Comparable
+{
+    return left.less(right);
+}
+
+public fn greater<T>(left: &T, right: &T) -> int
+where
+    T: Comparable
+{
+    return left.greater(right);
+}

@@ -1,0 +1,37 @@
+// Produces a deterministic process-local integer hash suitable for hash collections.
+public trait Hash {
+    hash() -> int;
+}
+
+public impl Hash for int {
+    public hash() -> int {
+        return this;
+    }
+}
+
+public impl Hash for bool {
+    public hash() -> int {
+        return this;
+    }
+}
+
+public impl Hash for float {
+    public hash() -> int {
+        @include("<functional>");
+        @cpp("return static_cast<int>(std::hash<double>{}(self));");
+    }
+}
+
+public impl Hash for string {
+    public hash() -> int {
+        @include("<functional>");
+        @cpp("return static_cast<int>(std::hash<std::string>{}(self));");
+    }
+}
+
+public fn hash<T>(value: &T) -> int
+where
+    T: Hash
+{
+    return value.hash();
+}

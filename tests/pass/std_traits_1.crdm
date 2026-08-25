@@ -1,0 +1,21 @@
+import cmp;
+import fmt;
+import hash;
+import io;
+import str;
+
+fn main() {
+    let number: int = 42;
+    let word: string = "cardamom";
+    let values: int[] = [1, 2, 3];
+    let enabled: bool = true;
+
+    fmt.println(&number);
+    fmt.println(&word);
+    fmt.println(&values);
+    fmt.println(&enabled);
+    io.println(str.fromInt(cmp.equal(&number, &number)));
+    io.println(str.fromInt(cmp.equal(&enabled, &enabled)));
+    io.println(str.fromInt(cmp.less(&number, &values[0])));
+    io.println(str.fromInt(hash.hash(&word)));
+}
