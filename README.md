@@ -82,8 +82,13 @@ It is written in Cardamom, in `std/`:
 | `str` | `len`, `charAt`, `charCodeAt`, `fromASCII`, `fromInt`, `fromFloat`, `toInt`, `toFloat`, `substring`, `repeat`, `contains` |
 | `math` | `abs`, `min`, `max`, `pow`, `sqrt` |
 | `raylib` (optional) | Native windows, drawing, input, timing, and screenshots; requires raylib when used |
+| `cmp` | structural `Eq` and `Comparable`, primitive implementations, generic comparison helpers |
+| `fmt` | structural `Printable`, primitive/array implementations, generic `text`, `print`, `println` |
+| `hash` | structural `Hash`, primitive implementations, generic hashing |
+| `convert` | generic `From<T>`/`Into<T>` conversion traits and `into<T, U>` |
+| `collections` | bounded generic `Hashmap<K, V>` |
 
-Adding a function means editing `std/<module>/main.crdm` — no compiler changes.
+Adding a function or trait implementation means editing `std/<module>/main.crdm` — no compiler changes.
 
 Only the functions a program actually calls are emitted, so importing a module costs
 nothing for the parts you do not use.
@@ -176,8 +181,41 @@ Instantiation is transitive and only the instantiations a program actually uses 
 emitted, so `Box<T>` used inside `wrap<T>` produces exactly the specialisations `wrap`
 is called at.
 
-Generic functions cross module boundaries; classes do not yet, since only functions are
-exported.
+Generic functions, classes, methods, and implementations cross module boundaries.
+Nested generic types use the ordinary spelling, including adjacent closing brackets:
+`Box<Box<int>>`.
+
+## Traits and constraints
+
+Traits are structural: a class satisfies a trait whenever it has compatible public
+methods, without an explicit declaration. `where` clauses expose those methods in a
+generic body and validate every concrete instantiation:
+
+```cpp
+trait Printable {
+    text() -> string;
+}
+
+fn render<T>(value: &T) -> string where T: Printable {
+    return value.text();
+}
+```
+
+Explicit implementations add trait behavior to primitives or foreign types, and may
+also be generic and constrained:
+
+```cpp
+impl Printable for int {
+    public text() -> string { return str.fromInt(this); }
+}
+
+impl<T> Printable for Box<T> where T: Printable {
+    public text() -> string { return this.value.text(); }
+}
+```
+
+Traits use static monomorphised dispatch; they do not introduce vtables or runtime
+trait objects.
 
 ## Functions as values
 
