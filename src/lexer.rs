@@ -364,6 +364,9 @@ impl Lexer {
             "extern" => TokenKind::Extern,
             "extend" => TokenKind::Extend,
             "mut" => TokenKind::Mut,
+            "trait" => TokenKind::Trait,
+            "impl" => TokenKind::Impl,
+            "where" => TokenKind::Where,
             _ => TokenKind::Identifier,
         };
         self.add_token(kind);

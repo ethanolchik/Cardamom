@@ -67,6 +67,10 @@ impl Parser {
             return self.variable_declaration();
         } else if self.match_token(TokenKind::Class) {
             return self.class_declaration();
+        } else if self.match_token(TokenKind::Trait) {
+            return self.trait_declaration();
+        } else if self.match_token(TokenKind::Impl) {
+            return self.impl_declaration();
         } else if self.current_modifier != Modifier::None {
             return Err(self.error(String::from("Unexpected modifier.")));
         } else if self.match_token(TokenKind::Import) {
@@ -352,8 +356,14 @@ impl Parser {
             };
         }
 
-        self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
-        let body = self.block()?;
+        let constraints = self.where_clause()?;
+        let body = if kind == "trait method" {
+            self.consume(TokenKind::Semicolon, "Expected ';' after trait method signature.")?;
+            Vec::new()
+        } else {
+            self.consume(TokenKind::LBrace, "Expected '{' before function body.")?;
+            self.block()?
+        };
 
         Ok(Stmt::Function {
             name,
@@ -362,6 +372,130 @@ impl Parser {
             return_type,
             modifiers: function_modifier,
             generics,
+            constraints,
+        })
+    }
+
+    fn where_clause(&mut self) -> Result<Vec<GenericConstraint>, Error> {
+        let mut constraints = Vec::new();
+        if !self.match_token(TokenKind::Where) {
+            return Ok(constraints);
+        }
+
+        loop {
+            let parameter = self.consume(
+                TokenKind::Identifier,
+                "Expected generic parameter after 'where'.",
+            )?;
+            self.consume(TokenKind::Colon, "Expected ':' after generic parameter.")?;
+
+            let mut traits = vec![self.type_expression()?];
+            while self.match_token(TokenKind::Plus) {
+                traits.push(self.type_expression()?);
+            }
+            constraints.push(GenericConstraint { parameter, traits });
+
+            if !self.match_token(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(constraints)
+    }
+
+    pub fn trait_declaration(&mut self) -> Result<Stmt, Error> {
+        let mut modifier = Vec::new();
+        if self.current_modifier != Modifier::None {
+            modifier.push(self.current_modifier.clone());
+            self.current_modifier = Modifier::None;
+        }
+        let name = self.consume(TokenKind::Identifier, "Expected trait name.")?;
+        let mut generics = Vec::new();
+        if self.match_token(TokenKind::Lt) {
+            loop {
+                generics.push(self.consume(TokenKind::Identifier, "Expected generic name.")?);
+                if !self.match_token(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.consume(TokenKind::Gt, "Expected '>' after trait generics.")?;
+        }
+
+        self.consume(TokenKind::LBrace, "Expected '{' before trait body.")?;
+        let mut methods = Vec::new();
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            let method_modifiers = self.member_modifiers()?;
+            let method_name =
+                self.consume(TokenKind::Identifier, "Expected trait method name.")?;
+            let mut method = self.function_declaration("trait method")?;
+            if let Stmt::Function {
+                name,
+                modifiers,
+                ..
+            } = &mut method
+            {
+                *name = method_name;
+                modifiers.extend(method_modifiers);
+                modifiers.push(Modifier::Method);
+            }
+            methods.push(Box::new(method));
+        }
+        self.consume(TokenKind::RBrace, "Expected '}' after trait body.")?;
+        Ok(Stmt::Trait {
+            name,
+            generics,
+            methods,
+            modifier,
+        })
+    }
+
+    pub fn impl_declaration(&mut self) -> Result<Stmt, Error> {
+        let mut modifier = Vec::new();
+        if self.current_modifier != Modifier::None {
+            modifier.push(self.current_modifier.clone());
+            self.current_modifier = Modifier::None;
+        }
+        let mut generics = Vec::new();
+        if self.match_token(TokenKind::Lt) {
+            loop {
+                generics.push(self.consume(TokenKind::Identifier, "Expected generic name.")?);
+                if !self.match_token(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.consume(TokenKind::Gt, "Expected '>' after impl generics.")?;
+        }
+
+        let trait_type = self.type_expression()?;
+        self.consume(TokenKind::For, "Expected 'for' after trait name.")?;
+        let target = self.type_expression()?;
+        let constraints = self.where_clause()?;
+        self.consume(TokenKind::LBrace, "Expected '{' before impl body.")?;
+        let mut methods = Vec::new();
+        while !self.check(TokenKind::RBrace) && !self.is_at_end() {
+            let method_modifiers = self.member_modifiers()?;
+            let method_name = self.consume(TokenKind::Identifier, "Expected impl method name.")?;
+            let mut method = self.function_declaration("method")?;
+            if let Stmt::Function {
+                name,
+                modifiers,
+                ..
+            } = &mut method
+            {
+                *name = method_name;
+                modifiers.extend(method_modifiers);
+                modifiers.push(Modifier::Method);
+            }
+            methods.push(Box::new(method));
+        }
+        self.consume(TokenKind::RBrace, "Expected '}' after impl body.")?;
+
+        Ok(Stmt::Impl {
+            trait_type,
+            target,
+            generics,
+            constraints,
+            methods,
+            modifier,
         })
     }
 
@@ -422,6 +556,8 @@ impl Parser {
             self.consume(TokenKind::RParen, "Expected ')' after parameters.")?;
         }
 
+        let constraints = self.where_clause()?;
+
         self.consume(TokenKind::LBrace, "Expected '{' before class body.")?;
 
         while !self.check(TokenKind::RBrace) && !self.is_at_end() {
@@ -433,6 +569,7 @@ impl Parser {
         Ok(Stmt::Class {
             name,
             generics,
+            constraints,
             modifier: class_modifier,
             fields,
             methods,
@@ -605,7 +742,7 @@ impl Parser {
                     }
                 }
 
-                self.consume(TokenKind::Gt, "Expected '>' after function generics.")?;
+                self.consume_type_gt("Expected '>' after function generics.")?;
             }
 
             self.consume(
@@ -720,7 +857,7 @@ impl Parser {
                     }
                 }
 
-                self.consume(TokenKind::Gt, "Expected '>' after type generics.")?;
+                self.consume_type_gt("Expected '>' after type generics.")?;
                 attributes.push(Attribute::Class);
 
                 // `Foo<int>` is a particular instantiation, distinct from `Foo` itself.
@@ -1142,7 +1279,7 @@ impl Parser {
                     }
                 }
 
-                self.consume(TokenKind::Gt, "Expected '>' after generic parameters.")?;
+                self.consume_type_gt("Expected '>' after generic parameters.")?;
             }
             if self.match_token(TokenKind::LParen) {
                 let paren = self.previous();
@@ -1328,7 +1465,7 @@ impl Parser {
                 }
             }
 
-            self.consume(TokenKind::Gt, "Expected '>' after type arguments.")?;
+            self.consume_type_gt("Expected '>' after type arguments.")?;
         }
 
         self.consume(TokenKind::LParen, "Expected '(' after class name.")?;
@@ -1402,6 +1539,23 @@ impl Parser {
             body,
             return_type,
         })
+    }
+
+    /// Consumes one generic-closing `>`. The lexer intentionally tokenises `>>` as a
+    /// shift operator; in type context, consume its first half and leave a synthetic
+    /// `>` for the enclosing generic type.
+    fn consume_type_gt(&mut self, message: &str) -> Result<Token, Error> {
+        if self.check(TokenKind::Gt) {
+            return Ok(self.advance());
+        }
+        if self.check(TokenKind::RShift) {
+            let mut closing = self.peek().clone();
+            closing.kind = TokenKind::Gt;
+            closing.lexeme = ">".to_string();
+            self.tokens[self.current] = closing.clone();
+            return Ok(closing);
+        }
+        Err(self.error(message.to_string()))
     }
 
     pub fn consume(&mut self, kind: TokenKind, message: &str) -> Result<Token, Error> {
@@ -1509,6 +1663,8 @@ impl Parser {
                 | TokenKind::Let
                 | TokenKind::Const
                 | TokenKind::Class
+                | TokenKind::Trait
+                | TokenKind::Impl
                 | TokenKind::Import
                 | TokenKind::If
                 | TokenKind::While

@@ -221,7 +221,9 @@ impl<'a> CallCollector<'a> {
             | Stmt::Continue { .. }
             | Stmt::Import { .. }
             | Stmt::Class { .. }
-            | Stmt::Extension { .. } => {}
+            | Stmt::Extension { .. }
+            | Stmt::Trait { .. }
+            | Stmt::Impl { .. } => {}
         }
     }
 

@@ -231,6 +231,7 @@ impl<'a> TypeChecker<'a> {
                 fields,
                 methods,
                 modifier,
+                ..
             } = &**stmt
             {
                 let class = self.collect_exported_class(generics, fields, methods, modifier);
@@ -4108,6 +4109,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             return_type,
             generics,
             modifiers,
+            ..
         } = stmt
         {
             // Begin scope, set up parameters, etc. (same as before)

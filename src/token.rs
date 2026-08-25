@@ -103,6 +103,9 @@ pub enum TokenKind {
     Extern,
     Extend,
     Mut,
+    Trait,
+    Impl,
+    Where,
 
     // Misc
     Error,
@@ -216,6 +219,9 @@ impl TokenKind {
             TokenKind::Extern => "Extern".to_string(),
             TokenKind::Extend => "Extend".to_string(),
             TokenKind::Mut => "Mut".to_string(),
+            TokenKind::Trait => "Trait".to_string(),
+            TokenKind::Impl => "Impl".to_string(),
+            TokenKind::Where => "Where".to_string(),
             TokenKind::Error => "Error".to_string(),
         }
     }

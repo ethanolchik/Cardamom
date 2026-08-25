@@ -191,6 +191,12 @@ pub enum Expr {
 }
 
 #[derive(Clone, Debug)]
+pub struct GenericConstraint {
+    pub parameter: Token,
+    pub traits: Vec<Type>,
+}
+
+#[derive(Clone, Debug)]
 pub enum Stmt {
     Expression {
         expression: Box<Expr>,
@@ -237,6 +243,7 @@ pub enum Stmt {
         return_type: Type,
         modifiers: Vec<Modifier>,
         generics: Vec<Token>,
+        constraints: Vec<GenericConstraint>,
     },
     Import {
         /// The module being imported, e.g. `io` in `import io;`.
@@ -247,6 +254,7 @@ pub enum Stmt {
     Class {
         name: Token,
         generics: Vec<Token>,
+        constraints: Vec<GenericConstraint>,
         modifier: Vec<Modifier>,
         /// Every field, in source order. Visibility and `static` live in each
         /// field's own `modifiers`, because they are independent properties.
@@ -257,6 +265,21 @@ pub enum Stmt {
     Extension {
         target: Box<Type>,
         methods: Vec<Box<Stmt>>,
+    },
+    Trait {
+        name: Token,
+        generics: Vec<Token>,
+        methods: Vec<Box<Stmt>>,
+        modifier: Vec<Modifier>,
+    },
+    /// Marker implementation: required methods are ordinary methods on `target`.
+    Impl {
+        trait_type: Type,
+        target: Type,
+        generics: Vec<Token>,
+        constraints: Vec<GenericConstraint>,
+        methods: Vec<Box<Stmt>>,
+        modifier: Vec<Modifier>,
     },
 }
 
@@ -307,6 +330,8 @@ pub trait Visitor {
     fn visit_module(&mut self, stmt: &Module);
     fn visit_class(&mut self, stmt: &Stmt);
     fn visit_extension(&mut self, stmt: &Stmt);
+    fn visit_trait(&mut self, _stmt: &Stmt) {}
+    fn visit_impl(&mut self, _stmt: &Stmt) {}
 }
 
 impl Node for Expr {
@@ -354,6 +379,8 @@ impl Stmt {
             Stmt::Import { .. } => visitor.visit_import(self),
             Stmt::Class { .. } => visitor.visit_class(self),
             Stmt::Extension { .. } => visitor.visit_extension(self),
+            Stmt::Trait { .. } => visitor.visit_trait(self),
+            Stmt::Impl { .. } => visitor.visit_impl(self),
         }
     }
 }

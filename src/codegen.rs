@@ -1525,6 +1525,7 @@ impl Visitor for CppCodeGenerator {
             return_type,
             modifiers,
             generics,
+            ..
         } = stmt
         {
             if modifiers.contains(&Modifier::Extern) {
