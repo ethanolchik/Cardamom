@@ -19,6 +19,7 @@ pub struct Type {
 pub enum TypeKind {
     Int,
     Float,
+    Bool,
     String,
     Array(Box<Type>, usize),
     Function(Vec<Type>, Box<Type>),
@@ -61,6 +62,7 @@ impl TypeKind {
         match name {
             "int" => TypeKind::Int,
             "float" => TypeKind::Float,
+            "bool" => TypeKind::Bool,
             "string" => TypeKind::String,
             "void" => TypeKind::Void,
             _ => TypeKind::User("".to_string(), name.to_string()),
@@ -70,7 +72,11 @@ impl TypeKind {
     /// Returns `true` if the `TypeKind` is a primitive type.
     pub fn is_primitive(&self) -> bool {
         match self {
-            TypeKind::Int | TypeKind::Float | TypeKind::String | TypeKind::Void => true,
+            TypeKind::Int
+            | TypeKind::Float
+            | TypeKind::Bool
+            | TypeKind::String
+            | TypeKind::Void => true,
             TypeKind::Array(inner, _) => inner.is_primitive(),
             TypeKind::Reference(inner) => inner.is_primitive(),
             TypeKind::MutRef(inner) => inner.is_primitive(),
@@ -118,6 +124,7 @@ impl TypeKind {
         match self {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
+            TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "string".to_string(),
             // Arrays print in the same postfix form the parser accepts. Element types
             // written with a prefix (`&T`, `#T`, `*T`) or a function type are
@@ -208,6 +215,13 @@ impl Type {
         // Exact equality check
         //      If exactly the same type kind (and name, etc.), trivially compatible
         if self.kind == other.kind {
+            return true;
+        }
+        // Preserve compatibility with the language's historical 0/1 truth values.
+        if matches!(
+            (&self.kind, &other.kind),
+            (TypeKind::Bool, TypeKind::Int) | (TypeKind::Int, TypeKind::Bool)
+        ) {
             return true;
         }
         // Borrows.

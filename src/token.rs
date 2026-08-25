@@ -106,6 +106,8 @@ pub enum TokenKind {
     Trait,
     Impl,
     Where,
+    True,
+    False,
 
     // Misc
     Error,
@@ -222,6 +224,8 @@ impl TokenKind {
             TokenKind::Trait => "Trait".to_string(),
             TokenKind::Impl => "Impl".to_string(),
             TokenKind::Where => "Where".to_string(),
+            TokenKind::True => "True".to_string(),
+            TokenKind::False => "False".to_string(),
             TokenKind::Error => "Error".to_string(),
         }
     }

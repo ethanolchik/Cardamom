@@ -1,0 +1,10 @@
+import io;
+
+fn main() {
+    let enabled: bool = true;
+    let disabled: bool = false;
+
+    if (enabled && !disabled) {
+        io.println("boolean literals work");
+    }
+}

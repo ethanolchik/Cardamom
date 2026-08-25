@@ -367,6 +367,8 @@ impl Lexer {
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
             "where" => TokenKind::Where,
+            "true" => TokenKind::True,
+            "false" => TokenKind::False,
             _ => TokenKind::Identifier,
         };
         self.add_token(kind);

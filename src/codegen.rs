@@ -286,6 +286,7 @@ impl CppCodeGenerator {
         match kind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
+            TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "string".to_string(),
             TypeKind::Void => "void".to_string(),
             TypeKind::User(module, name) => {
@@ -1448,6 +1449,7 @@ impl CppCodeGenerator {
         match &ty.kind {
             TypeKind::Int => "int".to_string(),
             TypeKind::Float => "float".to_string(),
+            TypeKind::Bool => "bool".to_string(),
             TypeKind::String => "std::string".to_string(),
             TypeKind::Void => "void".to_string(),
             // A type parameter reaches codegen as a plain user type, because the parser

@@ -2374,6 +2374,7 @@ impl<'a> TypeChecker<'a> {
         match &ty.kind {
             TypeKind::Int
             | TypeKind::Float
+            | TypeKind::Bool
             | TypeKind::String
             | TypeKind::Void => true,
             // A module is a namespace, not something a variable can be declared as.
@@ -2605,7 +2606,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                     | TokenKind::Gt
                     | TokenKind::Lte
                     | TokenKind::Gte => {
-                        Type::new(Token::dummy("int"), TypeKind::Int) // booleans are just integers.
+                        Type::new(Token::dummy("bool"), TypeKind::Bool)
                     }
                     _ => {
                         // fallback: just assume same as left
@@ -2672,6 +2673,9 @@ impl<'a> Visitor for TypeChecker<'a> {
                 TokenKind::Integer => Type::new(value.clone(), TypeKind::Int),
                 TokenKind::Float => Type::new(value.clone(), TypeKind::Float),
                 TokenKind::String => Type::new(value.clone(), TypeKind::String),
+                TokenKind::True | TokenKind::False => {
+                    Type::new(value.clone(), TypeKind::Bool)
+                }
                 _ => {
                     // fallback
                     Type::new(
@@ -3512,7 +3516,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         );
                     }
                 }
-                TypeKind::Int | TypeKind::Float | TypeKind::String => {
+                TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::String => {
                     self.error_token(
                         &paren,
                         &format!("Cannot call non-function type `{}`", callee_ty.kind),
