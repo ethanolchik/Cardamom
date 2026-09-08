@@ -1588,7 +1588,11 @@ impl<'a> Visitor for TypeChecker<'a> {
                         return;
                     }
 
-                    if !rhs_ty.is_compatible_with(var_ty) {
+                    // Assignment writes a value through a borrow; it does not rebind
+                    // the reference. An immutable source may therefore be copied into
+                    // a mutable destination without converting &T into &mut T.
+                    let target_ty = Self::without_borrows(var_ty);
+                    if !rhs_ty.is_compatible_with(&target_ty) {
                         self.error_with_notes(
                             name.clone(),
                             &format!(

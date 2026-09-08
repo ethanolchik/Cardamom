@@ -1,0 +1,5 @@
+fn copy(source: &string[], destination: &mut int[]) {
+    destination = source;
+}
+
+fn main() {}
