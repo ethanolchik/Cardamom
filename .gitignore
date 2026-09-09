@@ -21,3 +21,7 @@ Cargo.lock
 /cardamom
 /boids.png
 __pycache__/
+
+# Local development and packaging of the editor extension.
+/editors/vscode/node_modules/
+/editors/vscode/*.vsix

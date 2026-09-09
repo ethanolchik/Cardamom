@@ -1,0 +1,401 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cardamom",
+  "scopeName": "source.cardamom",
+  "fileTypes": [
+    "crdm"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#cpp-intrinsic"
+    },
+    {
+      "include": "#intrinsics"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#imports"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#closures"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "name": "comment.line.double-slash.cardamom",
+      "begin": "//",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.comment.cardamom"
+        }
+      },
+      "end": "$"
+    },
+    "cpp-intrinsic": {
+      "name": "meta.function-call.intrinsic.cpp.cardamom",
+      "begin": "(@)(cpp)\\b\\s*(\\()",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.annotation.cardamom"
+        },
+        "2": {
+          "name": "support.function.intrinsic.cardamom"
+        },
+        "3": {
+          "name": "punctuation.section.arguments.begin.cardamom"
+        }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.arguments.end.cardamom"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comments"
+        },
+        {
+          "name": "string.quoted.double.cardamom",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.cardamom"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.cardamom"
+            }
+          },
+          "contentName": "meta.embedded.block.cpp",
+          "patterns": [
+            {
+              "match": "[^\"]+",
+              "captures": {
+                "0": {
+                  "patterns": [
+                    {
+                      "include": "source.cpp"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "comment": "Declare the dependency outside captures so VS Code loads it. The preceding match handles all content and bounds C++ contexts at the Cardamom quote.",
+              "include": "source.cpp"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.cardamom",
+          "begin": "'",
+          "end": "'",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.cardamom"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.cardamom"
+            }
+          },
+          "contentName": "meta.embedded.block.cpp",
+          "patterns": [
+            {
+              "match": "[^']+",
+              "captures": {
+                "0": {
+                  "patterns": [
+                    {
+                      "include": "source.cpp"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "comment": "Declare the dependency outside captures so VS Code loads it. The preceding match handles all content and bounds C++ contexts at the Cardamom quote.",
+              "include": "source.cpp"
+            }
+          ]
+        }
+      ]
+    },
+    "intrinsics": {
+      "match": "(@)([A-Za-z][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.annotation.cardamom"
+        },
+        "2": {
+          "name": "support.function.intrinsic.cardamom"
+        }
+      }
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.cardamom",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.cardamom"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.cardamom"
+            }
+          }
+        },
+        {
+          "name": "string.quoted.single.cardamom",
+          "begin": "'",
+          "end": "'",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.begin.cardamom"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.string.end.cardamom"
+            }
+          }
+        }
+      ]
+    },
+    "imports": {
+      "match": "\\b(import)\\s+([A-Za-z][A-Za-z0-9_]*)(?:\\s+(as)\\s+([A-Za-z][A-Za-z0-9_]*))?",
+      "captures": {
+        "1": {
+          "name": "keyword.control.import.cardamom"
+        },
+        "2": {
+          "name": "entity.name.namespace.cardamom"
+        },
+        "3": {
+          "name": "keyword.control.import.cardamom"
+        },
+        "4": {
+          "name": "entity.name.namespace.cardamom"
+        }
+      }
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+(?:(extern)\\s+)?([A-Za-z][A-Za-z0-9_]*)(?=\\s*[<(])",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.cardamom"
+            },
+            "2": {
+              "name": "storage.modifier.cardamom"
+            },
+            "3": {
+              "name": "entity.name.function.cardamom"
+            }
+          }
+        },
+        {
+          "match": "\\b(class|extend|new)\\s+([A-Za-z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.class.cardamom"
+            },
+            "2": {
+              "name": "entity.name.type.class.cardamom"
+            }
+          }
+        },
+        {
+          "match": "\\b(let|const)\\s+([A-Za-z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.variable.cardamom"
+            },
+            "2": {
+              "name": "variable.other.readwrite.cardamom"
+            }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z][A-Za-z0-9_]*)\\s*(:)(?!:)",
+          "captures": {
+            "1": {
+              "name": "variable.other.readwrite.cardamom"
+            },
+            "2": {
+              "name": "punctuation.separator.type.cardamom"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cardamom",
+          "match": "\\b(?:if|else|while|for|break|continue|return)\\b"
+        },
+        {
+          "name": "storage.modifier.cardamom",
+          "match": "\\b(?:public|private|protected|static|extern|mut)\\b"
+        },
+        {
+          "name": "storage.type.cardamom",
+          "match": "\\b(?:fn|class|let|const|extend)\\b"
+        },
+        {
+          "name": "keyword.operator.new.cardamom",
+          "match": "\\bnew\\b"
+        },
+        {
+          "name": "keyword.control.import.cardamom",
+          "match": "\\bimport\\b"
+        },
+        {
+          "name": "keyword.operator.cast.cardamom",
+          "match": "\\bas\\b"
+        },
+        {
+          "name": "variable.language.this.cardamom",
+          "match": "\\bthis\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.cardamom",
+          "match": "\\b(?:int|float|string|void)\\b"
+        },
+        {
+          "name": "entity.name.type.cardamom",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "closures": {
+      "match": "(?<!\\|)(\\|)([^|\\n]*)(\\|)(?=\\s*(?:fn\\b|[A-Za-z][A-Za-z0-9_]*|&)[^;{}]*->)",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.parameters.begin.cardamom"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#comments"
+            },
+            {
+              "include": "#types"
+            },
+            {
+              "include": "#keywords"
+            },
+            {
+              "name": "variable.parameter.cardamom",
+              "match": "\\b[A-Za-z][A-Za-z0-9_]*\\b"
+            },
+            {
+              "include": "#operators"
+            },
+            {
+              "include": "#punctuation"
+            }
+          ]
+        },
+        "3": {
+          "name": "punctuation.definition.parameters.end.cardamom"
+        }
+      }
+    },
+    "calls": {
+      "name": "entity.name.function.cardamom",
+      "match": "\\b[A-Za-z][A-Za-z0-9_]*\\b(?=\\s*(?:<[^;{}()]*>\\s*)?\\()"
+    },
+    "numbers": {
+      "name": "constant.numeric.cardamom",
+      "match": "\\b[0-9]+(?:\\.[0-9]+)?\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.cardamom",
+      "match": "->|::|\\.\\.|\\?\\?|<<=?|>>=?|\\*\\*|&&|\\|\\||[+\\-*/%&|^!=<>]=?|[?~]"
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.cardamom",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.block.end.cardamom",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.parens.begin.cardamom",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.parens.end.cardamom",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.cardamom",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.cardamom",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.terminator.statement.cardamom",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.cardamom",
+          "match": "[,.:]"
+        }
+      ]
+    },
+    "identifiers": {
+      "name": "variable.other.readwrite.cardamom",
+      "match": "\\b[A-Za-z][A-Za-z0-9_]*\\b"
+    }
+  }
+}

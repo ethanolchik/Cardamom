@@ -1,0 +1,34 @@
+import io as console;
+import str;
+
+// Constructor fields, generic types, and methods.
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+}
+
+fn copy<T>(source: &T[], destination: &mut T[]) {
+    destination = source;
+}
+
+fn squareRoot(value: float) -> float {
+    @include("<cmath>");
+    @cpp("return std::sqrt(value);");
+}
+
+fn main() {
+    let values: int[] = [1, 2, 3];
+    let copied: int[] = [];
+    copy(values, copied);
+
+    let twice: fn(int) -> int = |value| int -> { return value * 2; };
+    let box: Box<int> = new Box<int>(twice(copied[0]));
+    let description: string = "Generics, borrows, closures, and native code.";
+
+    if (box.get() > 0 && values.len() == 3) {
+        console.println(description);
+        console.println(str.fromInt(box.get()));
+        console.println(str.fromFloat(squareRoot(2.25)));
+    }
+}
