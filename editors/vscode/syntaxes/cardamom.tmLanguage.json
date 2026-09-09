@@ -244,6 +244,17 @@
           }
         },
         {
+          "match": "\\b(trait)\\s+([A-Za-z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.trait.cardamom"
+            },
+            "2": {
+              "name": "entity.name.type.trait.cardamom"
+            }
+          }
+        },
+        {
           "match": "\\b(let|const)\\s+([A-Za-z][A-Za-z0-9_]*)",
           "captures": {
             "1": {
@@ -280,6 +291,14 @@
         {
           "name": "storage.type.cardamom",
           "match": "\\b(?:fn|class|let|const|extend)\\b"
+        },
+        {
+          "name": "keyword.declaration.impl.cardamom",
+          "match": "\\bimpl\\b"
+        },
+        {
+          "name": "keyword.other.where.cardamom",
+          "match": "\\bwhere\\b"
         },
         {
           "name": "keyword.operator.new.cardamom",

@@ -93,6 +93,16 @@ let box: Box<int> = new Box<int>(1);`;
   hasScope(source, 'int', 'storage.type.primitive.cardamom');
 });
 
+test('traits, implementations, and constraints get useful scopes', () => {
+  const source = `trait Printable { text() -> string; }
+fn render<T>(value: &T) -> string where T: Printable { return value.text(); }
+impl Printable for int { public text() -> string { return "int"; } }`;
+  hasScope(source, 'trait', 'storage.type.trait.cardamom');
+  hasScope(source, 'Printable', 'entity.name.type.trait.cardamom');
+  hasScope(source, 'where', 'keyword.other.where.cardamom');
+  hasScope(source, 'impl', 'keyword.declaration.impl.cardamom');
+});
+
 test('strings and line comments shield keywords and comment markers', () => {
   const source = `let text: string = "class // return 123";
 // fn fake() -> int { return 42; }
