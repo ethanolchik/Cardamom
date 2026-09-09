@@ -238,6 +238,26 @@ are usable as ordinary identifiers and renamed during code generation.
 
 I am currently developing this programming language as a hobby
 
+## Editor support
+
+The [VS Code/Cursor extension](editors/vscode/README.md) adds `.crdm` syntax
+highlighting, embedded C++ highlighting for `@cpp(...)`, comment toggling, bracket
+matching, and snippets.
+
+Build and install it locally with Node.js 20 or newer:
+
+```sh
+cd editors/vscode
+npm ci --ignore-scripts
+npm test
+npm run package
+code --install-extension cardamom-0.1.0.vsix
+```
+
+For Cursor, replace `code` with `cursor`. You can also use **Extensions: Install
+from VSIX...** in the editor's Command Palette and select the generated package.
+Open a `.crdm` file and its language mode should be **Cardamom**.
+
 ## Building
 ```sh
 cargo build --release

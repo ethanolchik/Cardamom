@@ -1,0 +1,78 @@
+{
+  "name": "cardamom",
+  "displayName": "Cardamom",
+  "description": "Syntax highlighting and editing support for the Cardamom programming language.",
+  "version": "0.1.0",
+  "publisher": "ethanolchik",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethanolchik/Cardamom.git",
+    "directory": "editors/vscode"
+  },
+  "homepage": "https://github.com/ethanolchik/Cardamom",
+  "bugs": {
+    "url": "https://github.com/ethanolchik/Cardamom/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "cardamom",
+    "crdm",
+    "syntax",
+    "highlighting"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "cardamom",
+        "aliases": [
+          "Cardamom",
+          "cardamom"
+        ],
+        "extensions": [
+          ".crdm"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cardamom",
+        "scopeName": "source.cardamom",
+        "path": "./syntaxes/cardamom.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.cpp": "cpp"
+        },
+        "tokenTypes": {
+          "meta.embedded.block.cpp": "other"
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "cardamom",
+        "path": "./snippets/cardamom.json"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "package": "vsce package --no-dependencies --out cardamom-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.2.0"
+  }
+}
