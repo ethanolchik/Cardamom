@@ -1,0 +1,6 @@
+// Pure helpers must work without raylib's headers, library, or a display.
+import raylib as gfx;
+
+fn main() -> int {
+    return gfx.rgb(0, 0, 0);
+}

@@ -1,0 +1,136 @@
+// Optional raylib bindings. Link raylib when calling native functions in this module.
+// Colours are packed 24-bit RGB values; rgb() constructs one without native code.
+// Input uses raylib's integer key/button codes (ASCII for letters and space;
+// mouse button 0 is left, 1 is right). Predicates return 0 or 1.
+
+public fn rgb(red: int, green: int, blue: int) -> int {
+    return red * 65536 + green * 256 + blue;
+}
+
+public fn initWindow(width: int, height: int, title: string) {
+    @include("<raylib.h>");
+    @cpp("InitWindow(width, height, title.c_str());");
+}
+
+// Optional; call before initWindow.
+public fn enableAntialiasing() {
+    @include("<raylib.h>");
+    @cpp("SetConfigFlags(FLAG_MSAA_4X_HINT);");
+}
+
+public fn closeWindow() {
+    @include("<raylib.h>");
+    @cpp("CloseWindow();");
+}
+
+public fn windowShouldClose() -> int {
+    @include("<raylib.h>");
+    @cpp("return WindowShouldClose();");
+}
+
+public fn isWindowReady() -> int {
+    @include("<raylib.h>");
+    @cpp("return IsWindowReady();");
+}
+
+public fn setTargetFPS(fps: int) {
+    @include("<raylib.h>");
+    @cpp("SetTargetFPS(fps);");
+}
+
+public fn getFrameTime() -> float {
+    @include("<raylib.h>");
+    @cpp("return GetFrameTime();");
+}
+
+public fn getFPS() -> int {
+    @include("<raylib.h>");
+    @cpp("return GetFPS();");
+}
+
+public fn beginDrawing() {
+    @include("<raylib.h>");
+    @cpp("BeginDrawing();");
+}
+
+public fn endDrawing() {
+    @include("<raylib.h>");
+    @cpp("EndDrawing();");
+}
+
+public fn clearBackground(color: int) {
+    @include("<raylib.h>");
+    @cpp("ClearBackground(GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn beginScissorMode(x: int, y: int, width: int, height: int) {
+    @include("<raylib.h>");
+    @cpp("BeginScissorMode(x, y, width, height);");
+}
+
+public fn endScissorMode() {
+    @include("<raylib.h>");
+    @cpp("EndScissorMode();");
+}
+
+public fn drawTriangle(ax: float, ay: float, bx: float, by: float, cx: float, cy: float, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawTriangle(Vector2{ax, ay}, Vector2{bx, by}, Vector2{cx, cy}, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn drawLine(ax: float, ay: float, bx: float, by: float, thickness: float, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawLineEx(Vector2{ax, ay}, Vector2{bx, by}, thickness, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn drawCircle(x: float, y: float, radius: float, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawCircleV(Vector2{x, y}, radius, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn drawCircleLines(x: float, y: float, radius: float, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawCircleLinesV(Vector2{x, y}, radius, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn drawRectangle(x: int, y: int, width: int, height: int, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawRectangle(x, y, width, height, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn drawText(content: string, x: int, y: int, size: int, color: int) {
+    @include("<raylib.h>");
+    @cpp("DrawText(content.c_str(), x, y, size, GetColor((static_cast<unsigned int>(color) << 8) | 255U));");
+}
+
+public fn measureText(content: string, size: int) -> int {
+    @include("<raylib.h>");
+    @cpp("return MeasureText(content.c_str(), size);");
+}
+
+public fn isKeyPressed(key: int) -> int {
+    @include("<raylib.h>");
+    @cpp("return IsKeyPressed(key);");
+}
+
+public fn isMouseButtonDown(button: int) -> int {
+    @include("<raylib.h>");
+    @cpp("return IsMouseButtonDown(button);");
+}
+
+public fn getMouseX() -> float {
+    @include("<raylib.h>");
+    @cpp("return static_cast<float>(GetMouseX());");
+}
+
+public fn getMouseY() -> float {
+    @include("<raylib.h>");
+    @cpp("return static_cast<float>(GetMouseY());");
+}
+
+// Return 1 on success. Unlike raylib 5.5's TakeScreenshot, retain the directory
+// supplied by the caller rather than reducing the path to its basename.
+public fn takeScreenshot(filename: string) -> int {
+    @include("<raylib.h>");
+    @cpp("Image image = LoadImageFromScreen(); bool saved = ExportImage(image, filename.c_str()); UnloadImage(image); return saved;");
+}

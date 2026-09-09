@@ -19,3 +19,5 @@ Cargo.lock
 /output
 /output.cpp
 /cardamom
+/boids.png
+__pycache__/

@@ -1,39 +1,29 @@
-pub mod lexer;
-pub mod token;
-pub mod errors;
-pub mod parser;
 pub mod ast;
-pub mod ty;
-pub mod utils;
-pub mod typecheck;
+mod cli;
 pub mod codegen;
+pub mod errors;
+pub mod lexer;
 pub mod modules;
+pub mod parser;
 pub mod reachable;
+pub mod token;
+pub mod ty;
+pub mod typecheck;
+pub mod utils;
 
 use std::collections::HashMap;
-use std::env::args;
-use std::fs::File;
-use std::io::Write;
-use std::path::Path;
+use std::ffi::OsString;
+use std::fs;
+use std::process::Command;
 
 use crate::ast::Node;
 use crate::codegen::CppCodeGenerator;
 use crate::typecheck::ModuleExports;
 use crate::utils::symtable::SymbolTable;
 
-const PRINT_HELP: fn() -> () = || {
-    println!("Usage: cardamom [options] <filename>");
-    println!("Options:");
-    println!("\t-d, --debug\tEnable debug mode");
-    println!("\t-nc, --no-colour\tDisable coloured output");
-    println!("\t-h, --help\tDisplay this help message");
-    println!("\t-ast\tDisplay the AST");
-    println!("\t-out\tDisplay the output of the generated C code");
-};
-
-fn run_file(filename: String) -> bool {
+fn run_file(options: cli::Options) -> bool {
     // Load the program and everything it imports, in dependency order.
-    let program = match modules::load(Path::new(&filename)) {
+    let program = match modules::load(&options.input) {
         Ok(program) => program,
         Err(errors) => {
             for error in &errors {
@@ -46,7 +36,11 @@ fn run_file(filename: String) -> bool {
 
     if is_flag_set_str!("debug") {
         for module in &program.modules {
-            println!("[DEBUG] loaded module `{}` from {}", module.name, module.path.display());
+            println!(
+                "[DEBUG] loaded module `{}` from {}",
+                module.name,
+                module.path.display()
+            );
         }
     }
 
@@ -95,20 +89,22 @@ fn run_file(filename: String) -> bool {
         generic_call_sites.extend(tc.generic_call_sites.clone());
 
         for (module_name, functions) in tc.instantiations.clone() {
-            instantiations.entry(module_name).or_default().extend(functions);
+            instantiations
+                .entry(module_name)
+                .or_default()
+                .extend(functions);
         }
         for (module_name, functions) in tc.function_generics.clone() {
-            function_generics.entry(module_name).or_default().extend(functions);
+            function_generics
+                .entry(module_name)
+                .or_default()
+                .extend(functions);
         }
     }
 
     // Instantiation is transitive and can cross module boundaries, so the set is
     // closed once every module has been checked.
-    typecheck::expand_instantiations(
-        &mut instantiations,
-        &generic_call_sites,
-        &function_generics,
-    );
+    typecheck::expand_instantiations(&mut instantiations, &generic_call_sites, &function_generics);
 
     if error_count > 0 {
         eprintln!("Program exited with {} error(s).", error_count);
@@ -119,53 +115,102 @@ fn run_file(filename: String) -> bool {
     cg.set_instantiations(call_instantiations, instantiations);
     let code = cg.generate_program(&program);
 
-    let mut output = File::create("output.cpp").unwrap();
-    output.write_all(code.as_bytes()).unwrap();
-
-    let result = std::process::Command::new("g++")
-        .arg("output.cpp")
-        .arg("-o")
-        .arg("output")
-        .output()
-        .expect("Failed to compile the generated C++ code.");
-
-    if !is_flag_set_str!("show output") {
-        let _ = std::fs::remove_file("output.cpp");
+    match compile_cpp(&options, &program, &code) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("{error}");
+            false
+        }
     }
-
-    if result.status.success() {
-        println!("Successfully compiled the generated C++ code.");
-    } else {
-        eprintln!("Failed to compile the generated C++ code.");
-        eprintln!("{}", String::from_utf8_lossy(&result.stderr));
-        return false;
-    }
-
-    true
 }
 
-fn main() {
-    let mut filename: Option<String> = None;
-    let args: Vec<String> = args().collect();
+fn compile_cpp(
+    options: &cli::Options,
+    program: &modules::Program,
+    code: &str,
+) -> Result<(), String> {
+    // Absolute paths cannot be mistaken for compiler flags, even if the filename
+    // begins with a dash. Append rather than replace an extension: app.exe.cpp.
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("Could not read working directory: {e}"))?;
+    let binary = cwd.join(&options.output);
+    let mut cpp_name = binary.as_os_str().to_os_string();
+    cpp_name.push(".cpp");
+    let cpp = std::path::PathBuf::from(cpp_name);
 
-    for arg in args.iter() {
-        match arg.as_str() {
-            "-d" | "--debug" => set_flag_str!("debug"),
-            "-nc" | "--no-colour" => set_flag_str!("no colour"),
-            "-ast" => set_flag_str!("ast"),
-            "-out" => set_flag_str!("show output"),
-            "-h" | "--help" => {
-                PRINT_HELP();
-                return;
-            }
-            _ => {
-                filename = Some(arg.clone());
+    // A mistyped -o must never overwrite an input or one of its imported modules.
+    for path in [&binary, &cpp] {
+        if let Ok(existing) = fs::canonicalize(path) {
+            if program
+                .modules
+                .iter()
+                .any(|module| fs::canonicalize(&module.path).ok().as_ref() == Some(&existing))
+            {
+                return Err(format!(
+                    "Refusing to overwrite source file `{}`.",
+                    path.display()
+                ));
             }
         }
     }
 
-    if let Some(filename) = filename {
-        if !run_file(filename) {
+    fs::write(&cpp, code).map_err(|e| format!("Could not write `{}`: {e}", cpp.display()))?;
+
+    let cxx = options
+        .cxx
+        .clone()
+        .or_else(|| std::env::var_os("CXX"))
+        .unwrap_or_else(|| OsString::from("g++"));
+    let mut command = Command::new(&cxx);
+    command
+        .arg("-std=c++17")
+        .arg(&cpp)
+        // Libraries follow the translation unit, as required by static linkers.
+        .args(&options.cxx_args)
+        .arg("-o")
+        .arg(&binary);
+    if is_flag_set_str!("debug") {
+        println!("[DEBUG] {command:?}");
+    }
+
+    let result = command.output().map_err(|e| {
+        format!(
+            "Could not run C++ compiler `{}`: {e}. Use --cxx to select one.\nGenerated C++: {}",
+            cxx.to_string_lossy(),
+            cpp.display()
+        )
+    })?;
+    if !result.status.success() {
+        return Err(format!(
+            "C++ compilation failed ({}):\n{}\nGenerated C++: {}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr),
+            cpp.display()
+        ));
+    }
+    if !is_flag_set_str!("show output") {
+        let _ = fs::remove_file(&cpp);
+    }
+    print!("{}", String::from_utf8_lossy(&result.stdout));
+    eprint!("{}", String::from_utf8_lossy(&result.stderr));
+    println!("Compiled {}", options.output.display());
+    Ok(())
+}
+
+fn main() {
+    match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Invocation::Help) => println!("{}", cli::HELP),
+        Ok(cli::Invocation::Compile(options)) => {
+            // The command line is parsed once, before any compiler work begins.
+            unsafe {
+                utils::flags::FLAGS.0 = options.flags;
+            }
+            if !run_file(options) {
+                std::process::exit(1);
+            }
+        }
+        Err(error) => {
+            eprintln!("{error}");
             std::process::exit(1);
         }
     }

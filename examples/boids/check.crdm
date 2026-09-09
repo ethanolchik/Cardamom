@@ -1,0 +1,93 @@
+// Headless behavioural checks: this imports no graphics code or native dependencies.
+import flock;
+import io;
+
+fn main() -> int {
+    if (flock.wrap(-1.0, 100.0) != 99.0 || flock.wrap(301.0, 100.0) != 1.0) {
+        io.println("FAIL: positions must wrap in both directions");
+        return 1;
+    }
+    if (flock.delta(98.0, 100.0) != -2.0 || flock.delta(-98.0, 100.0) != 2.0) {
+        io.println("FAIL: neighbours must see one another across world edges");
+        return 1;
+    }
+
+    let close: float[] = [100.0, 100.0, 0.0, 80.0, 110.0, 100.0, 0.0, 80.0];
+    let next: float[] = [];
+    flock.step(close, next, 1000.0, 500.0, 0.02, 0.0, 0.0, 0.0);
+    if (next[2] >= 0.0 || next[6] <= 0.0 || close[0] != 100.0 || close[2] != 0.0) {
+        io.println("FAIL: separation must push apart without mutating the input snapshot");
+        return 1;
+    }
+
+    let edge: float[] = [2.0, 100.0, 0.0, 80.0, 998.0, 100.0, 0.0, 80.0];
+    flock.step(edge, next, 1000.0, 500.0, 0.02, 0.0, 0.0, 0.0);
+    if (next[2] <= 0.0 || next[6] >= 0.0) {
+        io.println("FAIL: separation must work across the seam");
+        return 1;
+    }
+
+    let turning: float[] = [100.0, 100.0, 80.0, 0.0, 140.0, 100.0, 0.0, 80.0];
+    flock.step(turning, next, 1000.0, 500.0, 0.02, 0.0, 0.0, 0.0);
+    if (next[3] <= 0.0 || next[6] <= 0.0) {
+        io.println("FAIL: neighbours should turn towards a shared heading");
+        return 1;
+    }
+
+    let single: float[] = [100.0, 100.0, 0.0, 80.0];
+    flock.step(single, next, 1000.0, 500.0, 0.02, 160.0, 100.0, 1.0);
+    if (next[2] <= 0.0) {
+        io.println("FAIL: the mouse should attract");
+        return 1;
+    }
+    flock.step(single, next, 1000.0, 500.0, 0.02, 160.0, 100.0, -1.0);
+    if (next[2] >= 0.0) {
+        io.println("FAIL: the mouse should repel");
+        return 1;
+    }
+
+    let boids: float[] = flock.create(96, 1000.0, 500.0, 42);
+    let again: float[] = flock.create(96, 1000.0, 500.0, 42);
+    flock.step(boids, next, 1000.0, 500.0, 0.0, 100.0, 100.0, 1.0);
+    let i: int = 0;
+    while (i < boids.len()) {
+        if (boids[i] != again[i] || next[i] != boids[i]) {
+            io.println("FAIL: seeding must be repeatable and zero elapsed time must be a no-op");
+            return 1;
+        }
+        i += 1;
+    }
+
+    // Exercise sustained attraction, repulsion, and unforced motion. Negating the
+    // bounds check also rejects NaNs, which simple < and > checks would miss.
+    let frame: int = 0;
+    while (frame < 600) {
+        let force: float = 0.0;
+        if (frame < 200) { force = 1.0; }
+        else if (frame < 400) { force = -1.0; }
+        flock.step(boids, next, 1000.0, 500.0, 0.016666667, 500.0, 250.0, force);
+        boids = next;
+        if (boids.len() != 384) {
+            io.println("FAIL: the flock size changed");
+            return 1;
+        }
+        i = 0;
+        while (i < boids.len()) {
+            let x: float = boids[i];
+            let y: float = boids[i + 1];
+            let vx: float = boids[i + 2];
+            let vy: float = boids[i + 3];
+            let speedSquared: float = vx * vx + vy * vy;
+            if (!(x >= 0.0 && x < 1000.0 && y >= 0.0 && y < 500.0 &&
+                  speedSquared >= 2024.0 && speedSquared <= 16901.0)) {
+                io.println("FAIL: non-finite state, escaped position, or unbounded speed");
+                return 1;
+            }
+            i += 4;
+        }
+        frame += 1;
+    }
+
+    io.println("Boids checks passed: wrapping, separation, alignment, mouse forces, determinism, and 600 stable steps.");
+    return 0;
+}

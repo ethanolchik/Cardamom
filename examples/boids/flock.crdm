@@ -1,0 +1,144 @@
+// Flocking with separation, alignment, and cohesion, entirely in Cardamom.
+// The world wraps at its edges, including neighbour and mouse distances.
+//
+// A boid occupies four consecutive floats: [x, y, velocityX, velocityY].
+// Public classes do not cross module boundaries yet, so the module uses arrays.
+// step() reads one snapshot and writes another; pass two distinct buffers.
+
+import math;
+
+public fn clamp(value: float, low: float, high: float) -> float {
+    if (value < low) { return low; }
+    if (value > high) { return high; }
+    return value;
+}
+
+public fn wrap(value: float, size: float) -> float {
+    if (size <= 0.0) { return 0.0; }
+    let result: float = value;
+    while (result < 0.0) { result += size; }
+    while (result >= size) { result -= size; }
+    return result;
+}
+
+// The shortest signed displacement around one axis of the torus.
+public fn delta(value: float, size: float) -> float {
+    if (value > size * 0.5) { return value - size; }
+    if (value < 0.0 - size * 0.5) { return value + size; }
+    return value;
+}
+
+// A small deterministic generator. Its intermediate values fit in a signed int.
+fn randomUnit(state: &mut int) -> float {
+    state = (state * 25173 + 13849) % 65536;
+    let sample: int = state;
+    return (as float sample) / 65536.0;
+}
+
+public fn create(count: int, width: float, height: float, seed: int) -> float[] {
+    let boids: float[] = [];
+    let state: int = seed % 65536;
+    if (state < 0) { state += 65536; }
+    let i: int = 0;
+    while (i < count) {
+        let x: float = randomUnit(state) * width;
+        let y: float = randomUnit(state) * height;
+        let vx: float = randomUnit(state) * 2.0 - 1.0;
+        let vy: float = randomUnit(state) * 2.0 - 1.0;
+        let length: float = math.sqrt(vx * vx + vy * vy);
+        if (length < 0.001) {
+            vx = 1.0;
+            vy = 0.0;
+            length = 1.0;
+        }
+        boids.push(x);
+        boids.push(y);
+        boids.push(vx / length * 80.0);
+        boids.push(vy / length * 80.0);
+        i += 1;
+    }
+    return boids;
+}
+
+public fn step(boids: &float[], next: &mut float[], width: float, height: float,
+               elapsed: float, mouseX: float, mouseY: float, mouseForce: float) {
+    next = boids;
+    if (width <= 0.0 || height <= 0.0 || elapsed <= 0.0) { return; }
+    let dt: float = clamp(elapsed, 0.0, 0.05);
+    let i: int = 0;
+    while (i < boids.len()) {
+        let x: float = boids[i];
+        let y: float = boids[i + 1];
+        let vx: float = boids[i + 2];
+        let vy: float = boids[i + 3];
+        let separationX: float = 0.0;
+        let separationY: float = 0.0;
+        let alignmentX: float = 0.0;
+        let alignmentY: float = 0.0;
+        let cohesionX: float = 0.0;
+        let cohesionY: float = 0.0;
+        let neighbours: float = 0.0;
+
+        let j: int = 0;
+        while (j < boids.len()) {
+            if (j != i) {
+                let dx: float = delta(boids[j] - x, width);
+                let dy: float = delta(boids[j + 1] - y, height);
+                let distanceSquared: float = dx * dx + dy * dy;
+                if (distanceSquared < 4900.0) {
+                    alignmentX += boids[j + 2];
+                    alignmentY += boids[j + 3];
+                    cohesionX += dx;
+                    cohesionY += dy;
+                    neighbours += 1.0;
+                    if (distanceSquared < 625.0) {
+                        separationX -= dx / (distanceSquared + 0.1);
+                        separationY -= dy / (distanceSquared + 0.1);
+                    }
+                }
+            }
+            j += 4;
+        }
+
+        let ax: float = separationX * 1100.0;
+        let ay: float = separationY * 1100.0;
+        if (neighbours > 0.0) {
+            ax += (alignmentX / neighbours - vx) * 1.8 + cohesionX / neighbours * 1.4;
+            ay += (alignmentY / neighbours - vy) * 1.8 + cohesionY / neighbours * 1.4;
+        }
+
+        if (mouseForce != 0.0) {
+            let dx: float = delta(mouseX - x, width);
+            let dy: float = delta(mouseY - y, height);
+            let distance: float = math.sqrt(dx * dx + dy * dy);
+            if (distance > 0.001 && distance < 220.0) {
+                let pull: float = mouseForce * 480.0 * (1.0 - distance / 220.0);
+                ax += dx / distance * pull;
+                ay += dy / distance * pull;
+            }
+        }
+
+        let acceleration: float = math.sqrt(ax * ax + ay * ay);
+        if (acceleration > 300.0) {
+            ax = ax / acceleration * 300.0;
+            ay = ay / acceleration * 300.0;
+        }
+        vx += ax * dt;
+        vy += ay * dt;
+        let speed: float = math.sqrt(vx * vx + vy * vy);
+        if (speed < 0.001) {
+            vx = 45.0;
+            vy = 0.0;
+        } else {
+            let targetSpeed: float = clamp(speed, 45.0, 130.0);
+            vx = vx / speed * targetSpeed;
+            vy = vy / speed * targetSpeed;
+        }
+
+        next[i] = wrap(x + vx * dt, width);
+        next[i + 1] = wrap(y + vy * dt, height);
+        next[i + 2] = vx;
+        next[i + 3] = vy;
+        i += 4;
+    }
+}

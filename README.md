@@ -81,6 +81,7 @@ It is written in Cardamom, in `std/`:
 | `io` | `print`, `println`, `input` |
 | `str` | `len`, `charAt`, `charCodeAt`, `fromASCII`, `fromInt`, `fromFloat`, `toInt`, `toFloat`, `substring`, `repeat`, `contains` |
 | `math` | `abs`, `min`, `max`, `pow`, `sqrt` |
+| `raylib` (optional) | Native windows, drawing, input, timing, and screenshots; requires raylib when used |
 
 Adding a function means editing `std/<module>/main.crdm` — no compiler changes.
 
@@ -247,4 +248,26 @@ cp ./target/release/cardamom ./cardamom
 ```sh
 ./cardamom <file>       # compile the file and generate ./output
 ./cardamom <file> -out  # compile the file and generate ./output and ./output.cpp
+./cardamom <file> -o app -- -O2  # choose an executable and pass C++ compiler flags
+./cardamom <file> --cxx clang++  # override the C++ compiler (also configurable with CXX)
 ```
+
+Arguments after `--` are passed individually to the C++ compiler, so native
+headers and libraries can be supplied with `-I`, `-L`, `-l`, and platform linker
+flags. Quote paths containing spaces. `-out` / `--keep-cpp` keeps the generated
+source at `<output>.cpp`; a failed native compilation also keeps it for debugging.
+The default C++ compiler is `$CXX` when set, otherwise `g++`, using C++17.
+
+## Boids demo
+
+The [boids example](examples/boids/README.md) has flocking, motion trails, mouse
+attraction and repulsion, and pause/reset controls. Its simulation is written in
+Cardamom and uses the optional raylib module for drawing and input.
+
+```sh
+python3 scripts/boids.py          # build raylib locally, compile, and open the demo
+python3 scripts/boids.py --check  # run the simulation checks without a window
+```
+
+The helper needs Python 3, Cargo, a C++ compiler, Git, and CMake. Dependencies are
+built under `target/`; see the example's README for platform setup and controls.

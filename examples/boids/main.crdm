@@ -1,0 +1,206 @@
+import raylib as gfx;
+import flock;
+import math;
+import str;
+import runtime;
+
+fn makeHistory(boids: &float[]) -> float[][] {
+    let history: float[][] = [];
+    let i: int = 0;
+    while (i < 12) {
+        history.push(boids);
+        i += 1;
+    }
+    return history;
+}
+
+fn drawTrails(history: &float[][], head: int, width: float, height: float) {
+    let age: int = 0;
+    while (age < history.len() - 1) {
+        let older: int = (head + age) % history.len();
+        let newer: int = (head + age + 1) % history.len();
+        let color: int = gfx.rgb(20 + age * 2, 34 + age * 4, 38 + age * 4);
+        let i: int = 0;
+        while (i < history[older].len()) {
+            let ax: float = history[older][i];
+            let ay: float = history[older][i + 1];
+            let bx: float = history[newer][i];
+            let by: float = history[newer][i + 1];
+            let dx: float = bx - ax;
+            let dy: float = by - ay;
+            // Skip seam crossings instead of drawing a line across the whole world.
+            if (dx * dx < width * width * 0.25 && dy * dy < height * height * 0.25) {
+                gfx.drawLine(ax + 32.0, ay + 126.0, bx + 32.0, by + 126.0, 1.2, color);
+            }
+            i += 4;
+        }
+        age += 1;
+    }
+}
+
+fn drawBoids(boids: &float[]) {
+    let i: int = 0;
+    while (i < boids.len()) {
+        let x: float = boids[i] + 32.0;
+        let y: float = boids[i + 1] + 126.0;
+        let vx: float = boids[i + 2];
+        let vy: float = boids[i + 3];
+        let length: float = math.sqrt(vx * vx + vy * vy);
+        let dx: float = vx / length;
+        let dy: float = vy / length;
+        let color: int = gfx.rgb(140, 218, 197);
+        if ((i / 4) % 7 == 0) { color = gfx.rgb(235, 184, 115); }
+        else if ((i / 4) % 3 == 0) { color = gfx.rgb(198, 231, 221); }
+
+        // Counter-clockwise vertex order, as required by raylib's triangle drawing.
+        gfx.drawTriangle(x + dx * 7.5, y + dy * 7.5,
+                         x - dx * 4.5 + dy * 3.2, y - dy * 4.5 - dx * 3.2,
+                         x - dx * 4.5 - dy * 3.2, y - dy * 4.5 + dx * 3.2, color);
+        i += 4;
+    }
+}
+
+fn keyHint(key: string, label: string, x: int, y: int) {
+    let width: int = gfx.measureText(key, 16) + 18;
+    gfx.drawRectangle(x, y - 4, width, 26, gfx.rgb(30, 44, 47));
+    gfx.drawText(key, x + 9, y + 1, 16, gfx.rgb(202, 221, 212));
+    gfx.drawText(label, x + width + 10, y + 1, 16, gfx.rgb(135, 156, 151));
+}
+
+fn drawInterface(count: int, paused: int, trails: int, mouseForce: float) {
+    let ink: int = gfx.rgb(224, 235, 218);
+    let muted: int = gfx.rgb(126, 151, 144);
+    let accent: int = gfx.rgb(235, 184, 115);
+
+    gfx.drawText("C A R D A M O M", 32, 26, 16, accent);
+    gfx.drawText("A little flock", 30, 51, 38, ink);
+    gfx.drawText("SEPARATION  /  ALIGNMENT  /  COHESION", 33, 100, 13, muted);
+    let status: string = "IN MOTION";
+    if (paused != 0) { status = "PAUSED"; }
+    gfx.drawCircle(991.0, 36.0, 3.0, accent);
+    gfx.drawText(status, 1005, 29, 16, ink);
+    let stats: string = str.fromInt(count) + " boids   /   " + str.fromInt(gfx.getFPS()) + " fps";
+    gfx.drawText(stats, 1148 - gfx.measureText(stats, 16), 62, 16, muted);
+
+    gfx.drawRectangle(32, 678, 1116, 1, gfx.rgb(42, 59, 59));
+    keyHint("SPACE", "pause", 32, 700);
+    keyHint("R", "reshuffle", 201, 700);
+    keyHint("T", "trails", 367, 700);
+    keyHint("- / +", "flock size", 501, 700);
+    keyHint("P", "save image", 697, 700);
+    keyHint("ESC", "exit", 924, 700);
+
+    let interaction: string = "Hold left mouse to attract. Hold right mouse to repel.";
+    if (mouseForce > 0.0) { interaction = "ATTRACTING  /  gathering around the cursor"; }
+    else if (mouseForce < 0.0) { interaction = "REPELLING  /  making a little room"; }
+    gfx.drawText(interaction, 32, 738, 13, muted);
+    if (!trails) { gfx.drawText("TRAILS OFF", 1054, 738, 13, muted); }
+}
+
+fn main() -> int {
+    let width: float = 1116.0;
+    let height: float = 532.0;
+    let count: int = 240;
+    let seed: int = 42;
+    let boids: float[] = flock.create(count, width, height, seed);
+    let next: float[] = [];
+    let history: float[][] = makeHistory(boids);
+    let historyHead: int = 0;
+    let tick: int = 0;
+    let paused: int = 0;
+    let trails: int = 1;
+    let accumulator: float = 0.0;
+    let frame: int = 0;
+
+    // scripts/boids.py --smoke sets a frame limit and a screenshot destination.
+    let frameSetting: string = runtime.env("CARDAMOM_BOIDS_FRAMES");
+    let frameLimit: int = 0;
+    if (str.len(frameSetting) > 0) { frameLimit = str.toInt(frameSetting); }
+    let screenshot: string = runtime.env("CARDAMOM_BOIDS_SCREENSHOT");
+    if (str.len(screenshot) == 0) { screenshot = "boids.png"; }
+
+    gfx.enableAntialiasing();
+    gfx.initWindow(1180, 780, "Cardamom | A little flock");
+    if (!gfx.isWindowReady()) { return 1; }
+    gfx.setTargetFPS(60);
+
+    while (gfx.windowShouldClose() == 0) {
+        // Letter keys use uppercase ASCII codes in raylib, regardless of shift.
+        if (gfx.isKeyPressed(32) != 0) { paused = 1 - paused; }
+        if (gfx.isKeyPressed(84) != 0) { trails = 1 - trails; }
+        let reset: int = gfx.isKeyPressed(82);
+        if (gfx.isKeyPressed(61) != 0 && count < 600) { count += 40; reset = 1; }
+        if (gfx.isKeyPressed(45) != 0 && count > 40) { count -= 40; reset = 1; }
+        if (reset != 0) {
+            seed += 97;
+            boids = flock.create(count, width, height, seed);
+            history = makeHistory(boids);
+            historyHead = 0;
+            tick = 0;
+            accumulator = 0.0;
+        }
+
+        let mouseX: float = gfx.getMouseX() - 32.0;
+        let mouseY: float = gfx.getMouseY() - 126.0;
+        let mouseForce: float = 0.0;
+        if (mouseX >= 0.0 && mouseX < width && mouseY >= 0.0 && mouseY < height) {
+            if (gfx.isMouseButtonDown(0) != 0) { mouseForce = 1.0; }
+            if (gfx.isMouseButtonDown(1) != 0) { mouseForce = -1.0; }
+        }
+
+        if (!paused) {
+            accumulator += flock.clamp(gfx.getFrameTime(), 0.0, 0.05);
+            // Fixed simulation steps keep the flock's behaviour independent of FPS.
+            while (accumulator >= 0.016666667) {
+                flock.step(boids, next, width, height, 0.016666667, mouseX, mouseY, mouseForce);
+                boids = next;
+                accumulator -= 0.016666667;
+                tick += 1;
+                if (tick % 3 == 0) {
+                    history[historyHead] = boids;
+                    historyHead = (historyHead + 1) % history.len();
+                }
+            }
+        } else {
+            accumulator = 0.0;
+        }
+
+        gfx.beginDrawing();
+        gfx.clearBackground(gfx.rgb(15, 24, 27));
+        gfx.drawRectangle(32, 126, 1116, 532, gfx.rgb(18, 30, 33));
+        gfx.beginScissorMode(32, 126, 1116, 532);
+        let gridX: int = 32;
+        while (gridX <= 1148) {
+            let gridY: int = 126;
+            while (gridY <= 658) {
+                gfx.drawCircle(as float gridX, as float gridY, 1.0, gfx.rgb(38, 54, 55));
+                gridY += 40;
+            }
+            gridX += 40;
+        }
+        if (trails != 0) { drawTrails(history, historyHead, width, height); }
+        if (mouseForce != 0.0) {
+            let color: int = gfx.rgb(78, 127, 117);
+            if (mouseForce < 0.0) { color = gfx.rgb(165, 115, 74); }
+            gfx.drawCircleLines(mouseX + 32.0, mouseY + 126.0, 42.0, color);
+            gfx.drawCircleLines(mouseX + 32.0, mouseY + 126.0, 90.0, color);
+            gfx.drawCircle(mouseX + 32.0, mouseY + 126.0, 3.0, gfx.rgb(235, 184, 115));
+        }
+        drawBoids(boids);
+        gfx.endScissorMode();
+        drawInterface(count, paused, trails, mouseForce);
+        gfx.endDrawing();
+
+        frame += 1;
+        if (gfx.isKeyPressed(80) != 0 || (frameLimit > 0 && frame >= frameLimit)) {
+            if (!gfx.takeScreenshot(screenshot)) {
+                gfx.closeWindow();
+                return 1;
+            }
+        }
+        if (frameLimit > 0 && frame >= frameLimit) { break; }
+    }
+
+    gfx.closeWindow();
+    return 0;
+}

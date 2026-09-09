@@ -1,0 +1,5 @@
+// Environment settings used by the demo's optional smoke run and screenshot export.
+public fn env(name: string) -> string {
+    @include("<cstdlib>");
+    @cpp("const char* value = std::getenv(name.c_str()); return value ? std::string(value) : std::string();");
+}
