@@ -43,8 +43,8 @@ fn main() -> void {
 ## Modules
 
 `import <name>;` looks for a module as `<name>.crdm` or `<name>/main.crdm`, searching
-next to the importing file first and then the standard library. Only `public` functions
-are visible to importers.
+next to the importing file first and then the standard library. Public functions,
+classes, and traits are visible to importers.
 
 ```cpp
 // geometry/main.crdm
@@ -80,8 +80,8 @@ It is written in Cardamom, in `std/`:
 | --- | --- |
 | `io` | `print`, `println`, `input` |
 | `str` | `len`, `charAt`, `charCodeAt`, `fromASCII`, `fromInt`, `fromFloat`, `toInt`, `toFloat`, `substring`, `repeat`, `contains` |
-| `math` | `abs`, `min`, `max`, `pow`, `sqrt` |
-| `raylib` (optional) | Native windows, drawing, input, timing, and screenshots; requires raylib when used |
+| `math` | `abs`, `min`, `max`, `pow`, `sqrt`, `sin`, `exp` |
+| `raylib` (optional) | Native windows, drawing, input, timing, screenshots, and PCM sound playback; requires raylib when used |
 | `cmp` | operator-backed `Eq` and `Comparable`, primitive/array implementations, generic comparisons, `min`, `max` |
 | `ops` | arithmetic, bitwise, shift, and unary operator traits with separate operand/result types |
 | `fmt` | structural `Printable`, primitive/array implementations, generic `text`, `print`, `println` |
@@ -340,3 +340,25 @@ python3 scripts/boids.py --check  # run the simulation checks without a window
 
 The helper needs Python 3, Cargo, a C++ compiler, Git, and CMake. Dependencies are
 built under `target/`; see the example's README for platform setup and controls.
+
+## Forking paths
+
+[Forking paths](examples/boids/FORKS.md) lets you rewind the flock, fork from a
+chosen moment, and play **six independent worlds as a musical ensemble**. Change
+separation, alignment, or cohesion, fork a fork, or nudge one boid and watch the
+effect spread. Each new fork preserves the other recorded futures. A shared
+timeline retains the last 30 seconds; trails and a reference ghost show how the
+worlds diverge.
+
+Give each world its own **glass, pluck, pad, bass, FM, or drum** instrument. Shape
+its pattern, tone, register, loop length, density, level, and pan, with individual
+mute/solo and shared tempo, key, scale, and chord drift. Start with **Neon Grove**,
+**Glasshouse**, or the six-part **Orbital** preset, then add and edit your own parts.
+Replaying the same physics with the same settings reproduces the note events.
+
+```sh
+python3 scripts/forks.py                 # four-part Neon Grove ensemble
+python3 scripts/forks.py --scene orbital # all six instruments
+python3 scripts/forks.py --check         # timelines and music without a display/device
+python3 scripts/forks.py --render-audio --scene orbital # eight-bar stereo WAV
+```

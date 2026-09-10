@@ -1,0 +1,261 @@
+// Deterministic composition and synthesis. Events are seven floats:
+// [instrument, MIDI note (36/38/42 for drums), velocity, boid, x, y, simulation tick].
+// Settings and the shared clock are documented in arrangement/main.crdm.
+import flock;
+import math;
+import str;
+
+public fn pitchClass(note: int) -> string {
+    let names: string[] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    return names[(note % 12 + 12) % 12];
+}
+
+public fn noteName(instrument: int, note: int) -> string {
+    if (instrument == 5) {
+        if (note == 36) { return "KICK"; }
+        if (note == 38) { return "SNARE"; }
+        return "HAT";
+    }
+    return pitchClass(note) + str.fromInt(note / 12 - 1);
+}
+
+public fn frequency(note: int) -> float {
+    return 440.0 * math.exp((as float (note - 69)) * 0.057762265);
+}
+
+public fn scale(mode: int) -> int[] {
+    if (mode == 1) { return [0, 2, 4, 7, 9]; }
+    if (mode == 2) { return [0, 2, 3, 5, 7, 9, 10]; }
+    if (mode == 3) { return [0, 2, 4, 6, 8, 10]; }
+    return [0, 3, 5, 7, 10];
+}
+
+public fn grid(tick: int, tempo: int) -> int {
+    return tick > 0 && (tick * tempo) / 900 != ((tick - 1) * tempo) / 900;
+}
+
+public fn stepNumber(tick: int, tempo: int) -> int {
+    return math.max(0, (tick * tempo) / 900 - 1);
+}
+
+public fn gate(step: int, pulses: int, length: int) -> int {
+    let size: int = math.max(1, length);
+    let count: int = math.min(size, math.max(1, pulses));
+    return ((step % size) * count) % size < count;
+}
+
+fn pitch(instrument: int, degree: int, settings: &float[], clock: &int[]) -> int {
+    if (instrument == 5) {
+        let drums: int[] = [36, 38, 42];
+        return drums[degree % 3];
+    }
+    let steps: int[] = scale(clock[2]);
+    let base: int = 48;
+    if (instrument == 0 || instrument == 4) { base = 60; }
+    if (instrument == 3) { base = 36; }
+    let note: int = base + clock[1] + steps[degree % steps.len()] +
+                    (degree / steps.len()) * 12 + (as int settings[3]) * 12;
+    return math.min(96, math.max(24, note));
+}
+
+fn append(notes: &mut float[], instrument: int, note: int, gain: float,
+          boid: int, current: &float[], tick: int) {
+    notes.push(as float instrument);
+    notes.push(as float note);
+    notes.push(flock.clamp(gain, 0.15, 0.95));
+    notes.push(as float boid);
+    notes.push(current[boid * 4]);
+    notes.push(current[boid * 4 + 1]);
+    notes.push(as float tick);
+}
+
+public fn events(previous: &float[], current: &float[], tick: int, width: float, height: float,
+                 settings: &float[], clock: &int[]) -> float[] {
+    let notes: float[] = [];
+    if (current.len() == 0 || current.len() % 4 != 0 || previous.len() != current.len() ||
+        settings.len() != 10 || clock.len() != 4 || width <= 0.0 || height <= 0.0) { return notes; }
+    let tempo: int = math.min(180, math.max(60, clock[0]));
+    if (!grid(tick, tempo)) { return notes; }
+    let step: int = stepNumber(tick, tempo);
+    let instrument: int = as int settings[0];
+    let pattern: int = as int settings[1];
+    let length: int = math.max(1, as int settings[9]);
+    let density: int = math.min(length, math.max(1, as int settings[2]));
+    let count: int = current.len() / 4;
+    let boid: int = (step * 17 + instrument * 13) % count;
+    let changes: int = 0;
+
+    // The encounter pattern chooses the strongest neighbour change on this grid.
+    // The other patterns turn flock position and speed into a continuous phrase.
+    if (pattern == 0) {
+        let cursor: int = 0;
+        while (cursor < count) {
+            let candidate: int = (cursor + step * 17) % count;
+            let i: int = candidate * 4;
+            let strength: int = 0;
+            let j: int = 0;
+            while (j < current.len()) {
+                if (j != i) {
+                    let dx: float = flock.delta(current[j] - current[i], width);
+                    let dy: float = flock.delta(current[j + 1] - current[i + 1], height);
+                    let px: float = flock.delta(previous[j] - previous[i], width);
+                    let py: float = flock.delta(previous[j + 1] - previous[i + 1], height);
+                    let near: int = dx * dx + dy * dy < 2500.0;
+                    let wasNear: int = px * px + py * py < 2500.0;
+                    if (near != wasNear) { strength += 1; }
+                }
+                j += 4;
+            }
+            if (strength > changes) { changes = strength; boid = candidate; }
+            cursor += 1;
+        }
+        if (changes == 0) { return notes; }
+    }
+
+    let i: int = boid * 4;
+    let speed: float = math.sqrt(current[i + 2] * current[i + 2] + current[i + 3] * current[i + 3]);
+    let gain: float = flock.clamp(0.5 + speed / 500.0 + (as float math.min(changes, 5)) * 0.04, 0.5, 0.9);
+    let steps: int[] = scale(clock[2]);
+    let altitude: float = flock.clamp(1.0 - current[i + 1] / height, 0.0, 0.9999);
+    let degree: int = as int (altitude * (as float (steps.len() * 2)));
+    let chord: int = 0;
+    if (clock[3]) {
+        let progression: int[] = [0, 3, 1, 4];
+        chord = progression[(step / 32) % 4];
+    }
+
+    if (pattern == 5) {
+        // Backbeat plus hats; density opens ghost kicks and faster hats.
+        let local: int = step % length;
+        let kick: int = local % 8 == 0 || (density >= 13 && local % 16 == 10);
+        let snare: int = density >= 4 && local % 8 == 4;
+        let hat: int = density >= 7 && (local % 2 == 0 || density >= 13);
+        let note: int = pitch(instrument, chord, settings, clock);
+        if (instrument == 5) { note = 36; }
+        if (kick) { append(notes, instrument, note, gain + 0.05, boid, current, tick); }
+        note = pitch(instrument, chord + 2, settings, clock);
+        if (instrument == 5) { note = 38; }
+        if (snare) { append(notes, instrument, note, gain, boid, current, tick); }
+        note = pitch(instrument, degree, settings, clock);
+        if (instrument == 5) { note = 42; }
+        if (hat) { append(notes, instrument, note, gain * 0.55, boid, current, tick); }
+        return notes;
+    }
+
+    if (!gate(step, density, length)) { return notes; }
+    if (pattern == 3) {
+        if (step % 4 != 0) { return notes; }
+        let octave: int = (as int (altitude * 2.0)) * steps.len();
+        let voice: int = 0;
+        while (voice < 3) {
+            append(notes, instrument, pitch(instrument, chord + octave + voice * 2, settings, clock),
+                   gain * 0.75, boid, current, tick);
+            voice += 1;
+        }
+        return notes;
+    }
+    if (pattern == 1) {
+        let arp: int[] = [0, 2, 4, 6, 4, 2];
+        degree = chord + arp[step % 6] + (as int (altitude * 2.0)) * steps.len();
+    }
+    if (pattern == 2) { degree = chord + (degree + step / length) % (steps.len() * 2); }
+    if (pattern == 4) {
+        degree = chord;
+        if (step % 8 >= 4) { degree += 4; }
+    }
+    append(notes, instrument, pitch(instrument, degree, settings, clock), gain, boid, current, tick);
+    return notes;
+}
+
+public fn remember(recent: &mut float[], notes: &float[], tick: int) {
+    let kept: float[] = [];
+    let i: int = 0;
+    while (i < recent.len()) {
+        if (tick - (as int recent[i + 6]) < 45) {
+            let j: int = 0;
+            while (j < 7) { kept.push(recent[i + j]); j += 1; }
+        }
+        i += 7;
+    }
+    i = 0;
+    while (i < notes.len()) { kept.push(notes[i]); i += 1; }
+    recent = kept;
+}
+
+// The six instruments share a strict .8 amplitude bound. PCM is generated
+// only for cache misses, then reused. All attacks and releases reach zero.
+public fn samples(instrument: int, note: int, colour: int, rate: int) -> float[] {
+    let pcm: float[] = [];
+    if (rate < 8000 || rate > 192000 || instrument < 0 || instrument > 5) { return pcm; }
+    let shade: float = (as float math.min(2, math.max(0, colour))) / 2.0;
+    let duration: float = 0.75;
+    if (instrument == 1) { duration = 0.4; }
+    if (instrument == 2) { duration = 1.35; }
+    if (instrument == 3) { duration = 0.36; }
+    if (instrument == 4) { duration = 0.65; }
+    if (instrument == 5) {
+        duration = 0.11;
+        if (note == 36) { duration = 0.32; }
+        if (note == 38) { duration = 0.22; }
+    }
+    let frames: int = as int (duration * (as float rate));
+    let hz: float = frequency(math.min(96, math.max(24, note)));
+    let noiseState: int = 7331;
+    let lastNoise: float = 0.0;
+    let i: int = 0;
+    while (i < frames) {
+        let t: float = (as float i) / (as float rate);
+        let phase: float = 6.283185307 * hz * t;
+        let attack: float = flock.clamp(t / 0.006, 0.0, 1.0);
+        let release: float = flock.clamp((as float (frames - 1 - i)) / ((as float rate) * 0.025), 0.0, 1.0);
+        let wave: float = (0.8 - shade * 0.2) * math.sin(phase) +
+                          (0.15 + shade * 0.15) * math.sin(phase * 2.01) +
+                          (0.05 + shade * 0.05) * math.sin(phase * 3.98);
+        let envelope: float = math.exp(0.0 - t * 5.5);
+        if (instrument == 1) {
+            wave = (0.88 - shade * 0.25) * math.sin(phase) +
+                    (0.08 + shade * 0.17) * math.sin(phase * 2.0) +
+                    (0.04 + shade * 0.08) * math.sin(phase * 3.0);
+            envelope = math.exp(0.0 - t * 11.0);
+        }
+        if (instrument == 2) {
+            attack = flock.clamp(t / 0.09, 0.0, 1.0);
+            wave = (0.7 - shade * 0.15) * math.sin(phase) +
+                    0.15 * math.sin(phase * 1.003) + 0.15 * math.sin(phase * 0.997) +
+                    shade * 0.15 * math.sin(phase * 2.0);
+            envelope = math.exp(0.0 - t * 2.4);
+        }
+        if (instrument == 3) {
+            wave = (0.95 - shade * 0.2) * math.sin(phase) +
+                    (0.04 + shade * 0.14) * math.sin(phase * 3.0) +
+                    (0.01 + shade * 0.06) * math.sin(phase * 5.0);
+            envelope = math.exp(0.0 - t * 8.5);
+        }
+        if (instrument == 4) {
+            wave = math.sin(phase + (0.6 + shade * 2.8) * math.exp(0.0 - t * 4.0) * math.sin(phase * 2.0));
+            envelope = math.exp(0.0 - t * 6.5);
+        }
+        if (instrument == 5) {
+            // Small integer LCG: the product stays inside signed 32-bit range.
+            noiseState = (noiseState * 25173 + 13849) % 65536;
+            let noise: float = (as float noiseState) / 32768.0 - 1.0;
+            attack = flock.clamp(t / 0.001, 0.0, 1.0);
+            wave = (noise - lastNoise) * 0.5;
+            envelope = math.exp(0.0 - t * (35.0 + shade * 25.0));
+            if (note == 36) {
+                let drumPhase: float = 6.283185307 * (45.0 * t + (12.0 + shade * 8.0) * (1.0 - math.exp(0.0 - t * 16.0)));
+                wave = 0.9 * math.sin(drumPhase) + 0.1 * noise * math.exp(0.0 - t * 80.0);
+                envelope = math.exp(0.0 - t * 12.0);
+            }
+            if (note == 38) {
+                wave = (0.7 + shade * 0.15) * noise +
+                        (0.3 - shade * 0.15) * math.sin(6.283185307 * 180.0 * t);
+                envelope = math.exp(0.0 - t * 18.0);
+            }
+            lastNoise = noise;
+        }
+        pcm.push(wave * envelope * attack * release * 0.8);
+        i += 1;
+    }
+    return pcm;
+}

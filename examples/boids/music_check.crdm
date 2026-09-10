@@ -1,0 +1,183 @@
+// Real score and waveform checks without raylib or an audio device.
+import arrangement;
+import composer;
+import flock;
+import timeline;
+import io;
+
+fn same(a: &float[], b: &float[]) -> int {
+    if (a.len() != b.len()) { return 0; }
+    let i: int = 0;
+    while (i < a.len()) { if (a[i] != b[i]) { return 0; } i += 1; }
+    return 1;
+}
+fn fail(message: string) -> int { io.println("FAIL: " + message); return 1; }
+fn score(worlds: &float[][][], parts: &int[][], meta: &int[], slot: int,
+         settings: &float[], clock: &int[]) -> float[] {
+    let at: int = timeline.playhead(meta);
+    return composer.events(timeline.snapshot(worlds, parts, meta, slot, at - 1),
+                           timeline.snapshot(worlds, parts, meta, slot, at), at, 546.0, 328.0, settings, clock);
+}
+
+fn main() -> int {
+    let settings: float[] = arrangement.defaults(0, 0);
+    settings[1] = 0.0; settings[2] = 16.0;
+    let clock: int[] = [120, 2, 0, 0];
+    let before: float[] = [10.0, 100.0, 10.0, 0.0, 440.0, 100.0, 10.0, 0.0];
+    let now: float[] = [10.0, 100.0, 10.0, 0.0, 480.0, 100.0, 10.0, 0.0];
+    let notes: float[] = composer.events(before, now, 8, 500.0, 300.0, settings, clock);
+    if (notes.len() != 7 || notes[0] != 0.0 || notes[6] != 8.0 ||
+        composer.events(now, now, 8, 500.0, 300.0, settings, clock).len() != 0 ||
+        composer.events(before, now, 7, 500.0, 300.0, settings, clock).len() != 0) {
+        return fail("wrapping encounters must sound only on the rhythmic grid");
+    }
+    let tempo: int = 60;
+    while (tempo <= 180) {
+        let hits: int = 0; let tick: int = 1;
+        while (tick <= 3600) { hits += composer.grid(tick, tempo); tick += 1; }
+        if (hits != tempo * 4) { return fail("tempo must give exactly four sixteenths per beat without drift"); }
+        tempo += 15;
+    }
+    let size: int = 8;
+    while (size <= 16) {
+        let pulses: int = 1;
+        while (pulses <= size) {
+            let hits: int = 0; let step: int = 0;
+            while (step < size) { hits += composer.gate(step, pulses, size); step += 1; }
+            if (hits != pulses) { return fail("Euclidean patterns must play the requested number of pulses"); }
+            pulses += 1;
+        }
+        size += 4;
+    }
+    if (composer.frequency(69) < 439.99 || composer.frequency(69) > 440.01 ||
+        composer.noteName(0, 62) != "D4" || composer.noteName(5, 36) != "KICK" ||
+        composer.noteName(5, 38) != "SNARE" || composer.noteName(5, 42) != "HAT") {
+        return fail("MIDI tuning and percussion names must agree with the synthesis");
+    }
+
+    let initial: float[] = flock.create(48, 546.0, 328.0, 42);
+    let worlds: float[][][] = timeline.history(initial);
+    let parts: int[][] = timeline.parts();
+    let meta: int[] = timeline.metadata(601);
+    let rules: float[][] = timeline.laws();
+    let pending: float[] = [1.0, 1.0, 1.0, 0.0];
+    let child: int = timeline.fork(worlds, parts, meta, rules, 0, pending, 546.0);
+    settings = arrangement.defaults(4, 0);
+    let saved: float[][] = [];
+    let empty: float[] = [];
+    saved.push(empty);
+    let total: int = 0;
+    while (timeline.playhead(meta) < 360) {
+        timeline.advance(worlds, parts, meta, rules, 546.0, 328.0);
+        notes = score(worlds, parts, meta, 0, settings, clock);
+        if (!same(notes, score(worlds, parts, meta, child, settings, clock))) {
+            return fail("identical physics and settings must produce the same notes");
+        }
+        saved.push(notes); total += notes.len() / 7;
+    }
+    if (total < 12) { return fail("pattern voices must make a continuous musical phrase"); }
+    timeline.seek(worlds, parts, meta, rules, 60, 546.0, 328.0);
+    pending = [1.0, 0.0, 1.0, 0.0];
+    let changed: int = timeline.fork(worlds, parts, meta, rules, child, pending, 546.0);
+    let different: int = 0;
+    while (timeline.playhead(meta) < 360) {
+        timeline.advance(worlds, parts, meta, rules, 546.0, 328.0);
+        notes = score(worlds, parts, meta, 0, settings, clock);
+        if (!same(saved[timeline.playhead(meta)], notes)) { return fail("replay and new forks must preserve the original score"); }
+        let other: float[] = score(worlds, parts, meta, changed, settings, clock);
+        let i: int = 0;
+        while (i < notes.len() && i < other.len()) {
+            if (notes[i + 1] != other[i + 1] || notes[i + 2] != other[i + 2]) { different += 1; }
+            i += 7;
+        }
+    }
+    if (different == 0) { return fail("changing physics must change audible notes or dynamics"); }
+    settings = arrangement.defaults(2, 0);
+    notes = composer.events(initial, initial, 8, 546.0, 328.0, settings, clock);
+    if (notes.len() != 21) { return fail("the cloud pattern must make three-note chords"); }
+    settings[3] = 1.0;
+    let raised: float[] = composer.events(initial, initial, 8, 546.0, 328.0, settings, clock);
+    if (raised[1] != notes[1] + 12.0) { return fail("register changes must transpose an octave"); }
+    settings = arrangement.defaults(5, 0);
+    notes = composer.events(initial, initial, 8, 546.0, 328.0, settings, clock);
+    if (notes.len() != 14 || notes[1] != 36.0 || notes[8] != 42.0) {
+        return fail("the groove must combine kick and hats on its first step");
+    }
+    notes = composer.events(initial, initial, 98, 546.0, 328.0, settings, clock);
+    settings[9] = 12.0;
+    let shorter: float[] = composer.events(initial, initial, 98, 546.0, 328.0, settings, clock);
+    if (notes.len() != 14 || shorter.len() != 14 || notes[1] != 38.0 || shorter[1] != 36.0) {
+        return fail("a twelve-step drum loop must restart while a sixteen-step loop continues");
+    }
+
+    let mixes: float[][] = arrangement.settings();
+    mixes[child][7] = 1.0;
+    if (arrangement.audible(parts, mixes, 0, 360) || !arrangement.audible(parts, mixes, child, 360)) {
+        return fail("solo must isolate a part without affecting its physics");
+    }
+    mixes[child][6] = 1.0;
+    if (arrangement.audible(parts, mixes, child, 360) || arrangement.audible(parts, mixes, changed, 59)) {
+        return fail("mute and birth time must take precedence over playback");
+    }
+    let instrument: int = 0;
+    while (instrument < 6) {
+        let colour: int = 0;
+        while (colour < 3) {
+            let choice: int = 0;
+            while (choice < 3) {
+                let note: int = 36 + choice * 24;
+                if (instrument == 5) {
+                    let drums: int[] = [36, 38, 42];
+                    note = drums[choice];
+                }
+                let pcm: float[] = composer.samples(instrument, note, colour, 22050);
+                if (pcm.len() < 2000 || pcm[0] != 0.0 || pcm[pcm.len() - 1] != 0.0) {
+                    return fail("every voice must have finite duration and zero endpoints");
+                }
+                let energy: float = 0.0; let i: int = 0;
+                while (i < pcm.len()) {
+                    if (pcm[i] != pcm[i] || pcm[i] < -0.80001 || pcm[i] > 0.80001) { return fail("waveforms must be finite and bounded"); }
+                    energy += pcm[i] * pcm[i]; i += 1;
+                }
+                if (energy < 0.1) { return fail("every instrument and colour must produce sound"); }
+                choice += 1;
+            }
+            colour += 1;
+        }
+        instrument += 1;
+    }
+    let warm: float[] = composer.samples(4, 62, 0, 22050);
+    let bright: float[] = composer.samples(4, 62, 2, 22050);
+    if (same(warm, bright) || !same(warm, composer.samples(4, 62, 0, 22050))) {
+        return fail("tone changes must change the waveform while synthesis stays deterministic");
+    }
+    let scene: int = 0;
+    let last: float = 0.0;
+    let peak: int = 0;
+    while (peak <= 2000) {
+        let sample: float = (as float peak) / 100.0;
+        let limited: float = arrangement.softLimit(sample);
+        if (limited < last || limited > 0.98 || limited != 0.0 - arrangement.softLimit(0.0 - sample) ||
+            (sample <= 0.8 && limited != sample)) {
+            return fail("dense mixes must stay bounded without changing quiet notes or their polarity");
+        }
+        last = limited; peak += 1;
+    }
+    while (scene < 3) {
+        let config: float[][] = arrangement.sceneSettings(scene);
+        let time: int[] = arrangement.sceneClock(scene);
+        let part: int = 0;
+        while (part < arrangement.sceneCount(scene)) {
+            let hits: int = 0; let tick: int = 1;
+            while (tick <= 240) {
+                hits += composer.events(initial, initial, tick, 546.0, 328.0, config[part], time).len() / 7;
+                tick += 1;
+            }
+            if ((as int config[part][1]) != 0 && hits == 0) { return fail("each preset's patterned parts must perform"); }
+            part += 1;
+        }
+        scene += 1;
+    }
+    io.println("Music checks passed: tempo, polymeters, six voices, chords, drums, tone, register, deterministic replay, presets, and solo/mute routing.");
+    return 0;
+}

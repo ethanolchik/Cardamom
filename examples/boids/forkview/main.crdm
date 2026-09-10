@@ -1,0 +1,355 @@
+// The ensemble overview and selected-part editor. Interaction lives in forks.crdm.
+import raylib as gfx;
+import timeline;
+import arrangement;
+import composer;
+import math;
+import str;
+
+public fn worldWidth() -> float { return 546.0; }
+public fn worldHeight() -> float { return 328.0; }
+public fn cardX(slot: int) -> int { return 24 + slot % 3 * 340; }
+public fn cardY(slot: int) -> int { return 128 + slot / 3 * 292; }
+public fn inside(mx: float, my: float, x: int, y: int, width: int, height: int) -> int {
+    return mx >= (as float x) && mx < (as float (x + width)) &&
+           my >= (as float y) && my < (as float (y + height));
+}
+public fn pickPart(mx: float, my: float) -> int {
+    let i: int = 0;
+    while (i < 6) {
+        if (inside(mx, my, cardX(i), cardY(i), 320, 274)) { return i; }
+        i += 1;
+    }
+    return -1;
+}
+public fn decimal(value: float) -> string {
+    let tenths: int = as int (value * 10.0 + 0.5);
+    return str.fromInt(tenths / 10) + "." + str.fromInt(tenths % 10);
+}
+fn time(tick: int) -> string { return decimal((as float tick) / 60.0) + " s"; }
+fn letter(slot: int) -> string { return str.fromASCII(65 + slot); }
+
+fn accent(slot: int, strength: float) -> int {
+    let rgb: int[] = [140, 218, 197, 235, 184, 115, 196, 170, 236,
+                      237, 138, 136, 110, 208, 225, 170, 199, 235];
+    return gfx.rgb(18 + (as int ((as float (rgb[slot * 3] - 18)) * strength)),
+                   30 + (as int ((as float (rgb[slot * 3 + 1] - 30)) * strength)),
+                   33 + (as int ((as float (rgb[slot * 3 + 2] - 33)) * strength)));
+}
+fn button(label: string, x: int, y: int, width: int, height: int,
+          selected: int, mx: float, my: float) {
+    let background: int = gfx.rgb(28, 42, 45);
+    let foreground: int = gfx.rgb(166, 188, 184);
+    if (inside(mx, my, x, y, width, height)) {
+        background = gfx.rgb(44, 61, 62); foreground = gfx.rgb(230, 238, 222);
+    }
+    if (selected) {
+        background = gfx.rgb(231, 183, 118); foreground = gfx.rgb(25, 33, 34);
+    }
+    gfx.drawRectangle(x, y, width, height, background);
+    gfx.drawText(label, x + (width - gfx.measureText(label, 12)) / 2,
+                 y + (height - 12) / 2, 12, foreground);
+}
+fn slider(value: float, x: int, y: int, width: int, selected: int, color: int) {
+    gfx.drawRectangle(x, y, width, 2, gfx.rgb(52, 67, 68));
+    gfx.drawRectangle(x, y, as int (value * (as float width)), 2, color);
+    let radius: float = 4.0;
+    if (selected) { radius = 6.0; }
+    gfx.drawCircle((as float x) + value * (as float width), (as float y) + 1.0, radius, color);
+}
+public fn trackX(meta: &int[], tick: int) -> float {
+    let span: int = timeline.newest(meta) - timeline.oldest(meta);
+    if (span <= 0) { return 212.0; }
+    return 212.0 + (as float (tick - timeline.oldest(meta))) / (as float span) * 710.0;
+}
+public fn trackTick(meta: &int[], mx: float) -> int {
+    let span: int = timeline.newest(meta) - timeline.oldest(meta);
+    return timeline.oldest(meta) + (as int ((mx - 212.0) / 710.0 * (as float span) + 0.5));
+}
+
+fn boids(state: &float[], x: float, y: float, color: int, ghost: int) {
+    let i: int = 0;
+    while (i < state.len()) {
+        let px: float = x + state[i] / worldWidth() * 300.0;
+        let py: float = y + state[i + 1] / worldHeight() * 180.0;
+        let length: float = math.sqrt(state[i + 2] * state[i + 2] + state[i + 3] * state[i + 3]);
+        if (length < 0.001) { length = 1.0; }
+        let dx: float = state[i + 2] / length;
+        let dy: float = state[i + 3] / length;
+        if (ghost) { gfx.drawLine(px - dx * 2.0, py - dy * 2.0, px + dx * 3.0, py + dy * 3.0, 1.0, color); }
+        else {
+            gfx.drawTriangle(px + dx * 3.7, py + dy * 3.7,
+                             px - dx * 2.1 + dy * 1.7, py - dy * 2.1 - dx * 1.7,
+                             px - dx * 2.1 - dy * 1.7, py - dy * 2.1 + dx * 1.7, color);
+        }
+        i += 4;
+    }
+}
+fn trails(worlds: &float[][][], parts: &int[][], meta: &int[], slot: int, x: float, y: float) {
+    let at: int = timeline.playhead(meta);
+    let tick: int = math.max(math.max(timeline.oldest(meta), parts[slot][0]), at - 24);
+    let previous: float[] = timeline.snapshot(worlds, parts, meta, slot, tick);
+    while (tick < at) {
+        tick = math.min(at, tick + 4);
+        let current: float[] = timeline.snapshot(worlds, parts, meta, slot, tick);
+        let color: int = accent(slot, 0.07 + (as float (24 - at + tick)) / 24.0 * 0.3);
+        let i: int = 0;
+        while (i < current.len() && i < previous.len()) {
+            let dx: float = current[i] - previous[i];
+            let dy: float = current[i + 1] - previous[i + 1];
+            if (dx * dx < 74529.0 && dy * dy < 26896.0) {
+                gfx.drawLine(x + previous[i] / worldWidth() * 300.0, y + previous[i + 1] / worldHeight() * 180.0,
+                             x + current[i] / worldWidth() * 300.0, y + current[i + 1] / worldHeight() * 180.0,
+                             1.0, color);
+            }
+            i += 4;
+        }
+        previous = current;
+    }
+}
+fn pulses(notes: &float[], state: &float[], tick: int, slot: int, x: float, y: float) {
+    let i: int = 0;
+    while (i < notes.len()) {
+        let age: int = tick - (as int notes[i + 6]);
+        let boid: int = (as int notes[i + 3]) * 4;
+        if (age >= 0 && age < 45 && boid + 1 < state.len()) {
+            let color: int = accent(slot, 1.0 - (as float age) / 45.0);
+            let px: float = x + state[boid] / worldWidth() * 300.0;
+            let py: float = y + state[boid + 1] / worldHeight() * 180.0;
+            gfx.drawCircleLines(px, py, 5.0 + (as float age) * 0.26, color);
+            gfx.drawCircle(px, py, 1.5, color);
+        }
+        i += 7;
+    }
+}
+fn latest(notes: &float[], tick: int) -> string {
+    if (notes.len() == 0 || tick - (as int notes[notes.len() - 1]) >= 45) { return "--"; }
+    let text: string = "";
+    let stamp: float = notes[notes.len() - 1];
+    let i: int = 0;
+    while (i < notes.len()) {
+        if (notes[i + 6] == stamp) {
+            if (str.len(text) > 0) { text += " "; }
+            text += composer.noteName(as int notes[i], as int notes[i + 1]);
+        }
+        i += 7;
+    }
+    return text;
+}
+fn card(worlds: &float[][][], parts: &int[][], meta: &int[], mix: &float[][],
+        notes: &float[][], slot: int, selected: int, ghost: int, clock: &int[],
+        mx: float, my: float) {
+    let x: int = cardX(slot);
+    let y: int = cardY(slot);
+    let at: int = timeline.playhead(meta);
+    let color: int = accent(slot, 1.0);
+    let border: int = gfx.rgb(42, 58, 59);
+    if (selected == slot) { border = color; }
+    gfx.drawRectangle(x, y, 320, 274, border);
+    gfx.drawRectangle(x + 1, y + 1, 318, 272, gfx.rgb(18, 30, 33));
+    if (!parts[slot][2]) {
+        gfx.drawText("+", x + 147, y + 96, 30, gfx.rgb(91, 124, 119));
+        let label: string = "FORK SELECTED";
+        gfx.drawText(label, x + (320 - gfx.measureText(label, 14)) / 2, y + 141, 14, gfx.rgb(155, 181, 168));
+        gfx.drawText("Add another instrument", x + 79, y + 168, 11, gfx.rgb(98, 126, 121));
+        return;
+    }
+    let title: string = letter(slot) + "  FORK";
+    if (slot == 0) { title = "A  REFERENCE"; }
+    gfx.drawText(title, x + 12, y + 12, 13, color);
+    let name: string = arrangement.instrumentName(as int mix[slot][0]);
+    gfx.drawText(name, x + 308 - gfx.measureText(name, 12), y + 12, 12, color);
+    gfx.drawText(arrangement.patternName(as int mix[slot][1]), x + 12, y + 29, 10, gfx.rgb(126, 151, 144));
+    let state: float[] = timeline.snapshot(worlds, parts, meta, slot, at);
+    let original: float[] = timeline.snapshot(worlds, parts, meta, 0, at);
+    if (slot > 0 && state.len() > 0) {
+        let gap: float[] = timeline.divergence(original, state, worldWidth(), worldHeight());
+        let label: string = decimal(gap[0]) + " px FROM A";
+        gfx.drawText(label, x + 308 - gfx.measureText(label, 10), y + 29, 10, gfx.rgb(104, 133, 128));
+    }
+    gfx.drawRectangle(x + 10, y + 40, 300, 180, gfx.rgb(15, 26, 29));
+    gfx.beginScissorMode(x + 10, y + 40, 300, 180);
+    if (state.len() > 0) {
+        trails(worlds, parts, meta, slot, (as float x) + 10.0, (as float y) + 40.0);
+        if (ghost && selected == slot && slot != 0) {
+            boids(original, (as float x) + 10.0, (as float y) + 40.0, gfx.rgb(53, 83, 77), 1);
+        }
+        boids(state, (as float x) + 10.0, (as float y) + 40.0, color, 0);
+        pulses(notes[slot], state, at, slot, (as float x) + 10.0, (as float y) + 40.0);
+    } else {
+        let label: string = "ENTERS AT " + time(parts[slot][0]);
+        gfx.drawText(label, x + (320 - gfx.measureText(label, 13)) / 2, y + 121, 13, gfx.rgb(104, 133, 128));
+    }
+    gfx.endScissorMode();
+    let size: int = as int mix[slot][9];
+    let step: int = composer.stepNumber(at, clock[0]) % size;
+    let i: int = 0;
+    while (i < size) {
+        let strength: float = 0.15;
+        if (composer.gate(i, as int mix[slot][2], size)) { strength = 0.45; }
+        if (i == step && state.len() > 0) { strength = 1.0; }
+        gfx.drawRectangle(x + 12 + i * 296 / size, y + 225, 296 / size - 4, 3, accent(slot, strength));
+        i += 1;
+    }
+    button("MUTE", x + 12, y + 236, 60, 26, mix[slot][6] != 0.0, mx, my);
+    button("SOLO", x + 78, y + 236, 56, 26, mix[slot][7] != 0.0, mx, my);
+    let text: string = latest(notes[slot], at);
+    gfx.drawText(text, x + 306 - gfx.measureText(text, 11), y + 244, 11, color);
+}
+
+fn inspector(parts: &int[][], meta: &int[], mix: &float[][], pending: &float[],
+             selected: int, dragging: int, mx: float, my: float) {
+    let ink: int = gfx.rgb(224, 235, 218);
+    let muted: int = gfx.rgb(126, 151, 144);
+    let color: int = accent(selected, 1.0);
+    gfx.drawRectangle(1052, 128, 348, 770, gfx.rgb(18, 30, 33));
+    gfx.drawText(letter(selected) + " / " + arrangement.instrumentName(as int mix[selected][0]), 1068, 144, 24, color);
+    if (selected > 0) { button("REMOVE", 1302, 139, 82, 28, 0, mx, my); }
+    gfx.drawText("SOUND OF SELECTED PART", 1068, 179, 11, muted);
+    let i: int = 0;
+    while (i < 6) {
+        button(arrangement.instrumentName(i), 1068 + i % 3 * 108, 196 + i / 3 * 34, 100, 28,
+               (as int mix[selected][0]) == i, mx, my);
+        i += 1;
+    }
+    gfx.drawText("PATTERN", 1068, 270, 11, muted);
+    button(arrangement.patternName(as int mix[selected][1]) + "  >", 1068, 288, 316, 30, 0, mx, my);
+    gfx.drawText("REGISTER", 1068, 334, 11, muted);
+    gfx.drawText("LOOP", 1230, 334, 11, muted);
+    let registerLabel: string = "MID";
+    if (mix[selected][3] < 0.0) { registerLabel = "LOW"; }
+    if (mix[selected][3] > 0.0) { registerLabel = "HIGH"; }
+    button(registerLabel + "  >", 1068, 352, 150, 28, 0, mx, my);
+    button(str.fromInt(as int mix[selected][9]) + " STEPS  >", 1230, 352, 154, 28, 0, mx, my);
+    gfx.drawText("COLOUR", 1068, 390, 11, muted);
+    let colours: string[] = ["WARM", "CLEAR", "BRIGHT"];
+    i = 0;
+    while (i < 3) {
+        button(colours[i], 1068 + i * 108, 410, 100, 28, (as int mix[selected][8]) == i, mx, my);
+        i += 1;
+    }
+    gfx.drawText("DENSITY", 1068, 460, 11, muted);
+    let value: string = str.fromInt(as int mix[selected][2]) + " / " + str.fromInt(as int mix[selected][9]);
+    gfx.drawText(value, 1384 - gfx.measureText(value, 12), 459, 12, ink);
+    slider((mix[selected][2] - 1.0) / (mix[selected][9] - 1.0), 1072, 486, 304, dragging == 5, color);
+    gfx.drawText("LEVEL", 1068, 518, 11, muted);
+    value = str.fromInt(as int (mix[selected][4] * 100.0 + 0.5)) + "%";
+    gfx.drawText(value, 1384 - gfx.measureText(value, 12), 517, 12, ink);
+    slider(mix[selected][4], 1072, 542, 304, dragging == 6, color);
+    gfx.drawText("PAN", 1068, 576, 11, muted);
+    value = "CENTRE";
+    if (mix[selected][5] < 0.49) { value = "LEFT " + str.fromInt(as int ((0.5 - mix[selected][5]) * 200.0)); }
+    if (mix[selected][5] > 0.51) { value = "RIGHT " + str.fromInt(as int ((mix[selected][5] - 0.5) * 200.0)); }
+    gfx.drawText(value, 1384 - gfx.measureText(value, 12), 575, 12, ink);
+    slider(mix[selected][5], 1072, 600, 304, dragging == 7, color);
+    gfx.drawRectangle(1224, 596, 1, 11, muted);
+    gfx.drawRectangle(1068, 630, 316, 1, gfx.rgb(42, 59, 59));
+    gfx.drawText("NEXT FORK / FLOCKING LAWS", 1068, 647, 12, color);
+    let laws: string[] = ["SPACE", "ALIGN", "FLOCK"];
+    i = 0;
+    while (i < 3) {
+        let x: int = 1068 + i * 108;
+        gfx.drawText(laws[i], x, 675, 11, muted);
+        gfx.drawText(decimal(pending[i]) + "x", x, 693, 13, ink);
+        slider(pending[i] / 3.0, x, 716, 100, dragging == i + 1, color);
+        gfx.drawRectangle(x + 33, 711, 1, 12, muted);
+        i += 1;
+    }
+    let nudge: string = "NUDGE: OFF";
+    if (pending[3] != 0.0) { nudge = "NUDGE: ON"; }
+    button(nudge, 1068, 748, 140, 28, pending[3] != 0.0, mx, my);
+    gfx.drawText("ONE BOID / 0.25 PX", 1220, 757, 10, muted);
+    let label: string = "FORK SELECTED [F]";
+    let ready: int = timeline.available(parts) >= 0 && timeline.active(parts, selected, timeline.playhead(meta));
+    if (!ready) { label = "ENSEMBLE FULL"; }
+    if (!timeline.active(parts, selected, timeline.playhead(meta))) { label = "PART HAS NOT ENTERED"; }
+    button(label, 1068, 790, 316, 40, ready, mx, my);
+    gfx.drawText("Copies selected at the playhead.", 1068, 847, 12, muted);
+    gfx.drawText("Other futures keep playing.", 1068, 870, 12, muted);
+}
+
+public fn render(worlds: &float[][][], parts: &int[][], meta: &int[], mix: &float[][],
+                 notes: &float[][], pending: &float[], clock: &int[], selected: int, seed: int,
+                 scene: int, paused: int, ghost: int, soundOn: int, audioReady: int, volume: float,
+                 dragging: int, mx: float, my: float) {
+    let ink: int = gfx.rgb(224, 235, 218);
+    let muted: int = gfx.rgb(126, 151, 144);
+    let amber: int = gfx.rgb(235, 184, 115);
+    let at: int = timeline.playhead(meta);
+    gfx.clearBackground(gfx.rgb(15, 24, 27));
+    gfx.drawText("C A R D A M O M  /  FLOCK ENSEMBLE", 24, 23, 12, amber);
+    gfx.drawText("Forking paths", 22, 47, 36, ink);
+    gfx.drawText("Many futures. One evolving ensemble.", 24, 96, 13, muted);
+    let sound: string = "M  SOUND";
+    if (!soundOn) { sound = "M  MUTED"; }
+    if (!audioReady) { sound = "NO AUDIO"; }
+    button(sound, 384, 28, 108, 30, soundOn && audioReady, mx, my);
+    button("-", 512, 28, 26, 30, 0, mx, my);
+    gfx.drawText(str.fromInt(clock[0]) + " BPM", 547, 37, 14, ink);
+    button("+", 638, 28, 26, 30, 0, mx, my);
+    button("KEY " + composer.pitchClass(clock[1]), 684, 28, 82, 30, 0, mx, my);
+    button(arrangement.scaleName(clock[2]) + "  >", 784, 28, 224, 30, 0, mx, my);
+    gfx.drawText("MASTER", 384, 79, 10, muted);
+    slider(volume, 444, 84, 148, dragging == 4, accent(0, 1.0));
+    gfx.drawText(str.fromInt(as int (volume * 100.0 + 0.5)) + "%", 608, 79, 11, muted);
+    let drift: string = "CHORD DRIFT: OFF";
+    if (clock[3]) { drift = "CHORD DRIFT: ON"; }
+    button(drift, 684, 74, 164, 26, clock[3], mx, my);
+    let beat: int = composer.stepNumber(at, clock[0]) / 4 % 4;
+    let i: int = 0;
+    while (i < 4) {
+        let color: int = gfx.rgb(49, 71, 66);
+        if (i == beat && !paused) { color = amber; }
+        gfx.drawCircle(890.0 + (as float i) * 30.0, 86.0, 4.0, color); i += 1;
+    }
+    let status: string = "LIVE";
+    if (at < timeline.newest(meta)) { status = "REPLAY"; }
+    if (paused) { status = "PAUSED"; }
+    gfx.drawText(status, 1052, 26, 13, amber);
+    let fps: string = str.fromInt(gfx.getFPS()) + " FPS";
+    gfx.drawText(fps, 1400 - gfx.measureText(fps, 12), 26, 12, muted);
+    gfx.drawText(str.fromInt(timeline.count(parts)) + " / 6 PARTS", 1052, 50, 28, ink);
+    let label: string = "CUSTOM";
+    if (scene >= 0) { label = arrangement.sceneName(scene); }
+    gfx.drawText(label + " / SEED " + str.fromInt(seed), 1052, 91, 12, muted);
+
+    i = 0;
+    while (i < 6) { card(worlds, parts, meta, mix, notes, i, selected, ghost, clock, mx, my); i += 1; }
+    inspector(parts, meta, mix, pending, selected, dragging, mx, my);
+    gfx.drawRectangle(24, 716, 1000, 1, gfx.rgb(42, 59, 59));
+    gfx.drawText("PLAYHEAD " + time(at) + " / FRAME " + str.fromInt(at), 24, 727, 12, ink);
+    gfx.drawText("DRAG TO REWIND ALL PARTS", 594, 727, 11, muted);
+    gfx.drawText("30s HISTORY", 936, 727, 11, muted);
+    label = "PAUSE";
+    if (paused) { label = "PLAY"; }
+    button(label, 24, 752, 82, 32, 0, mx, my);
+    button("<", 116, 752, 32, 32, 0, mx, my);
+    button(">", 156, 752, 32, 32, 0, mx, my);
+    button("LIVE", 936, 752, 88, 32, 0, mx, my);
+    gfx.drawRectangle(212, 767, 710, 2, gfx.rgb(74, 119, 109));
+    i = 1;
+    while (i < 6) {
+        if (parts[i][2] && parts[i][0] >= timeline.oldest(meta)) {
+            let x: float = trackX(meta, parts[i][0]);
+            gfx.drawCircle(x, 778.0 + (as float (i % 2)) * 7.0, 2.5, accent(i, 1.0));
+        }
+        i += 1;
+    }
+    let cursor: float = trackX(meta, at);
+    gfx.drawLine(cursor, 758.0, cursor, 778.0, 2.0, ink);
+    gfx.drawCircle(cursor, 768.0, 4.0, ink);
+    gfx.drawText(time(timeline.oldest(meta)), 212, 797, 11, muted);
+    label = time(timeline.newest(meta));
+    gfx.drawText(label, 922 - gfx.measureText(label, 11), 797, 11, muted);
+    gfx.drawText("START A NEW ENSEMBLE", 24, 846, 11, muted);
+    i = 0;
+    while (i < 3) {
+        button(arrangement.sceneName(i), 24 + i * 228, 868, 218, 30, scene == i, mx, my);
+        i += 1;
+    }
+    button("R  NEW SEED", 718, 868, 148, 30, 0, mx, my);
+    label = "G  GHOST: OFF";
+    if (ghost) { label = "G  GHOST: ON"; }
+    button(label, 882, 868, 142, 30, 0, mx, my);
+    gfx.drawText("1-6 select   F fork   SPACE pause   ARROWS step   SHIFT+ARROWS 1s   HOME / END seek   M mute   P image   ESC exit", 24, 923, 11, muted);
+}

@@ -1,0 +1,167 @@
+// Per-part sound settings:
+// [instrument, pattern, density, octave (-1/0/1), level, pan (0 left/1 right),
+//  mute, solo, colour (0 warm/1 clear/2 bright), loop length (8/12/16)].
+// Shared clock = [BPM, root pitch class, scale, chord drift]. Sound settings
+// interpret recorded physics live; changing a sound never changes a trajectory.
+import timeline;
+import math;
+
+public fn instrumentName(instrument: int) -> string {
+    let names: string[] = ["GLASS", "PLUCK", "PAD", "BASS", "PRISM", "DRUMS"];
+    return names[math.min(5, math.max(0, instrument))];
+}
+
+public fn patternName(pattern: int) -> string {
+    let names: string[] = ["ENCOUNTERS", "ARPEGGIO", "EUCLIDEAN", "CHORD CLOUD", "PULSE", "GROOVE"];
+    return names[math.min(5, math.max(0, pattern))];
+}
+
+public fn scaleName(scale: int) -> string {
+    let names: string[] = ["MINOR PENT", "MAJOR PENT", "DORIAN", "WHOLE TONE"];
+    return names[math.min(3, math.max(0, scale))];
+}
+
+public fn sceneName(scene: int) -> string {
+    let names: string[] = ["NEON GROVE", "GLASSHOUSE", "ORBITAL"];
+    return names[math.min(2, math.max(0, scene))];
+}
+
+public fn sceneId(name: string) -> int {
+    if (name == "glasshouse") { return 1; }
+    if (name == "orbital") { return 2; }
+    return 0;
+}
+
+public fn defaults(instrument: int, slot: int) -> float[] {
+    let patterns: float[] = [1.0, 2.0, 3.0, 4.0, 1.0, 5.0];
+    let densities: float[] = [8.0, 5.0, 2.0, 8.0, 7.0, 12.0];
+    let pans: float[] = [0.25, 0.5, 0.7, 0.5, 0.12, 0.88];
+    return [as float instrument, patterns[instrument], densities[instrument], 0.0,
+            0.8, pans[slot], 0.0, 0.0, 1.0, 16.0];
+}
+
+public fn settings() -> float[][] {
+    let result: float[][] = [];
+    let i: int = 0;
+    while (i < timeline.limit()) { result.push(defaults(i, i)); i += 1; }
+    return result;
+}
+
+public fn unusedInstrument(parts: &int[][], settings: &float[][]) -> int {
+    let instrument: int = 0;
+    while (instrument < 6) {
+        let used: int = 0;
+        let i: int = 0;
+        while (i < parts.len()) {
+            if (parts[i][2] && (as int settings[i][0]) == instrument) { used = 1; }
+            i += 1;
+        }
+        if (!used) { return instrument; }
+        instrument += 1;
+    }
+    return 0;
+}
+
+public fn audible(parts: &int[][], settings: &float[][], slot: int, tick: int) -> int {
+    if (!timeline.active(parts, slot, tick) || settings[slot][6] != 0.0) { return 0; }
+    let solo: int = 0;
+    let i: int = 0;
+    while (i < parts.len()) {
+        if (parts[i][2] && settings[i][7] != 0.0) { solo = 1; }
+        i += 1;
+    }
+    return !solo || settings[slot][7] != 0.0;
+}
+
+// Balance by the square root of enabled parts so a full ensemble stays audible.
+// Mute/solo never boosts the remaining parts. A final soft limiter catches peaks.
+public fn gain(velocity: float, level: float, partCount: int) -> float {
+    return velocity * level / math.sqrt(as float math.max(1, partCount));
+}
+
+public fn channel(level: float) -> float { return 0.5 * level * (3.0 - level * level); }
+
+// Same curve as raylib.setAudioSoftLimit, applied before master volume.
+// Leave ordinary samples untouched; bend peaks smoothly toward a .98 ceiling.
+public fn softLimit(sample: float) -> float {
+    let magnitude: float = sample;
+    if (magnitude < 0.0) { magnitude = 0.0 - magnitude; }
+    if (magnitude <= 0.8) { return sample; }
+    let limited: float = 0.8 + 0.18 * (1.0 - 0.18 / (magnitude - 0.8 + 0.18));
+    if (sample < 0.0) { return 0.0 - limited; }
+    return limited;
+}
+
+public fn sceneClock(scene: int) -> int[] {
+    if (scene == 1) { return [90, 0, 1, 1]; }
+    if (scene == 2) { return [132, 2, 2, 1]; }
+    return [120, 2, 0, 1];
+}
+
+public fn sceneCount(scene: int) -> int {
+    if (scene == 1) { return 3; }
+    if (scene == 2) { return 6; }
+    return 4;
+}
+
+public fn sceneSettings(scene: int) -> float[][] {
+    let result: float[][] = settings();
+    let voices: int[] = [0, 3, 2, 5, 1, 4];
+    if (scene == 1) { voices = [0, 1, 2, 3, 4, 5]; }
+    if (scene == 2) { voices = [3, 5, 2, 4, 0, 1]; }
+    let i: int = 0;
+    while (i < 6) { result[i] = defaults(voices[i], i); i += 1; }
+    result[0][5] = 0.3;
+    result[1][5] = 0.5;
+    result[2][5] = 0.75;
+    result[2][4] = 0.65;
+    if (scene == 1) {
+        result[0][1] = 0.0;
+        result[0][2] = 12.0;
+        result[1][9] = 12.0;
+        result[1][2] = 5.0;
+        result[2][8] = 0.0;
+    }
+    if (scene == 2) {
+        result[0][5] = 0.5;
+        result[1][5] = 0.5;
+        result[2][5] = 0.6;
+        result[3][9] = 12.0;
+        result[3][2] = 5.0;
+        result[3][8] = 2.0;
+        result[3][5] = 0.8;
+        result[4][3] = 1.0;
+        result[4][2] = 7.0;
+        result[5][1] = 2.0;
+        result[5][2] = 5.0;
+        result[5][9] = 8.0;
+        result[5][5] = 0.35;
+    }
+    return result;
+}
+
+public fn sceneLaws(scene: int) -> float[][] {
+    let result: float[][] = [[1.0, 1.0, 1.0, 0.0], [1.2, 0.6, 1.4, 0.0],
+                             [0.8, 2.2, 2.0, 0.0], [1.5, 0.0, 0.8, 0.0],
+                             [1.0, 1.0, 1.0, 1.0], [1.7, 1.5, 0.4, 0.0]];
+    if (scene == 1) { result[1] = [1.4, 0.0, 1.0, 0.0]; }
+    return result;
+}
+
+public fn start(scene: int, initial: &float[], width: float,
+                worlds: &mut float[][][], parts: &mut int[][], meta: &mut int[],
+                rules: &mut float[][], mix: &mut float[][], clock: &mut int[]) {
+    let capacity: int = meta[3];
+    worlds = timeline.history(initial);
+    parts = timeline.parts();
+    meta = timeline.metadata(capacity);
+    rules = sceneLaws(scene);
+    mix = sceneSettings(scene);
+    clock = sceneClock(scene);
+    let slot: int = 1;
+    while (slot < sceneCount(scene)) {
+        let pending: float[] = rules[slot];
+        timeline.fork(worlds, parts, meta, rules, 0, pending, width);
+        slot += 1;
+    }
+}

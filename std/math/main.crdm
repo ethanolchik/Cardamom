@@ -40,3 +40,13 @@ public fn sqrt(value: float) -> float {
     @include("<cmath>");
     @cpp("return std::sqrt(value);");
 }
+
+public fn sin(value: float) -> float {
+    @include("<cmath>");
+    @cpp("return std::sin(value);");
+}
+
+public fn exp(value: float) -> float {
+    @include("<cmath>");
+    @cpp("return std::exp(value);");
+}

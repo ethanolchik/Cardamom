@@ -1,0 +1,163 @@
+// Six independent, rewindable worlds sharing one transport.
+// meta = [oldest, newest, playhead, capacity].
+// parts[slot] = [birth tick, computed-through tick, enabled]. Slot 0 is reference.
+// worlds[slot][tick % capacity] = a copied flock state. Empty slots cost no history.
+// A fork copies the selected world once. Existing recorded futures are preserved;
+// its missing future is generated lazily when playback or seeking reaches it.
+import flock;
+import math;
+
+public fn limit() -> int { return 6; }
+public fn metadata(capacity: int) -> int[] { return [0, 0, 0, math.max(2, capacity)]; }
+public fn oldest(meta: &int[]) -> int { return meta[0]; }
+public fn newest(meta: &int[]) -> int { return meta[1]; }
+public fn playhead(meta: &int[]) -> int { return meta[2]; }
+
+public fn parts() -> int[][] {
+    return [[0, 0, 1], [-1, -1, 0], [-1, -1, 0], [-1, -1, 0], [-1, -1, 0], [-1, -1, 0]];
+}
+
+public fn history(initial: &float[]) -> float[][][] {
+    let worlds: float[][][] = [];
+    let first: float[][] = [];
+    first.push(initial);
+    worlds.push(first);
+    let empty: float[][] = [];
+    let i: int = 1;
+    while (i < limit()) { worlds.push(empty); i += 1; }
+    return worlds;
+}
+
+public fn laws() -> float[][] {
+    let result: float[][] = [];
+    let i: int = 0;
+    while (i < limit()) { result.push([1.0, 1.0, 1.0, 0.0]); i += 1; }
+    return result;
+}
+
+public fn count(parts: &int[][]) -> int {
+    let result: int = 0;
+    let i: int = 0;
+    while (i < parts.len()) { result += parts[i][2]; i += 1; }
+    return result;
+}
+
+public fn active(parts: &int[][], slot: int, tick: int) -> int {
+    return slot >= 0 && slot < parts.len() && parts[slot][2] != 0 && tick >= parts[slot][0];
+}
+
+public fn available(parts: &int[][]) -> int {
+    let i: int = 1;
+    while (i < parts.len()) { if (!parts[i][2]) { return i; } i += 1; }
+    return -1;
+}
+
+fn record(history: &mut float[][], tick: int, capacity: int, state: &float[]) {
+    let slot: int = tick % capacity;
+    let empty: float[] = [];
+    while (history.len() <= slot) { history.push(empty); }
+    history[slot] = state;
+}
+
+public fn snapshot(worlds: &float[][][], parts: &int[][], meta: &int[], slot: int, tick: int) -> float[] {
+    let at: int = math.min(meta[1], math.max(meta[0], tick));
+    let empty: float[] = [];
+    if (!active(parts, slot, at) || at > parts[slot][1]) { return empty; }
+    return worlds[slot][at % meta[3]];
+}
+
+fn ensure(worlds: &mut float[][][], parts: &mut int[][], rules: &float[][],
+          slot: int, tick: int, capacity: int, width: float, height: float) {
+    if (!active(parts, slot, tick)) { return; }
+    while (parts[slot][1] < tick) {
+        let previous: int = parts[slot][1];
+        let next: float[] = [];
+        flock.stepWithRules(worlds[slot][previous % capacity], next, width, height, 0.016666667,
+                            0.0, 0.0, 0.0, rules[slot][0], rules[slot][1], rules[slot][2]);
+        record(worlds[slot], previous + 1, capacity, next);
+        parts[slot][1] += 1;
+    }
+}
+
+public fn seek(worlds: &mut float[][][], parts: &mut int[][], meta: &mut int[],
+               rules: &float[][], tick: int, width: float, height: float) {
+    let target: int = math.min(meta[1], math.max(meta[0], tick));
+    let i: int = 0;
+    while (i < parts.len()) { ensure(worlds, parts, rules, i, target, meta[3], width, height); i += 1; }
+    meta[2] = target;
+}
+
+public fn advance(worlds: &mut float[][][], parts: &mut int[][], meta: &mut int[],
+                  rules: &float[][], width: float, height: float) {
+    let tick: int = meta[2] + 1;
+    let i: int = 0;
+    while (i < parts.len()) { ensure(worlds, parts, rules, i, tick, meta[3], width, height); i += 1; }
+    meta[2] = tick;
+    meta[1] = math.max(meta[1], tick);
+    meta[0] = math.max(meta[0], meta[1] - meta[3] + 1);
+}
+
+// Return the new stable slot, or -1 if full / the source has not entered yet.
+public fn fork(worlds: &mut float[][][], parts: &mut int[][], meta: &int[],
+               rules: &mut float[][], source: int, pending: &float[], width: float) -> int {
+    return forkAt(worlds, parts, meta, rules, source, available(parts), pending, width);
+}
+
+public fn forkAt(worlds: &mut float[][][], parts: &mut int[][], meta: &int[],
+                 rules: &mut float[][], source: int, slot: int, pending: &float[], width: float) -> int {
+    if (slot <= 0 || slot >= parts.len() || parts[slot][2] || !active(parts, source, meta[2])) { return -1; }
+    let state: float[] = snapshot(worlds, parts, meta, source, meta[2]);
+    if (state.len() == 0) { return -1; }
+    rules[slot] = [flock.clamp(pending[0], 0.0, 3.0), flock.clamp(pending[1], 0.0, 3.0),
+                   flock.clamp(pending[2], 0.0, 3.0), pending[3]];
+    if (pending[3] != 0.0) { state[0] = flock.wrap(state[0] + 0.25, width); }
+    let empty: float[][] = [];
+    worlds[slot] = empty;
+    record(worlds[slot], meta[2], meta[3], state);
+    parts[slot] = [meta[2], meta[2], 1];
+    return slot;
+}
+
+public fn remove(worlds: &mut float[][][], parts: &mut int[][], slot: int) {
+    if (slot <= 0 || slot >= parts.len()) { return; }
+    let empty: float[][] = [];
+    worlds[slot] = empty;
+    parts[slot] = [-1, -1, 0];
+}
+
+// Preserve the ensemble's laws and enabled slots when starting a new seed.
+public fn restart(worlds: &mut float[][][], parts: &mut int[][], meta: &mut int[],
+                  rules: &float[][], initial: &float[], width: float) {
+    let capacity: int = meta[3];
+    meta = metadata(capacity);
+    let i: int = 0;
+    while (i < parts.len()) {
+        let empty: float[][] = [];
+        worlds[i] = empty;
+        if (parts[i][2]) {
+            let state: float[] = initial;
+            if (i > 0 && rules[i][3] != 0.0) { state[0] = flock.wrap(state[0] + 0.25, width); }
+            record(worlds[i], 0, capacity, state);
+            parts[i] = [0, 0, 1];
+        }
+        i += 1;
+    }
+}
+
+public fn divergence(reference: &float[], branch: &float[], width: float, height: float) -> float[] {
+    if (reference.len() == 0 || reference.len() != branch.len()) { return [0.0, 0.0, 0.0]; }
+    let total: float = 0.0;
+    let maximum: float = 0.0;
+    let affected: float = 0.0;
+    let i: int = 0;
+    while (i < reference.len()) {
+        let dx: float = flock.delta(branch[i] - reference[i], width);
+        let dy: float = flock.delta(branch[i + 1] - reference[i + 1], height);
+        let distance: float = math.sqrt(dx * dx + dy * dy);
+        total += distance;
+        if (distance > maximum) { maximum = distance; }
+        if (distance > 2.0) { affected += 1.0; }
+        i += 4;
+    }
+    return [total / (as float (reference.len() / 4)), maximum, affected];
+}

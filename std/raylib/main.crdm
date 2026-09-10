@@ -113,6 +113,16 @@ public fn isKeyPressed(key: int) -> int {
     @cpp("return IsKeyPressed(key);");
 }
 
+public fn isKeyDown(key: int) -> int {
+    @include("<raylib.h>");
+    @cpp("return IsKeyDown(key);");
+}
+
+public fn isMouseButtonPressed(button: int) -> int {
+    @include("<raylib.h>");
+    @cpp("return IsMouseButtonPressed(button);");
+}
+
 public fn isMouseButtonDown(button: int) -> int {
     @include("<raylib.h>");
     @cpp("return IsMouseButtonDown(button);");
@@ -133,4 +143,147 @@ public fn getMouseY() -> float {
 public fn takeScreenshot(filename: string) -> int {
     @include("<raylib.h>");
     @cpp("Image image = LoadImageFromScreen(); bool saved = ExportImage(image, filename.c_str()); UnloadImage(image); return saved;");
+}
+
+// Optional audio. Sound handles belong to this module and are valid until
+// unloaded or until closeAudioDevice(). A failed load returns -1.
+public fn initAudioDevice() {
+    @include("<raylib.h>");
+    @cpp("if (!IsAudioDeviceReady()) InitAudioDevice();");
+}
+
+public fn isAudioDeviceReady() -> int {
+    @include("<raylib.h>");
+    @cpp("return IsAudioDeviceReady();");
+}
+
+public fn setMasterVolume(volume: float) {
+    @include("<raylib.h>");
+    @include("<algorithm>");
+    @include("<cmath>");
+    @cpp("if (IsAudioDeviceReady() && std::isfinite(volume)) SetMasterVolume(std::clamp(volume, 0.0f, 1.0f));");
+}
+
+// Optional soft limiting for raylib's standard stereo float mixer, before master
+// volume. Samples through .8 are unchanged; larger peaks approach .98 smoothly.
+// The callback never allocates. Repeated calls are safe; close detaches it.
+public fn setAudioSoftLimit(enabled: int) {
+    @include("<raylib.h>");
+    @include("<cmath>");
+    @cpp("static bool attached = false;
+    static AudioCallback processor = [](void* buffer, unsigned int frames) {
+        float* samples = static_cast<float*>(buffer);
+        for (unsigned int i = 0; i < frames*2; ++i) {
+            float sample = samples[i];
+            if (!std::isfinite(sample)) { samples[i] = 0.0f; continue; }
+            float magnitude = std::fabs(sample);
+            if (magnitude > 0.8f) {
+                float limited = 0.8f + 0.18f*(1.0f - 0.18f/(magnitude - 0.8f + 0.18f));
+                samples[i] = std::copysign(limited, sample);
+            }
+        }
+    };
+    if (!IsAudioDeviceReady()) return;
+    if (enabled && !attached) { AttachAudioMixedProcessor(processor); attached = true; }
+    else if (!enabled && attached) { DetachAudioMixedProcessor(processor); attached = false; }");
+}
+
+// One native registry keeps opaque Sound values out of Cardamom's type system.
+// PCM data is copied by LoadSoundFromWave; the input array can then be discarded.
+fn soundOperation(action: int, handle: int, samples: &float[], sampleRate: int,
+                  volume: float, pan: float) -> int {
+    @include("<raylib.h>");
+    @include("<vector>");
+    @include("<algorithm>");
+    @include("<cmath>");
+    @include("<limits>");
+    @cpp("struct SoundEntry { Sound sound{}; float volume = 1.0f; float gain = 1.0f; };
+    static std::vector<SoundEntry> sounds;
+    if (action == 5) {
+        for (SoundEntry& entry : sounds) {
+            if (entry.sound.stream.buffer != nullptr) UnloadSound(entry.sound);
+        }
+        sounds.clear();
+        return 1;
+    }
+    if (!IsAudioDeviceReady()) return action == 0 ? -1 : 0;
+    if (action == 0) {
+        if (samples.empty() || sampleRate < 8000 || sampleRate > 192000 ||
+            samples.size() > std::numeric_limits<unsigned int>::max()) return -1;
+        for (float sample : samples) {
+            if (!std::isfinite(sample) || sample < -1.0f || sample > 1.0f) return -1;
+        }
+        Wave wave{static_cast<unsigned int>(samples.size()), static_cast<unsigned int>(sampleRate),
+                  32, 1, const_cast<float*>(samples.data())};
+        Sound sound = LoadSoundFromWave(wave);
+        if (!IsSoundValid(sound)) {
+            if (sound.stream.buffer != nullptr) UnloadSound(sound);
+            return -1;
+        }
+        for (size_t i = 0; i < sounds.size(); ++i) {
+            if (sounds[i].sound.stream.buffer == nullptr) { sounds[i] = SoundEntry{sound, 1.0f, 1.0f}; return static_cast<int>(i); }
+        }
+        sounds.push_back(SoundEntry{sound, 1.0f, 1.0f});
+        return static_cast<int>(sounds.size() - 1);
+    }
+    if (handle < 0 || static_cast<size_t>(handle) >= sounds.size()) return 0;
+    SoundEntry& entry = sounds[handle];
+    Sound& sound = entry.sound;
+    if (sound.stream.buffer == nullptr) return 0;
+    if (action == 1) {
+        if (!std::isfinite(volume) || !std::isfinite(pan)) return 0;
+        entry.volume = std::clamp(volume, 0.0f, 1.0f);
+        SetSoundVolume(sound, entry.volume*entry.gain);
+        SetSoundPan(sound, 1.0f - std::clamp(pan, 0.0f, 1.0f));
+        PlaySound(sound);
+    }
+    else if (action == 2) StopSound(sound);
+    else if (action == 3) return IsSoundPlaying(sound);
+    else if (action == 4) { UnloadSound(sound); entry = SoundEntry{}; }
+    else if (action == 6) {
+        if (!std::isfinite(volume) || !std::isfinite(pan)) return 0;
+        entry.gain = std::clamp(volume, 0.0f, 1.0f);
+        SetSoundVolume(sound, entry.volume*entry.gain);
+        SetSoundPan(sound, 1.0f - std::clamp(pan, 0.0f, 1.0f));
+    }
+    return 1;");
+}
+
+// Load normalized mono float PCM at 8,000-192,000 Hz.
+public fn loadSoundSamples(samples: &float[], sampleRate: int) -> int {
+    return soundOperation(0, -1, samples, sampleRate, 0.0, 0.5);
+}
+
+// Pan: 0.0 left, 0.5 centre, 1.0 right. Volume affects this voice only.
+public fn playSound(handle: int, volume: float, pan: float) {
+    let empty: float[] = [];
+    soundOperation(1, handle, empty, 0, volume, pan);
+}
+
+// Change a voice's mixer gain and pan without restarting its waveform.
+// playSound's volume is multiplied by this gain; newly loaded sounds use 1.0.
+public fn setSoundMix(handle: int, gain: float, pan: float) {
+    let empty: float[] = [];
+    soundOperation(6, handle, empty, 0, gain, pan);
+}
+
+public fn stopSound(handle: int) {
+    let empty: float[] = [];
+    soundOperation(2, handle, empty, 0, 0.0, 0.5);
+}
+public fn isSoundPlaying(handle: int) -> int {
+    let empty: float[] = [];
+    return soundOperation(3, handle, empty, 0, 0.0, 0.5);
+}
+public fn unloadSound(handle: int) {
+    let empty: float[] = [];
+    soundOperation(4, handle, empty, 0, 0.0, 0.5);
+}
+
+public fn closeAudioDevice() {
+    setAudioSoftLimit(0);
+    let empty: float[] = [];
+    soundOperation(5, -1, empty, 0, 0.0, 0.5);
+    @include("<raylib.h>");
+    @cpp("if (IsAudioDeviceReady()) CloseAudioDevice();");
 }

@@ -6,6 +6,12 @@ their centre. The world wraps, so neighbours interact across the edges too.
 
 ![The Cardamom boids demo, with mint and amber boids leaving trails across a dark field.](preview.png)
 
+For a time-travel experiment built on this flock, try [Forking paths](FORKS.md):
+rewind a world, change its laws, and build a six-part musical ensemble with
+`python3 scripts/forks.py`. Each fork can play its own instrument and rhythm,
+with tone, register, loop, density, level, pan, mute, and solo controls. Try
+`--scene orbital` for all six instruments, or start with Neon Grove or Glasshouse.
+
 ## Run
 
 From the repository root:
@@ -86,8 +92,7 @@ a working desktop/OpenGL context, just like the interactive demo.
   and drawing. It runs the simulation at 60 steps per second and caps catch-up
   time after a slow frame.
 - [flock.crdm](flock.crdm): deterministic initialisation and flocking, with no
-  graphics dependency. Positions and velocities occupy four floats per boid;
-  arrays let the state cross module boundaries until class exports are supported.
+  graphics dependency. Positions and velocities occupy four floats per boid.
   Every update reads a stable input snapshot and writes a separate output buffer.
 - [check.crdm](check.crdm): behavioural checks for wrapping, separation,
   alignment, mouse forces, repeatable seeding, and bounds over 600 steps.
@@ -121,7 +126,8 @@ fn main() {
 Colours are packed 24-bit RGB values created with `gfx.rgb(r, g, b)` (channels
 0–255). Keyboard and mouse functions accept raylib's integer codes; letters use
 uppercase ASCII codes, space is 32, and mouse buttons 0/1 are left/right.
-Predicates return integers 0/1, matching Cardamom's current boolean convention.
+Predicates in this binding return integers 0/1, which remain compatible with
+Cardamom's native `bool` values.
 
 Compile with your installation's include, library, and platform linker flags
 after `--`. For example, using the helper's static build on macOS:

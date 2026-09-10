@@ -1,0 +1,190 @@
+// An eight-bar performance of the selected ensemble, using the real score and
+// synth. Six voices per part, two per pitch, and the same oldest-voice stealing
+// as native playback. Everything here runs without raylib or an audio device.
+import arrangement;
+import composer;
+import flock;
+import timeline;
+import runtime;
+import math;
+import io;
+import str;
+
+// voices[part * 6 + voice] = [MIDI note, sample index, start frame, gain, serial].
+fn alive(voices: &float[][], pcm: &float[][], voice: int, frame: int) -> int {
+    let sample: int = as int voices[voice][1];
+    return sample >= 0 && frame < (as int voices[voice][2]) + pcm[sample].len();
+}
+
+fn cached(pcm: &mut float[][], keys: &mut int[][], settings: &float[][],
+          part: int, note: int, rate: int) -> int {
+    if (keys[part][note] < 0) {
+        keys[part][note] = pcm.len();
+        pcm.push(composer.samples(as int settings[part][0], note, as int settings[part][8], rate));
+    }
+    return keys[part][note];
+}
+
+fn trigger(voices: &mut float[][], pcm: &mut float[][], keys: &mut int[][],
+           settings: &float[][], part: int, note: int, velocity: float,
+           frame: int, serial: int, rate: int, count: int) {
+    let free: int = -1;
+    let oldest: int = -1;
+    let oldestPitch: int = -1;
+    let samePitch: int = 0;
+    let i: int = part * 6;
+    while (i < part * 6 + 6) {
+        if (!alive(voices, pcm, i, frame)) {
+            if (free < 0) { free = i; }
+        } else {
+            if (oldest < 0 || voices[i][4] < voices[oldest][4]) { oldest = i; }
+            if ((as int voices[i][0]) == note) {
+                samePitch += 1;
+                if (oldestPitch < 0 || voices[i][4] < voices[oldestPitch][4]) { oldestPitch = i; }
+            }
+        }
+        i += 1;
+    }
+    let voice: int = free;
+    if (samePitch >= 2) { voice = oldestPitch; }
+    else if (voice < 0) { voice = oldest; }
+    let sample: int = cached(pcm, keys, settings, part, note, rate);
+    let gain: float = arrangement.gain(velocity, settings[part][4], count);
+    voices[voice] = [as float note, as float sample, as float frame, gain, as float serial];
+}
+
+fn render(output: &mut float[], voices: &float[][], pcm: &float[][], settings: &float[][],
+          from: int, to: int) {
+    let voice: int = 0;
+    while (voice < voices.len()) {
+        let sample: int = as int voices[voice][1];
+        if (sample >= 0) {
+            let start: int = as int voices[voice][2];
+            let end: int = math.min(to, start + pcm[sample].len());
+            let gain: float = voices[voice][3];
+            let pan: float = settings[voice / 6][5];
+            let left: float = gain * arrangement.channel(1.0 - pan);
+            let right: float = gain * arrangement.channel(pan);
+            let frame: int = math.max(from, start);
+            while (frame < end) {
+                output[frame * 2] += pcm[sample][frame - start] * left;
+                output[frame * 2 + 1] += pcm[sample][frame - start] * right;
+                frame += 1;
+            }
+        }
+        voice += 1;
+    }
+}
+
+// Explicit little-endian stereo PCM16. Reject invalid or clipped mixes.
+fn writeWave(filename: string, pcm: &float[], rate: int) -> int {
+    let riffTag: string = "RIFF";
+    let formatTag: string = "WAVEfmt ";
+    let dataTag: string = "data";
+    @include("<fstream>");
+    @include("<cstdint>");
+    @include("<cmath>");
+    @cpp("if (pcm.empty() || pcm.size() % 2 != 0 || pcm.size() > (UINT32_MAX - 36) / 2) return 0;
+    for (float sample : pcm) {
+        if (!std::isfinite(sample) || sample < -1.0f || sample > 1.0f) return 0;
+    }
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) return 0;
+    auto u16 = [&](uint16_t value) {
+        file.put(static_cast<char>(value & 255));
+        file.put(static_cast<char>((value >> 8) & 255));
+    };
+    auto u32 = [&](uint32_t value) {
+        u16(static_cast<uint16_t>(value & 65535));
+        u16(static_cast<uint16_t>(value >> 16));
+    };
+    uint32_t size = static_cast<uint32_t>(pcm.size() * 2);
+    file.write(riffTag.c_str(), 4); u32(36 + size); file.write(formatTag.c_str(), 8);
+    u32(16); u16(1); u16(2); u32(rate); u32(rate * 4); u16(4); u16(16);
+    file.write(dataTag.c_str(), 4); u32(size);
+    for (float sample : pcm) {
+        u16(static_cast<uint16_t>(static_cast<int16_t>(std::lround(sample * 32767.0f))));
+    }
+    file.flush();
+    return file.good();");
+}
+
+
+fn main() -> int {
+    let rate: int = 22050;
+    let scene: int = arrangement.sceneId(runtime.env("CARDAMOM_FORKS_SCENE"));
+    let filename: string = runtime.env("CARDAMOM_FORKS_WAV");
+    if (str.len(filename) == 0) { filename = "forks-music.wav"; }
+    let initial: float[] = flock.create(144, 546.0, 328.0, 42);
+    let worlds: float[][][] = timeline.history(initial);
+    let parts: int[][] = timeline.parts();
+    let meta: int[] = timeline.metadata(2);
+    let rules: float[][] = timeline.laws();
+    let settings: float[][] = arrangement.settings();
+    let clock: int[] = [120, 2, 0, 1];
+    arrangement.start(scene, initial, 546.0, worlds, parts, meta, rules, settings, clock);
+    let ticks: int = (128 * 900 + clock[0] - 1) / clock[0];
+    let frames: int = (ticks * rate + 30) / 60 + rate * 2;
+    let output: float[] = [];
+    let i: int = 0;
+    while (i < frames * 2) { output.push(0.0); i += 1; }
+    let pcm: float[][] = [];
+    let keys: int[][] = [];
+    let voices: float[][] = [];
+    let part: int = 0;
+    while (part < 6) {
+        let row: int[] = [];
+        i = 0;
+        while (i < 128) { row.push(-1); i += 1; }
+        keys.push(row);
+        i = 0;
+        while (i < 6) { voices.push([-1.0, -1.0, 0.0, 0.0, 0.0]); i += 1; }
+        part += 1;
+    }
+    let counts: int[] = [0, 0, 0, 0, 0, 0];
+    let previousFrame: int = 0;
+    let serial: int = 0;
+    while (timeline.playhead(meta) < ticks) {
+        let nextFrame: int = ((timeline.playhead(meta) + 1) * rate + 30) / 60;
+        render(output, voices, pcm, settings, previousFrame, nextFrame);
+        previousFrame = nextFrame;
+        timeline.advance(worlds, parts, meta, rules, 546.0, 328.0);
+        let tick: int = timeline.playhead(meta);
+        if (composer.grid(tick, clock[0])) {
+            part = 0;
+            while (part < 6) {
+                if (arrangement.audible(parts, settings, part, tick)) {
+                    let before: float[] = timeline.snapshot(worlds, parts, meta, part, tick - 1);
+                    let now: float[] = timeline.snapshot(worlds, parts, meta, part, tick);
+                    let notes: float[] = composer.events(before, now, tick, 546.0, 328.0, settings[part], clock);
+                    i = 0;
+                    while (i < notes.len()) {
+                        serial += 1;
+                        trigger(voices, pcm, keys, settings, part, as int notes[i + 1], notes[i + 2],
+                                nextFrame, serial, rate, timeline.count(parts));
+                        counts[as int notes[i]] += 1;
+                        i += 7;
+                    }
+                }
+                part += 1;
+            }
+        }
+    }
+    render(output, voices, pcm, settings, previousFrame, frames);
+    i = 0;
+    while (i < output.len()) {
+        output[i] = arrangement.softLimit(output[i]) * 0.7;
+        i += 1;
+    }
+    if (!writeWave(filename, output, rate)) {
+        io.println("Could not write the ensemble preview (invalid mix or unwritable output).");
+        return 1;
+    }
+    io.println("Rendered " + filename + " / " + arrangement.sceneName(scene) + " / 8 bars + release.");
+    part = 0;
+    while (part < 6) {
+        if (counts[part] > 0) { io.println(arrangement.instrumentName(part) + ": " + str.fromInt(counts[part]) + " notes"); }
+        part += 1;
+    }
+    return 0;
+}

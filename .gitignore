@@ -20,6 +20,8 @@ Cargo.lock
 /output.cpp
 /cardamom
 /boids.png
+/forks.png
+/forks-music.wav
 __pycache__/
 
 # Local development and packaging of the editor extension.

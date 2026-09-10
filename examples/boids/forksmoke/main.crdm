@@ -1,0 +1,227 @@
+// Real raylib input automation for the ensemble, including native voice checks.
+import timeline;
+import arrangement;
+import composer;
+import music;
+import raylib as gfx;
+import io;
+import str;
+
+fn event(kind: int, a: int, b: int) {
+    @include("<raylib.h>");
+    @cpp("PlayAutomationEvent(AutomationEvent{0, static_cast<unsigned int>(kind), {a, b, 0, 0}});");
+}
+
+public fn input(frame: int) {
+    let events: int[] = [
+        20, 2, 32, 0, 21, 1, 32, 0,
+        22, 7, 566, 768, 22, 6, 0, 0, 23, 5, 0, 0,
+        24, 2, 262, 0, 25, 1, 262, 0,
+        26, 7, 1259, 716, 26, 6, 0, 0, 27, 7, 1176, 716, 28, 5, 0, 0,
+        30, 7, 1200, 810, 30, 6, 0, 0, 31, 5, 0, 0,
+        32, 7, 1220, 244, 32, 6, 0, 0, 33, 5, 0, 0,
+        34, 7, 1330, 423, 34, 6, 0, 0, 35, 5, 0, 0,
+        36, 7, 1160, 302, 36, 6, 0, 0, 37, 5, 0, 0,
+        38, 7, 1110, 365, 38, 6, 0, 0, 39, 5, 0, 0,
+        40, 7, 1300, 365, 40, 6, 0, 0, 41, 5, 0, 0,
+        42, 7, 1100, 486, 42, 6, 0, 0, 43, 7, 1376, 486, 44, 5, 0, 0,
+        46, 7, 1224, 542, 46, 6, 0, 0, 47, 5, 0, 0,
+        48, 7, 1102, 600, 48, 6, 0, 0, 49, 5, 0, 0,
+        50, 2, 70, 0, 51, 1, 70, 0, 52, 2, 70, 0, 53, 1, 70, 0,
+        54, 2, 77, 0, 55, 1, 77, 0, 58, 2, 77, 0, 59, 1, 77, 0,
+        60, 7, 440, 145, 60, 6, 0, 0, 61, 5, 0, 0,
+        62, 7, 400, 379, 62, 6, 0, 0, 63, 5, 0, 0,
+        64, 7, 806, 379, 64, 6, 0, 0, 65, 5, 0, 0,
+        66, 7, 128, 670, 66, 6, 0, 0, 67, 5, 0, 0,
+        68, 7, 806, 379, 68, 6, 0, 0, 69, 5, 0, 0,
+        70, 7, 128, 670, 70, 6, 0, 0, 71, 5, 0, 0,
+        72, 7, 400, 379, 72, 6, 0, 0, 73, 5, 0, 0,
+        74, 7, 651, 43, 74, 6, 0, 0, 75, 5, 0, 0,
+        76, 7, 718, 43, 76, 6, 0, 0, 77, 5, 0, 0,
+        78, 7, 895, 43, 78, 6, 0, 0, 79, 5, 0, 0,
+        80, 7, 752, 87, 80, 6, 0, 0, 81, 5, 0, 0,
+        82, 7, 518, 85, 82, 6, 0, 0,
+        83, 7, 610, 85, 84, 7, 420, 85, 85, 7, 540, 85, 86, 5, 0, 0,
+        88, 2, 32, 0, 89, 1, 32, 0,
+        90, 2, 340, 0, 90, 2, 263, 0, 91, 1, 340, 0, 91, 1, 263, 0,
+        92, 2, 262, 0, 93, 1, 262, 0,
+        94, 2, 269, 0, 95, 1, 269, 0,
+        96, 7, 440, 435, 96, 6, 0, 0, 97, 5, 0, 0,
+        98, 7, 1367, 153, 98, 6, 0, 0, 99, 5, 0, 0,
+        100, 7, 524, 530, 100, 6, 0, 0, 101, 5, 0, 0,
+        102, 2, 49, 0, 103, 1, 49, 0,
+        104, 7, 949, 882, 104, 6, 0, 0, 105, 5, 0, 0,
+        108, 7, 560, 883, 108, 6, 0, 0, 109, 5, 0, 0,
+        110, 7, 340, 883, 110, 6, 0, 0, 111, 5, 0, 0,
+        112, 7, 110, 883, 112, 6, 0, 0, 113, 5, 0, 0,
+        114, 2, 82, 0, 115, 1, 82, 0,
+        116, 7, 560, 883, 116, 6, 0, 0, 117, 5, 0, 0,
+        118, 7, 949, 882, 118, 6, 0, 0, 119, 5, 0, 0,
+        120, 7, 100, 435, 120, 6, 0, 0, 121, 5, 0, 0,
+        122, 7, 1320, 921
+    ];
+    let i: int = 0;
+    while (i < events.len()) {
+        if (frame == events[i]) { event(events[i + 1], events[i + 2], events[i + 3]); }
+        i += 4;
+    }
+}
+
+fn checkAudio(bank: &mut int[][]) -> int {
+    let empty: float[] = [];
+    if (gfx.loadSoundSamples(empty, 22050) != -1 || gfx.loadSoundSamples([1.1], 22050) != -1 ||
+        gfx.loadSoundSamples([0.0], 0) != -1 || gfx.isSoundPlaying(-1)) { return 1; }
+    let settings: float[] = arrangement.defaults(2, 0);
+    settings[4] = 0.0;
+    let i: int = 0;
+    while (i < 20) {
+        let notes: float[] = [2.0, (as float (48 + i)), 0.8, 0.0, 0.0, 0.0, 0.0];
+        if (music.play(bank, notes, 0, settings, 1) != 1 ||
+            music.playingPart(bank, 0) > 6 || bank[0].len() != 83) { return 1; }
+        i += 1;
+    }
+    let occupied: int = 0;
+    i = 3;
+    while (i < bank[0].len()) { if (bank[0][i] >= 0) { occupied += 1; } i += 5; }
+    if (occupied != 16 || music.playingPart(bank, 0) == 0) { return 1; }
+    let notes: float[] = [2.0, 62.0, 0.8, 0.0, 0.0, 0.0, 0.0];
+    music.play(bank, notes, 1, settings, 2);
+    let voices: int = music.playingPart(bank, 1);
+    settings[5] = 0.9;
+    music.remix(bank, 1, settings);
+    if (voices == 0 || music.playingPart(bank, 1) != voices) { return 1; }
+    music.resetPart(bank, 0);
+    if (music.playingPart(bank, 0) != 0 || music.playingPart(bank, 1) == 0) { return 1; }
+    music.resetPart(bank, 1);
+    return music.playing(bank) != 0;
+}
+
+// Overlap six loud sources through the actual mixer. The observer runs after
+// the limiter and clears its output before it can reach the speakers.
+fn limiterProbe(action: int) -> int {
+    @include("<raylib.h>");
+    @include("<atomic>");
+    @include("<cmath>");
+    @include("<vector>");
+    @cpp("static std::atomic<int> limitedPeak{0};
+    static std::atomic<int> failed{0};
+    static Sound probes[6]{};
+    static AudioCallback inspect = [](void* buffer, unsigned int frames) {
+        float* samples = static_cast<float*>(buffer);
+        for (unsigned int i = 0; i < frames*2; ++i) {
+            float magnitude = std::fabs(samples[i]);
+            if (!std::isfinite(magnitude) || magnitude > 0.98001f) failed.store(1, std::memory_order_relaxed);
+            if (magnitude > 0.94f) limitedPeak.store(1, std::memory_order_relaxed);
+            samples[i] = 0.0f;
+        }
+    };
+    if (action == 0) {
+        limitedPeak.store(0); failed.store(0);
+        AttachAudioMixedProcessor(inspect);
+        std::vector<float> pcm(22050, 0.8f);
+        Wave wave{22050, 22050, 32, 1, pcm.data()};
+        for (Sound& sound : probes) {
+            sound = LoadSoundFromWave(wave);
+            if (!IsSoundValid(sound)) { failed.store(1); continue; }
+            SetSoundPan(sound, 1.0f);
+            PlaySound(sound);
+        }
+    } else {
+        for (Sound& sound : probes) {
+            if (sound.stream.buffer != nullptr) UnloadSound(sound);
+            sound = Sound{};
+        }
+        DetachAudioMixedProcessor(inspect);
+        return failed.load() || !limitedPeak.load();
+    }
+    return 0;");
+}
+
+public fn verify(frame: int, worlds: &float[][][], parts: &int[][], meta: &int[], rules: &float[][],
+                 pending: &float[], mix: &float[][], clock: &int[], selected: int, seed: int,
+                 paused: int, ghost: int, bank: &mut int[][], soundOn: int, volume: float) -> int {
+    let failed: int = 0;
+    if (frame == 0) {
+        if (timeline.count(parts) != 4 || clock[0] != 120) { failed = 1; }
+        if (bank.len() == 6 && checkAudio(bank)) { failed = 1; }
+        if (bank.len() == 6 && !failed) {
+            gfx.setMasterVolume(0.0);
+            gfx.setAudioSoftLimit(1);
+            gfx.setAudioSoftLimit(1);
+            limiterProbe(0);
+        }
+        if (bank.len() == 0) { io.println("No audio device: checking visual-only ensemble controls."); }
+    }
+    if (frame == 16 && bank.len() == 6) {
+        if (limiterProbe(2)) { failed = 1; }
+        gfx.setMasterVolume(volume);
+    }
+    if (frame == 20 && (!paused || timeline.playhead(meta) != 20)) { failed = 1; }
+    if (frame == 22 && timeline.playhead(meta) != 10) { failed = 1; }
+    if (frame == 24 && timeline.playhead(meta) != 11) { failed = 1; }
+    if (frame == 26 && pending[1] != 2.5) { failed = 1; }
+    if (frame == 27 && pending[1] != 0.0) { failed = 1; }
+    if (frame == 30 && (timeline.count(parts) != 5 || selected != 4 || parts[4][0] != 11 ||
+                        timeline.newest(meta) != 20 || rules[4][1] != 0.0)) { failed = 1; }
+    if (frame == 32 && mix[4][0] != 4.0) { failed = 1; }
+    if (frame == 34 && mix[4][8] != 2.0) { failed = 1; }
+    if (frame == 36 && mix[4][1] != 3.0) { failed = 1; }
+    if (frame == 38 && mix[4][3] != 1.0) { failed = 1; }
+    if (frame == 40 && mix[4][9] != 8.0) { failed = 1; }
+    if (frame == 43 && mix[4][2] != 8.0) { failed = 1; }
+    if (frame == 46 && mix[4][4] != 0.5) { failed = 1; }
+    if (frame == 48 && (mix[4][5] < 0.09 || mix[4][5] > 0.11)) { failed = 1; }
+    if (frame == 50 && (timeline.count(parts) != 6 || selected != 5 || parts[5][0] != 31)) { failed = 1; }
+    if (frame == 52 && (timeline.count(parts) != 6 || selected != 5)) { failed = 1; }
+    if (frame == 54 && soundOn) { failed = 1; }
+    if (frame == 58 && !soundOn) { failed = 1; }
+    if (frame == 60 && selected != 1) { failed = 1; }
+    if (frame == 62 && mix[1][6] != 1.0) { failed = 1; }
+    if (frame == 66 && (mix[2][7] != 1.0 || mix[3][7] != 1.0)) { failed = 1; }
+    if (frame == 72 && (mix[1][6] != 0.0 || mix[2][7] != 0.0 || mix[3][7] != 0.0)) { failed = 1; }
+    if (frame == 74 && clock[0] != 125) { failed = 1; }
+    if (frame == 76 && clock[1] != 3) { failed = 1; }
+    if (frame == 78 && clock[2] != 1) { failed = 1; }
+    if (frame == 80 && clock[3] != 0) { failed = 1; }
+    if (frame == 82 && volume != 0.5) { failed = 1; }
+    if (frame == 83 && volume != 1.0) { failed = 1; }
+    if (frame == 84 && volume != 0.0) { failed = 1; }
+    if (frame == 88 && !paused) { failed = 1; }
+    if (frame == 90 && (timeline.playhead(meta) != 9 || timeline.active(parts, 4, 9))) { failed = 1; }
+    if (frame == 92 && timeline.playhead(meta) != 10) { failed = 1; }
+    if (frame == 94 && (paused || timeline.playhead(meta) < 69)) { failed = 1; }
+    if (frame == 98 && (parts[4][2] || !parts[5][2] || timeline.count(parts) != 5)) { failed = 1; }
+    if (frame == 100 && (selected != 4 || timeline.count(parts) != 6 || parts[4][0] < 70)) { failed = 1; }
+    if (frame == 102 && selected != 0) { failed = 1; }
+    if (frame == 104 && ghost) { failed = 1; }
+    if (frame == 108 && (timeline.count(parts) != 6 || clock[0] != 132)) { failed = 1; }
+    if (frame == 110 && (timeline.count(parts) != 3 || clock[0] != 90)) { failed = 1; }
+    if (frame == 112 && (timeline.count(parts) != 4 || clock[0] != 120)) { failed = 1; }
+    if (frame == 114 && (seed != 139 || timeline.playhead(meta) != 1)) { failed = 1; }
+    if (frame == 140 && (selected != 3 || clock[0] != 132 || !ghost ||
+                        mix[3][0] != 4.0 || mix[3][8] != 2.0 || timeline.count(parts) != 6)) { failed = 1; }
+
+    if (bank.len() == 6) {
+        if ((paused || !soundOn) && music.playing(bank) != 0) { failed = 1; }
+        let slot: int = 0;
+        let at: int = timeline.playhead(meta);
+        while (slot < 6) {
+            let playing: int = music.playingPart(bank, slot);
+            if (playing > 6 || (!arrangement.audible(parts, mix, slot, at) && playing != 0)) { failed = 1; }
+            if (!paused && soundOn && arrangement.audible(parts, mix, slot, at) && composer.grid(at, clock[0])) {
+                let before: float[] = timeline.snapshot(worlds, parts, meta, slot, at - 1);
+                let now: float[] = timeline.snapshot(worlds, parts, meta, slot, at);
+                let notes: float[] = composer.events(before, now, at, 546.0, 328.0, mix[slot], clock);
+                if (notes.len() > 0 && playing == 0) { failed = 1; }
+            }
+            slot += 1;
+        }
+    }
+    if (frame == 260 && !failed) {
+        io.println("Ensemble UI checks passed: six parts, nested forks, retained futures, sound editing, mix, solos, tempo, scales, presets, removal, and rewind.");
+        if (bank.len() == 6) { io.println("Audio checks passed: six instruments, bounded voice stealing, cache eviction, live mixing, output limiter, isolation, and transport silence."); }
+    }
+    if (failed && frame < 16 && bank.len() == 6) { limiterProbe(2); }
+    if (failed) { io.println("FAIL: ensemble UI check at frame " + str.fromInt(frame)); }
+    return failed;
+}

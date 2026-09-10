@@ -60,20 +60,41 @@ def raylib_prefix(existing):
     return prefix
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(demo="boids"):
+    programs = {
+        "boids": ("main.crdm", "check.crdm", "check", "preview.png"),
+        "forks": ("forks.crdm", "forks_check.crdm", "forks-check", "forks-preview.png"),
+    }
+    source, check_source, check_binary, image_name = programs[demo]
+    description = __doc__ if demo == "boids" else "Build and run Forking paths, Cardamom's musical flock ensemble."
+    parser = argparse.ArgumentParser(description=description)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--build-only", action="store_true", help="compile without opening a window")
-    mode.add_argument("--check", action="store_true", help="run the simulation checks without raylib")
-    mode.add_argument("--smoke", action="store_true", help="run briefly, save preview.png, and exit")
-    parser.add_argument("--frames", type=int, default=180, help="number of frames for --smoke (default: 180)")
+    mode.add_argument("--check", action="store_true", help="run the simulation and score checks without raylib")
+    mode.add_argument("--smoke", action="store_true", help=f"run briefly, save {image_name}, and exit")
+    if demo == "forks":
+        mode.add_argument("--render-audio", action="store_true",
+                          help="render the selected ensemble to stereo WAV without raylib or a window")
+    smoke_frames = 300 if demo == "forks" else 180
+    parser.add_argument("--frames", type=int, default=smoke_frames,
+                        help=f"number of frames for --smoke (default: {smoke_frames})")
     parser.add_argument("--raylib-prefix", default=os.environ.get("RAYLIB_PREFIX"),
                         help="use an existing raylib install instead of building the pinned version")
     parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"), help="C++ compiler executable")
+    if demo == "forks":
+        parser.add_argument("--silent", action="store_true", help="run without opening an audio device")
+        parser.add_argument("--scene", choices=("neon", "glasshouse", "orbital"), default="neon",
+                            help="initial ensemble / audio-render preset (default: neon)")
     args = parser.parse_args()
     if args.frames < 1:
         parser.error("--frames must be positive")
-    if sys.platform not in ("darwin", "linux") and not args.check:
+    if demo == "forks" and args.smoke:
+        if args.frames < 300:
+            parser.error("the ensemble interaction smoke test needs at least 300 frames")
+        if args.scene != "neon":
+            parser.error("the interaction smoke starts with neon; use --scene for normal runs or rendering")
+    offline_audio = demo == "forks" and args.render_audio
+    if sys.platform not in ("darwin", "linux") and not (args.check or offline_audio):
         parser.error("the graphics build helper currently supports macOS and Linux")
 
     require("cargo")
@@ -83,11 +104,25 @@ def main():
     run(["cargo", "build", "--release", "--target-dir", ROOT / "target"])
     compiler = ROOT / "target" / "release" / "cardamom"
 
-    if args.check:
-        binary = BUILD / "check"
-        run([compiler, ROOT / "examples" / "boids" / "check.crdm",
+    if offline_audio:
+        binary = BUILD / "music-render"
+        run([compiler, ROOT / "examples" / "boids" / "music_render.crdm",
              "-o", binary, "--cxx", args.cxx, "--", "-O2"])
-        run([binary])
+        environment = os.environ.copy()
+        environment["CARDAMOM_FORKS_WAV"] = str(BUILD / "forks-music.wav")
+        environment["CARDAMOM_FORKS_SCENE"] = args.scene
+        run([binary], env=environment)
+        return
+
+    if args.check:
+        checks = [(check_source, check_binary)]
+        if demo == "forks":
+            checks.append(("music_check.crdm", "music-check"))
+        for source_file, executable in checks:
+            binary = BUILD / executable
+            run([compiler, ROOT / "examples" / "boids" / source_file,
+                 "-o", binary, "--cxx", args.cxx, "--", "-O2"])
+            run([binary])
         return
 
     prefix = raylib_prefix(args.raylib_prefix)
@@ -100,20 +135,25 @@ def main():
     else:
         native_args.extend(["-lGL", "-lm", "-lpthread", "-ldl", "-lrt", "-lX11"])
 
-    binary = BUILD / "boids"
-    run([compiler, ROOT / "examples" / "boids" / "main.crdm", "-o", binary,
+    binary = BUILD / demo
+    run([compiler, ROOT / "examples" / "boids" / source, "-o", binary,
          "--keep-cpp", "--cxx", args.cxx, "--", *native_args])
     if args.build_only:
         print(f"Ready: {binary}")
         return
 
-    screenshot = BUILD / "preview.png"
+    screenshot = BUILD / image_name
     previous_capture = screenshot.stat().st_mtime_ns if screenshot.exists() else None
     environment = os.environ.copy()
-    environment.pop("CARDAMOM_BOIDS_FRAMES", None)
-    environment["CARDAMOM_BOIDS_SCREENSHOT"] = str(screenshot)
+    setting_prefix = f"CARDAMOM_{demo.upper()}"
+    environment.pop(f"{setting_prefix}_FRAMES", None)
+    environment[f"{setting_prefix}_SCREENSHOT"] = str(screenshot)
+    if demo == "forks":
+        environment["CARDAMOM_FORKS_SCENE"] = args.scene
+    if demo == "forks" and args.silent:
+        environment["CARDAMOM_FORKS_SILENT"] = "1"
     if args.smoke:
-        environment["CARDAMOM_BOIDS_FRAMES"] = str(args.frames)
+        environment[f"{setting_prefix}_FRAMES"] = str(args.frames)
     run([binary], env=environment, timeout=max(30, args.frames // 10) if args.smoke else None)
     if args.smoke:
         if not screenshot.is_file() or screenshot.stat().st_mtime_ns == previous_capture:
@@ -121,10 +161,14 @@ def main():
         print(f"Screenshot: {screenshot}")
 
 
-if __name__ == "__main__":
+def launch(demo="boids"):
     try:
-        main()
+        main(demo)
     except subprocess.CalledProcessError as error:
         raise SystemExit(error.returncode)
     except subprocess.TimeoutExpired:
         raise SystemExit("The smoke run timed out before the window closed.")
+
+
+if __name__ == "__main__":
+    launch()

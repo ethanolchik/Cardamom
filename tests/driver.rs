@@ -272,3 +272,33 @@ fn boids_simulation_runs_without_raylib_or_a_display() {
     );
     success(&mut Command::new(binary));
 }
+
+#[test]
+fn forked_timelines_replay_without_changing_the_reference() {
+    let workspace = Workspace::new();
+    let binary = workspace.path("forks check");
+    success(
+        workspace
+            .compiler()
+            .arg(fixture("examples/boids/forks_check.crdm"))
+            .arg("--output")
+            .arg(&binary)
+            .args(["--", "-O2"]),
+    );
+    success(&mut Command::new(binary));
+}
+
+#[test]
+fn musical_timelines_replay_and_synthesize_without_an_audio_device() {
+    let workspace = Workspace::new();
+    let binary = workspace.path("music check");
+    success(
+        workspace
+            .compiler()
+            .arg(fixture("examples/boids/music_check.crdm"))
+            .arg("--output")
+            .arg(&binary)
+            .args(["--", "-O2"]),
+    );
+    success(&mut Command::new(binary));
+}

@@ -1,0 +1,123 @@
+// Independent futures, lazy catch-up, nested forks, removal, and bounded rewind.
+import flock;
+import timeline;
+import io;
+
+fn same(a: &float[], b: &float[]) -> int {
+    if (a.len() != b.len()) { return 0; }
+    let i: int = 0;
+    while (i < a.len()) { if (a[i] != b[i]) { return 0; } i += 1; }
+    return 1;
+}
+fn fail(message: string) -> int { io.println("FAIL: " + message); return 1; }
+
+fn main() -> int {
+    let initial: float[] = flock.create(48, 546.0, 328.0, 42);
+    let worlds: float[][][] = timeline.history(initial);
+    let parts: int[][] = timeline.parts();
+    let meta: int[] = timeline.metadata(241);
+    let rules: float[][] = timeline.laws();
+    let pending: float[] = [1.0, 0.0, 1.0, 0.0];
+    let direct: float[] = initial;
+    let next: float[] = [];
+    while (timeline.playhead(meta) < 90) { timeline.advance(worlds, parts, meta, rules, 546.0, 328.0); }
+    let b: int = timeline.fork(worlds, parts, meta, rules, 0, pending, 546.0);
+    let c: int = timeline.fork(worlds, parts, meta, rules, b, pending, 546.0);
+    if (b != 1 || c != 2 || timeline.count(parts) != 3) { return fail("forks must use independent stable slots"); }
+    pending[1] = 3.0;
+    if (rules[b][1] != 0.0 || rules[c][1] != 0.0) { return fail("pending laws must be copied"); }
+    while (timeline.playhead(meta) < 180) { timeline.advance(worlds, parts, meta, rules, 546.0, 328.0); }
+    let aFuture: float[] = timeline.snapshot(worlds, parts, meta, 0, 180);
+    let bFuture: float[] = timeline.snapshot(worlds, parts, meta, b, 180);
+    let cFuture: float[] = timeline.snapshot(worlds, parts, meta, c, 180);
+    if (!same(bFuture, cFuture) || same(aFuture, bFuture)) {
+        return fail("equal laws must produce equal child futures while changed laws diverge from A");
+    }
+    let tick: int = 0;
+    while (tick < 180) {
+        flock.step(direct, next, 546.0, 328.0, 0.016666667, 0.0, 0.0, 0.0);
+        direct = next; tick += 1;
+    }
+    if (!same(direct, aFuture) || !same(initial, timeline.snapshot(worlds, parts, meta, 0, 0))) {
+        return fail("the reference must preserve the original simulation exactly");
+    }
+    let detached: float[] = bFuture;
+    detached[0] += 20.0;
+    if (!same(bFuture, timeline.snapshot(worlds, parts, meta, b, 180))) {
+        return fail("returned snapshots must be detached values");
+    }
+
+    timeline.seek(worlds, parts, meta, rules, 60, 546.0, 328.0);
+    if (timeline.snapshot(worlds, parts, meta, b, 60).len() != 0 ||
+        timeline.fork(worlds, parts, meta, rules, b, pending, 546.0) != -1) {
+        return fail("a part must not exist or be forkable before its birth");
+    }
+    pending = [1.0, 2.5, 2.0, 0.0];
+    let d: int = timeline.fork(worlds, parts, meta, rules, 0, pending, 546.0);
+    if (d != 3 || timeline.newest(meta) != 180 || parts[d][1] != 60) {
+        return fail("adding a fork in the past must keep every existing recorded future");
+    }
+    timeline.seek(worlds, parts, meta, rules, 180, 546.0, 328.0);
+    if (parts[d][1] != 180 || !same(aFuture, timeline.snapshot(worlds, parts, meta, 0, 180)) ||
+        !same(bFuture, timeline.snapshot(worlds, parts, meta, b, 180)) ||
+        !same(cFuture, timeline.snapshot(worlds, parts, meta, c, 180)) ||
+        same(aFuture, timeline.snapshot(worlds, parts, meta, d, 180))) {
+        return fail("seeking must fill only the new fork's missing future");
+    }
+    timeline.seek(worlds, parts, meta, rules, 120, 546.0, 328.0);
+    pending = [1.0, 0.0, 1.0, 0.0];
+    let source: float[] = timeline.snapshot(worlds, parts, meta, b, 120);
+    let e: int = timeline.fork(worlds, parts, meta, rules, b, pending, 546.0);
+    if (e != 4 || !same(source, timeline.snapshot(worlds, parts, meta, e, 120))) {
+        return fail("forking a fork must copy the selected world's state");
+    }
+    pending[3] = 1.0;
+    let f: int = timeline.fork(worlds, parts, meta, rules, e, pending, 546.0);
+    let nudged: float[] = timeline.snapshot(worlds, parts, meta, f, 120);
+    if (f != 5 || nudged[0] != flock.wrap(source[0] + 0.25, 546.0) ||
+        timeline.available(parts) != -1 || timeline.fork(worlds, parts, meta, rules, 0, pending, 546.0) != -1) {
+        return fail("a sixth part must preserve nudges and enforce the ensemble limit");
+    }
+    timeline.remove(worlds, parts, 0);
+    if (!parts[0][2]) { return fail("the reference cannot be removed"); }
+    timeline.remove(worlds, parts, b);
+    if (worlds[b].len() != 0 || !same(cFuture, timeline.snapshot(worlds, parts, meta, c, 180))) {
+        return fail("removing a parent must release its history without changing its children");
+    }
+    pending = [1.0, 1.0, 1.0, 0.0];
+    if (timeline.fork(worlds, parts, meta, rules, c, pending, 546.0) != b) {
+        return fail("removal must make the empty slot reusable");
+    }
+    timeline.seek(worlds, parts, meta, rules, 180, 546.0, 328.0);
+    while (timeline.playhead(meta) < 550) { timeline.advance(worlds, parts, meta, rules, 546.0, 328.0); }
+    while (tick < 550) {
+        flock.step(direct, next, 546.0, 328.0, 0.016666667, 0.0, 0.0, 0.0);
+        direct = next; tick += 1;
+    }
+    if (timeline.oldest(meta) != 310 || !same(direct, timeline.snapshot(worlds, parts, meta, 0, 550))) {
+        return fail("the reference and retention boundary must survive six simultaneous worlds");
+    }
+    let slot: int = 0;
+    while (slot < 6) {
+        if (worlds[slot].len() > 241) { return fail("each history must stay bounded"); }
+        slot += 1;
+    }
+    timeline.seek(worlds, parts, meta, rules, 0, 546.0, 328.0);
+    if (timeline.playhead(meta) != 310) { return fail("seeking outside retained history must clamp"); }
+    timeline.remove(worlds, parts, d);
+    pending = [1.0, 1.0, 1.0, 0.0];
+    if (timeline.fork(worlds, parts, meta, rules, 0, pending, 546.0) != d) {
+        return fail("forking must work at the oldest retained frame after wrapping");
+    }
+    timeline.seek(worlds, parts, meta, rules, 550, 546.0, 328.0);
+    if (!same(direct, timeline.snapshot(worlds, parts, meta, d, 550))) {
+        return fail("a matching fork must catch up exactly across a wrapped ring");
+    }
+    timeline.restart(worlds, parts, meta, rules, initial, 546.0);
+    if (timeline.playhead(meta) != 0 || timeline.newest(meta) != 0 || timeline.count(parts) != 6 ||
+        !same(initial, timeline.snapshot(worlds, parts, meta, 0, 0))) {
+        return fail("new seeds must reset history while retaining the ensemble");
+    }
+    io.println("Fork checks passed: six independent parts, nested forks, preserved futures, lazy catch-up, removal, replay, and bounded history.");
+    return 0;
+}

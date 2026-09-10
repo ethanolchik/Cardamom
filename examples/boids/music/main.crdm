@@ -1,0 +1,179 @@
+// Bounded per-part caches, with six live voices per part. A cache holds sixteen
+// pitches, each with two independently playable copies. Old quiet pitches can be
+// evicted, and instrument/colour changes unload only that part's cache.
+// row = [instrument, colour, serial, ...16 * (pitch, handle0, handle1, age0, age1)].
+import composer;
+import arrangement;
+import raylib as gfx;
+
+fn row() -> int[] {
+    let result: int[] = [-1, -1, 0];
+    let i: int = 0;
+    while (i < 16) {
+        result.push(-1); result.push(-1); result.push(-1);
+        result.push(0); result.push(0); i += 1;
+    }
+    return result;
+}
+
+public fn open() -> int[][] {
+    let bank: int[][] = [];
+    gfx.initAudioDevice();
+    if (!gfx.isAudioDeviceReady()) { return bank; }
+    gfx.setAudioSoftLimit(1);
+    let i: int = 0;
+    while (i < 6) { bank.push(row()); i += 1; }
+    return bank;
+}
+
+public fn silencePart(bank: &int[][], part: int) {
+    if (part < 0 || part >= bank.len()) { return; }
+    let i: int = 3;
+    while (i < bank[part].len()) {
+        if (bank[part][i + 1] >= 0) { gfx.stopSound(bank[part][i + 1]); }
+        if (bank[part][i + 2] >= 0) { gfx.stopSound(bank[part][i + 2]); }
+        i += 5;
+    }
+}
+
+public fn silence(bank: &int[][]) {
+    let part: int = 0;
+    while (part < bank.len()) { silencePart(bank, part); part += 1; }
+}
+
+public fn resetPart(bank: &mut int[][], part: int) {
+    if (part < 0 || part >= bank.len()) { return; }
+    let i: int = 3;
+    while (i < bank[part].len()) {
+        if (bank[part][i + 1] >= 0) { gfx.unloadSound(bank[part][i + 1]); }
+        if (bank[part][i + 2] >= 0) { gfx.unloadSound(bank[part][i + 2]); }
+        i += 5;
+    }
+    bank[part] = row();
+}
+
+public fn close(bank: &mut int[][]) {
+    let part: int = 0;
+    while (part < bank.len()) { resetPart(bank, part); part += 1; }
+    gfx.closeAudioDevice();
+    let empty: int[][] = [];
+    bank = empty;
+}
+
+public fn playingPart(bank: &int[][], part: int) -> int {
+    if (part < 0 || part >= bank.len()) { return 0; }
+    let count: int = 0;
+    let i: int = 3;
+    while (i < bank[part].len()) {
+        count += gfx.isSoundPlaying(bank[part][i + 1]) + gfx.isSoundPlaying(bank[part][i + 2]);
+        i += 5;
+    }
+    return count;
+}
+
+public fn playing(bank: &int[][]) -> int {
+    let count: int = 0; let part: int = 0;
+    while (part < bank.len()) { count += playingPart(bank, part); part += 1; }
+    return count;
+}
+
+public fn route(bank: &int[][], parts: &int[][], settings: &float[][], tick: int) {
+    let part: int = 0;
+    while (part < bank.len()) {
+        if (!arrangement.audible(parts, settings, part, tick)) { silencePart(bank, part); }
+        part += 1;
+    }
+}
+
+public fn remix(bank: &int[][], part: int, settings: &float[]) {
+    if (part < 0 || part >= bank.len()) { return; }
+    let i: int = 3;
+    while (i < bank[part].len()) {
+        let voice: int = 0;
+        while (voice < 2) {
+            let handle: int = bank[part][i + 1 + voice];
+            if (gfx.isSoundPlaying(handle)) { gfx.setSoundMix(handle, settings[4], settings[5]); }
+            voice += 1;
+        }
+        i += 5;
+    }
+}
+
+fn trim(bank: &int[][], part: int) {
+    while (playingPart(bank, part) >= 6) {
+        let oldest: int = 2147483647;
+        let handle: int = -1;
+        let i: int = 3;
+        while (i < bank[part].len()) {
+            let voice: int = 0;
+            while (voice < 2) {
+                if (gfx.isSoundPlaying(bank[part][i + 1 + voice]) && bank[part][i + 3 + voice] < oldest) {
+                    oldest = bank[part][i + 3 + voice];
+                    handle = bank[part][i + 1 + voice];
+                }
+                voice += 1;
+            }
+            i += 5;
+        }
+        if (handle < 0) { return; }
+        gfx.stopSound(handle);
+    }
+}
+
+fn cached(bank: &mut int[][], part: int, note: int) -> int {
+    let choice: int = -1;
+    let oldest: int = 2147483647;
+    let i: int = 3;
+    while (i < bank[part].len()) {
+        if (bank[part][i] == note) { return i; }
+        if (bank[part][i] < 0) { choice = i; break; }
+        if (!gfx.isSoundPlaying(bank[part][i + 1]) && !gfx.isSoundPlaying(bank[part][i + 2])) {
+            let age: int = bank[part][i + 3];
+            if (bank[part][i + 4] > age) { age = bank[part][i + 4]; }
+            if (age < oldest) { oldest = age; choice = i; }
+        }
+        i += 5;
+    }
+    if (choice < 0) { return -1; }
+    let pcm: float[] = composer.samples(bank[part][0], note, bank[part][1], 22050);
+    let first: int = gfx.loadSoundSamples(pcm, 22050);
+    if (first < 0) { return -1; }
+    let second: int = gfx.loadSoundSamples(pcm, 22050);
+    if (second < 0) { gfx.unloadSound(first); return -1; }
+    gfx.unloadSound(bank[part][choice + 1]);
+    gfx.unloadSound(bank[part][choice + 2]);
+    bank[part][choice] = note;
+    bank[part][choice + 1] = first;
+    bank[part][choice + 2] = second;
+    bank[part][choice + 3] = 0;
+    bank[part][choice + 4] = 0;
+    return choice;
+}
+
+public fn play(bank: &mut int[][], notes: &float[], part: int, settings: &float[], partCount: int) -> int {
+    if (bank.len() != 6 || part < 0 || part >= 6) { return 0; }
+    let instrument: int = as int settings[0];
+    let colour: int = as int settings[8];
+    if (bank[part][0] != instrument || bank[part][1] != colour) {
+        resetPart(bank, part);
+        bank[part][0] = instrument; bank[part][1] = colour;
+    }
+    let played: int = 0; let i: int = 0;
+    while (i < notes.len()) {
+        let key: int = cached(bank, part, as int notes[i + 1]);
+        if (key < 0) { close(bank); return played; }
+        let voice: int = 0;
+        if (gfx.isSoundPlaying(bank[part][key + 1])) { voice = 1; }
+        if (gfx.isSoundPlaying(bank[part][key + 1 + voice]) &&
+            bank[part][key + 3] < bank[part][key + 4]) { voice = 0; }
+        let handle: int = bank[part][key + 1 + voice];
+        if (gfx.isSoundPlaying(handle)) { gfx.stopSound(handle); }
+        trim(bank, part);
+        gfx.setSoundMix(handle, settings[4], settings[5]);
+        gfx.playSound(handle, arrangement.gain(notes[i + 2], 1.0, partCount), settings[5]);
+        bank[part][2] += 1;
+        bank[part][key + 3 + voice] = bank[part][2];
+        played += 1; i += 7;
+    }
+    return played;
+}
