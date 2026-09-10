@@ -1,0 +1,4 @@
+import cmp;
+fn equal<T>(left: &T, right: &T) -> bool where T: cmp.Eq { return left == right; }
+fn unchecked<T>(left: &T, right: &T) -> bool { return equal<T>(left, right); }
+fn main() -> int { return unchecked<int>(1, 1); }

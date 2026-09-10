@@ -1,0 +1,78 @@
+import cmp;
+import ops;
+import collections as col;
+import operator_model as model;
+
+class Bits(public value: int) {
+    public add(other: &Bits) -> Bits { return new Bits(this.value + other.value); }
+    public sub(other: &Bits) -> Bits { return new Bits(this.value - other.value); }
+    public mul(other: &Bits) -> Bits { return new Bits(this.value * other.value); }
+    public div(other: &Bits) -> Bits { return new Bits(this.value / other.value); }
+    public rem(other: &Bits) -> Bits { return new Bits(this.value % other.value); }
+    public bitAnd(other: &Bits) -> Bits { return new Bits(this.value & other.value); }
+    public bitOr(other: &Bits) -> Bits { return new Bits(this.value | other.value); }
+    public bitXor(other: &Bits) -> Bits { return new Bits(this.value ^ other.value); }
+    public shl(other: &int) -> Bits { return new Bits(this.value << other); }
+    public shr(other: &int) -> Bits { return new Bits(this.value >> other); }
+    public bitNot() -> int { return ~this.value; }
+}
+class Key(public value: int) {
+    public equals(other: &Key) -> bool { return this.value % 10 == other.value % 10; }
+    public hash() -> int { return this.value % 10; }
+}
+class Holder<T>(public value: T) {}
+class Registry { public static value: Bits = new Bits(1); }
+fn increment<T>(value: &mut T, amount: &T) where T: ops.Add<T, T> { value += amount; }
+fn next(count: &mut int) -> int { count += 1; return 0; }
+fn boundIndex<T>(left: &T[], right: &T[]) -> bool where T: cmp.Eq { return left == right; }
+fn le<T>(left: &T, right: &T) -> bool where T: cmp.Comparable { return left <= right; }
+fn nan() -> float { @cpp("return std::numeric_limits<double>::quiet_NaN();"); }
+
+fn main() -> int {
+    let b: Bits = new Bits(12);
+    let four: Bits = new Bits(4);
+    b += four;
+    b -= four;
+    b *= four;
+    b /= four;
+    b %= new Bits(5);
+    b |= four;
+    b &= new Bits(7);
+    b ^= new Bits(3);
+    b <<= 2;
+    b >>= 1;
+    if (b.value != 10 || ~b != -11) { return 1; }
+    increment<Bits>(&mut b, &four);
+    if (b.value != 14) { return 2; }
+    let h: Holder<Bits> = new Holder<Bits>(four);
+    h.value += four;
+    if (h.value.value != 8) { return 3; }
+    let count: int = 0;
+    let values: Bits[] = [four];
+    values[next(&mut count)] += four;
+    if (count != 1 || values[0].value != 8) { return 4; }
+    let explicit: model.Number = new model.Number(3);
+    explicit += new model.Number(2);
+    if (explicit.value != 5) { return 5; }
+    let a: model.Number[] = [new model.Number(1), new model.Number(2)];
+    let c: model.Number[] = [new model.Number(1), new model.Number(3)];
+    if (!(a == a) || a == c || !(a < c) || !(c > a)) { return 6; }
+    if (!boundIndex<model.Number>(&a, &a) || boundIndex<model.Number>(&a, &c)) { return 7; }
+    let nested: model.Number[][] = [a, c];
+    if (!(nested == nested)) { return 8; }
+    if (cmp.min<model.Number>(a[0], c[1]).value != 1) { return 9; }
+    let empty: model.Number[] = [];
+    if (!(empty < a) || a < empty || !(a >= a) || !(empty == empty)) { return 10; }
+    // Generic primitive comparisons retain IEEE unordered semantics.
+    let unordered: float = nan();
+    if (le<float>(unordered, unordered) || unordered <= unordered) { return 11; }
+    Registry::value += four;
+    if (Registry::value.value != 5) { return 12; }
+    let map: col.Hashmap<Key, int> = new col.Hashmap<Key, int>();
+    map.add(new Key(1), 42);
+    if (map.get(new Key(11), -1) != 42) { return 13; }
+    map.add(new Key(21), 43);
+    if (map.size() != 1 || map.get(new Key(1), -1) != 43) { return 14; }
+    if (!map.remove(new Key(31)) || map.size() != 0) { return 15; }
+    return 0;
+}

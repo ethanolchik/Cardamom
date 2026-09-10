@@ -1,0 +1,3 @@
+import ops;
+fn bad<T>(left: &T, right: &T) -> T where T: ops.Add<T> { return left + right; }
+fn main() { let x: int = bad<int>(1, 2); }

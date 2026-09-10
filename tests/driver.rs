@@ -53,6 +53,71 @@ fn fixture(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn trait_operators_compile_and_execute() {
+    let workspace = Workspace::new();
+    for name in ["operators_1.crdm", "operators_2.crdm"] {
+        let binary = workspace.path(name);
+        success(
+            workspace
+                .compiler()
+                .arg(fixture(&format!("tests/pass/{name}")))
+                .arg("-o")
+                .arg(&binary),
+        );
+        success(&mut Command::new(&binary));
+    }
+}
+
+#[test]
+fn invalid_operators_are_rejected_before_cpp_compilation() {
+    let workspace = Workspace::new();
+    for (name, diagnostic) in [
+        ("operator_missing_trait", "missing method `equals`"),
+        ("operator_missing_bound", "missing `Eq` bound"),
+        (
+            "operator_forwarded_bound",
+            "does not satisfy trait `cmp.Eq`",
+        ),
+        ("operator_wrong_rhs", "incompatible signature"),
+        ("operator_private_method", "missing method `equals`"),
+        ("operator_ambiguous", "ambiguous operator"),
+        ("operator_invalid_builtin", "Operator `-` requires"),
+        ("operator_compound_output", "cannot be assigned back"),
+        (
+            "operator_compound_borrow",
+            "Cannot assign through immutable borrow",
+        ),
+        ("operator_wrong_impl_signature", "incompatible signature"),
+        ("operator_bad_trait_arity", "expects 2 type arguments"),
+        ("operator_duplicate_impl", "ambiguous implementations"),
+    ] {
+        let output = workspace
+            .compiler()
+            .arg(fixture(&format!("tests/fail/{name}.crdm")))
+            .arg("--cxx")
+            .arg(workspace.path("must not run"))
+            .arg("-o")
+            .arg(workspace.path("rejected"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{name} unexpectedly passed");
+        assert!(
+            stderr.contains(diagnostic),
+            "{name}: missing {diagnostic}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("Could not run C++ compiler"),
+            "{name} reached codegen"
+        );
+        assert!(
+            !workspace.path("rejected.cpp").exists(),
+            "{name} emitted C++ despite an error"
+        );
+    }
+}
+
+#[test]
 fn native_headers_libraries_and_paths_with_spaces_reach_the_compiler() {
     let workspace = Workspace::new();
     let native = workspace.path("native support");

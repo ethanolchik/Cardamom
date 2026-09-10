@@ -1,0 +1,1 @@
+fn main() { let bad: string = "a" - "b"; let alsoBad: float = 1.0 % 2.0; }

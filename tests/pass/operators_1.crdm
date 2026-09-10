@@ -1,0 +1,98 @@
+import cmp;
+import ops;
+import operator_model as model;
+
+class Point(public x: int) {
+    public equals(other: &Point) -> bool { return this.x == other.x; }
+    public less(other: &Point) -> bool { return this.x < other.x; }
+    public greater(other: &Point) -> bool { return this.x > other.x; }
+    public add(other: &Point) -> Point { return new Point(this.x + other.x); }
+    public neg() -> Point { return new Point(-this.x); }
+    public mul(other: &int) -> int { return this.x * other; }
+}
+
+trait Labeled { label() -> string; }
+impl Labeled for int { public label() -> string { return "int"; } }
+impl Labeled for bool { public label() -> string { return "bool"; } }
+fn label<T>(value: &T) -> string where T: Labeled { return value.label(); }
+
+// A bounded blanket impl builds a new capability from an operator contract.
+trait Squared { squared() -> Self; }
+impl<T> Squared for T where T: ops.Mul<T, T> {
+    public squared() -> T { return this * this; }
+}
+fn squared<T>(value: &T) -> T where T: Squared { return value.squared(); }
+
+class Box<T>(public value: T) {}
+impl<T> cmp.Eq for Box<T> where T: cmp.Eq {
+    public equals(other: &Box<T>) -> bool { return this.value == other.value; }
+}
+impl<T> ops.Add<Box<T>, Box<T>> for Box<T> where T: ops.Add<T, T> {
+    public add(other: &Box<T>) -> Box<T> { return new Box<T>(this.value + other.value); }
+}
+
+fn equal<T>(left: &T, right: &T) -> bool where T: cmp.Eq { return left == right; }
+fn ordered<T>(left: &T, right: &T) -> bool where T: cmp.Comparable {
+    return left < right && right > left && left <= right && right >= left;
+}
+fn sum<L, R, O>(left: &L, right: &R) -> O where L: ops.Add<R, O> { return left + right; }
+fn boxedEqual<T>(left: T, right: T) -> bool where T: cmp.Eq {
+    let a: Box<T> = new Box<T>(left);
+    let b: Box<T> = new Box<T>(right);
+    return a == b;
+}
+fn boxedSum<T>(left: T, right: T) -> Box<T> where T: ops.Add<T, T> {
+    return new Box<T>(left) + new Box<T>(right);
+}
+fn make(count: &mut int, value: int) -> Point {
+    count += 1;
+    return new Point(value);
+}
+
+fn orderedOperand(count: &mut int) -> Point {
+    count += 1;
+    return new Point(count);
+}
+
+fn main() -> int {
+    let a: Point = new Point(2);
+    let b: Point = new Point(5);
+    if (!(a == new Point(2)) || !(a != b) || a == b || a != a) { return 1; }
+    if (!ordered(&a, &b) || !(a <= a) || !(b >= b) || b < a || a > b) { return 2; }
+    let c: Point = a + b;
+    let n: Point = -a;
+    if (c.x != 7 || n.x != -2 || a * 3 != 6) { return 3; }
+    if (!equal(&a, &a) || !equal<int>(4, 4) || !equal<bool>(true, true)) { return 4; }
+    let joined: string = sum<string, string, string>("a", "b");
+    if (joined != "ab" || sum<int, int, int>(3, 4) != 7) { return 5; }
+    let m: model.Number = new model.Number(3);
+    let o: model.Number = new model.Number(6);
+    let p: model.Number = sum<model.Number, model.Number, model.Number>(&m, &o);
+    if (m == o || !(m != o) || !ordered(&m, &o) || !equal(&m, &m) || p.value != 9) { return 6; }
+    let negative: model.Number = -m;
+    if (m * 4 != 12 || negative.value != -3 || !m || !(~m == -4)) { return 7; }
+    if (!boxedEqual<int>(3, 3) || boxedEqual<Point>(a, b)) { return 8; }
+    let boxed: Box<int> = boxedSum<int>(4, 5);
+    if (boxed.value != 9) { return 9; }
+    let nested: Box<Box<int>> = new Box<Box<int>>(boxed);
+    if (!(nested == new Box<Box<int>>(boxed))) { return 10; }
+    let count: int = 0;
+    let added: Point = make(&mut count, 1) + make(&mut count, 2);
+    if (count != 2 || added.x != 3) { return 11; }
+    // Literal comparisons must compare strings, not C++ const-char pointers.
+    if (!("a" < "b") || !("same" == "same") || "a" == "b") { return 12; }
+    // Logical operators stay short-circuiting rather than dispatching traits.
+    if (false && make(&mut count, 1) == a) { return 13; }
+    if (count != 2) { return 14; }
+    if (!(orderedOperand(&mut count) < orderedOperand(&mut count)) || count != 4) { return 15; }
+    if (label<int>(0) != "int" || label<bool>(false) != "bool") { return 16; }
+    if (squared<int>(3) != 9) { return 17; }
+    if (!( ("a") < ("b") )) { return 18; }
+    let nestedSum: Box<Box<int>> = boxedSum<Box<int>>(boxed, boxed);
+    if (nestedSum.value.value != 18) { return 19; }
+    let pointSum: Box<Point> = boxedSum<Point>(a, b);
+    if (pointSum.value.x != 7) { return 20; }
+    let negated: model.Number = ops.neg<model.Number, model.Number>(m);
+    if (negated.value != -3) { return 21; }
+    return 0;
+}

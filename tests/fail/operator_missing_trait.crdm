@@ -1,0 +1,3 @@
+import cmp;
+class Opaque(public value: int) {}
+fn main() -> int { return new Opaque(1) == new Opaque(1); }

@@ -1,95 +1,86 @@
-// Structural equality. Implementations return 1 for equal and 0 otherwise.
+// Structural equality, used by == and !=. Legacy int-returning implementations
+// remain compatible; comparisons always produce a bool.
 public trait Eq {
-    equals(other: &Self) -> int;
+    equals(other: &Self) -> bool;
 }
 
-// Strict ordering. A type may satisfy this structurally or through an explicit impl.
+// Strict total ordering, used by <, >, <= and >=. For user-defined types,
+// <= is !greater and >= is !less; implementations must obey ordering laws.
 public trait Comparable {
-    less(other: &Self) -> int;
-    greater(other: &Self) -> int;
+    less(other: &Self) -> bool;
+    greater(other: &Self) -> bool;
 }
 
 public impl Eq for int {
-    public equals(other: &int) -> int {
-        return this == other;
-    }
+    public equals(other: &int) -> bool { return this == other; }
 }
-
 public impl Comparable for int {
-    public less(other: &int) -> int {
-        return this < other;
-    }
-
-    public greater(other: &int) -> int {
-        return this > other;
-    }
+    public less(other: &int) -> bool { return this < other; }
+    public greater(other: &int) -> bool { return this > other; }
 }
-
 public impl Eq for float {
-    public equals(other: &float) -> int {
-        return this == other;
-    }
+    public equals(other: &float) -> bool { return this == other; }
 }
-
 public impl Comparable for float {
-    public less(other: &float) -> int {
-        return this < other;
-    }
-
-    public greater(other: &float) -> int {
-        return this > other;
-    }
+    public less(other: &float) -> bool { return this < other; }
+    public greater(other: &float) -> bool { return this > other; }
 }
-
 public impl Eq for bool {
-    public equals(other: &bool) -> int {
-        return this == other;
-    }
+    public equals(other: &bool) -> bool { return this == other; }
 }
-
 public impl Comparable for bool {
-    public less(other: &bool) -> int {
-        return this < other;
-    }
-
-    public greater(other: &bool) -> int {
-        return this > other;
-    }
+    public less(other: &bool) -> bool { return this < other; }
+    public greater(other: &bool) -> bool { return this > other; }
 }
-
 public impl Eq for string {
-    public equals(other: &string) -> int {
-        return this == other;
-    }
+    public equals(other: &string) -> bool { return this == other; }
 }
-
 public impl Comparable for string {
-    public less(other: &string) -> int {
-        return this < other;
+    public less(other: &string) -> bool { return this < other; }
+    public greater(other: &string) -> bool { return this > other; }
+}
+
+// Array comparisons recurse through the element's contracts, not C++ operators.
+public impl<T> Eq for T[] where T: Eq {
+    public equals(other: &T[]) -> bool {
+        if (this.len() != other.len()) { return false; }
+        for (let i: int = 0; i < this.len(); i += 1) {
+            if (this[i] != other[i]) { return false; }
+        }
+        return true;
     }
-
-    public greater(other: &string) -> int {
-        return this > other;
+}
+public impl<T> Comparable for T[] where T: Comparable {
+    public less(other: &T[]) -> bool {
+        for (let i: int = 0; i < this.len() && i < other.len(); i += 1) {
+            if (this[i] < other[i]) { return true; }
+            if (this[i] > other[i]) { return false; }
+        }
+        return this.len() < other.len();
+    }
+    public greater(other: &T[]) -> bool {
+        for (let i: int = 0; i < this.len() && i < other.len(); i += 1) {
+            if (this[i] > other[i]) { return true; }
+            if (this[i] < other[i]) { return false; }
+        }
+        return this.len() > other.len();
     }
 }
 
-public fn equal<T>(left: &T, right: &T) -> int
-where
-    T: Eq
-{
-    return left.equals(right);
+public fn equal<T>(left: &T, right: &T) -> bool where T: Eq {
+    return left == right;
 }
-
-public fn less<T>(left: &T, right: &T) -> int
-where
-    T: Comparable
-{
-    return left.less(right);
+public fn less<T>(left: &T, right: &T) -> bool where T: Comparable {
+    return left < right;
 }
-
-public fn greater<T>(left: &T, right: &T) -> int
-where
-    T: Comparable
-{
-    return left.greater(right);
+public fn greater<T>(left: &T, right: &T) -> bool where T: Comparable {
+    return left > right;
+}
+public fn min<T>(left: &T, right: &T) -> T where T: Comparable {
+    if (left < right) { return left; }
+    return right;
+}
+public fn max<T>(left: &T, right: &T) -> T where T: Comparable {
+    if (left > right) { return left; }
+    return right;
 }

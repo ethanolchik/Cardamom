@@ -49,6 +49,76 @@ impl Display for TypeKind {
 }
 
 impl TypeKind {
+    /// Type identity ignores source tokens, but never numeric conversions or borrows.
+    pub fn same_type(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Array(a, ad), Self::Array(b, bd)) => ad == bd && a.kind.same_type(&b.kind),
+            (Self::Reference(a), Self::Reference(b)) | (Self::MutRef(a), Self::MutRef(b)) => {
+                a.kind.same_type(&b.kind)
+            }
+            (Self::GenericInstance(am, an, aa), Self::GenericInstance(bm, bn, ba)) => {
+                am == bm
+                    && an == bn
+                    && aa.len() == ba.len()
+                    && aa.iter().zip(ba).all(|(a, b)| a.kind.same_type(&b.kind))
+            }
+            (Self::Tuple(a), Self::Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.kind.same_type(&b.kind))
+            }
+            (Self::Function(a, ar), Self::Function(b, br)) => {
+                ar.kind.same_type(&br.kind)
+                    && a.len() == b.len()
+                    && a.iter().zip(b).all(|(a, b)| a.kind.same_type(&b.kind))
+            }
+            _ => self == other,
+        }
+    }
+
+    pub fn contains_generics(&self) -> bool {
+        match self {
+            Self::GenericParam(_) => true,
+            Self::Array(t, _) | Self::Reference(t) | Self::MutRef(t) => t.kind.contains_generics(),
+            Self::GenericInstance(_, _, args) | Self::Tuple(args) => {
+                args.iter().any(|a| a.kind.contains_generics())
+            }
+            Self::Function(args, ret) => {
+                ret.kind.contains_generics() || args.iter().any(|a| a.kind.contains_generics())
+            }
+            _ => false,
+        }
+    }
+
+    /// Match an impl's type pattern, not assignment compatibility. In particular,
+    /// `impl Trait for int` must never select an implementation for `bool`.
+    pub fn match_pattern(&self, actual: &Self, subs: &mut SubstitutionMap) -> bool {
+        match (self, actual) {
+            (Self::GenericParam(name), actual) => {
+                if let Some(existing) = subs.get(name) {
+                    existing.same_type(actual)
+                } else {
+                    subs.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+            (Self::GenericInstance(pm, pn, pa), Self::GenericInstance(am, an, aa)) => {
+                pm == am
+                    && pn == an
+                    && pa.len() == aa.len()
+                    && pa
+                        .iter()
+                        .zip(aa)
+                        .all(|(p, a)| p.kind.match_pattern(&a.kind, subs))
+            }
+            (Self::Array(p, pd), Self::Array(a, ad)) => {
+                pd == ad && p.kind.match_pattern(&a.kind, subs)
+            }
+            (Self::Reference(p), Self::Reference(a)) | (Self::MutRef(p), Self::MutRef(a)) => {
+                p.kind.match_pattern(&a.kind, subs)
+            }
+            _ => self.same_type(actual),
+        }
+    }
+
     pub fn inner_type(&self) -> Option<&Type> {
         match self {
             TypeKind::Reference(inner) => Some(inner),

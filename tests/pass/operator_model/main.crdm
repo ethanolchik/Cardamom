@@ -1,0 +1,29 @@
+import cmp as comparison;
+import ops as arithmetic;
+
+public class Number(public value: int) {}
+
+// Cross-module, aliased explicit impls: this class has no inherent equals/add.
+public impl comparison.Eq for Number {
+    public equals(other: &Number) -> bool { return this.value == other.value; }
+}
+public impl comparison.Comparable for Number {
+    public less(other: &Number) -> bool { return this.value < other.value; }
+    public greater(other: &Number) -> bool { return this.value > other.value; }
+}
+public impl arithmetic.Add<Number, Number> for Number {
+    public add(other: &Number) -> Number { return new Number(this.value + other.value); }
+}
+// Heterogeneous operands and a result that is not Self.
+public impl arithmetic.Mul<int, int> for Number {
+    public mul(other: &int) -> int { return this.value * other; }
+}
+public impl arithmetic.Neg<Number> for Number {
+    public neg() -> Number { return new Number(-this.value); }
+}
+public impl arithmetic.Not<bool> for Number {
+    public not() -> bool { return this.value == 0; }
+}
+public impl arithmetic.BitNot<int> for Number {
+    public bitNot() -> int { return ~this.value; }
+}

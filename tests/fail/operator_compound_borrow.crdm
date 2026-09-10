@@ -1,0 +1,6 @@
+import ops;
+class Number(public value: int) {
+    public add(other: &Number) -> Number { return new Number(this.value + other.value); }
+}
+fn update(value: &Number) { value += new Number(1); }
+fn main() { let n: Number = new Number(1); update(&n); }

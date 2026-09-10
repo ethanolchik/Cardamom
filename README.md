@@ -82,7 +82,8 @@ It is written in Cardamom, in `std/`:
 | `str` | `len`, `charAt`, `charCodeAt`, `fromASCII`, `fromInt`, `fromFloat`, `toInt`, `toFloat`, `substring`, `repeat`, `contains` |
 | `math` | `abs`, `min`, `max`, `pow`, `sqrt` |
 | `raylib` (optional) | Native windows, drawing, input, timing, and screenshots; requires raylib when used |
-| `cmp` | structural `Eq` and `Comparable`, primitive implementations, generic comparison helpers |
+| `cmp` | operator-backed `Eq` and `Comparable`, primitive/array implementations, generic comparisons, `min`, `max` |
+| `ops` | arithmetic, bitwise, shift, and unary operator traits with separate operand/result types |
 | `fmt` | structural `Printable`, primitive/array implementations, generic `text`, `print`, `println` |
 | `hash` | structural `Hash`, primitive implementations, generic hashing |
 | `convert` | generic `From<T>`/`Into<T>` conversion traits and `into<T, U>` |
@@ -216,6 +217,16 @@ impl<T> Printable for Box<T> where T: Printable {
 
 Traits use static monomorphised dispatch; they do not introduce vtables or runtime
 trait objects.
+
+Operators use these contracts too: `==`/`!=` use `cmp.Eq`, ordering uses
+`cmp.Comparable`, and arithmetic/bitwise operations use traits from `ops`.
+For example, `where T: ops.Add<T, T>` makes `left + right` valid in a generic body.
+Public structural methods and explicit implementations both work, including
+cross-module and nested generic implementations. Compound assignments reuse the
+binary contracts and require a result assignable to their destination.
+
+See [Operators and traits](docs/operators.md) for the contract table, examples,
+array comparisons, evaluation rules, and current limitations.
 
 ## Functions as values
 

@@ -1,0 +1,5 @@
+import cmp;
+class Number(public value: int) {
+    private equals(other: &Number) -> bool { return this.value == other.value; }
+}
+fn main() -> int { return new Number(1) == new Number(1); }

@@ -10,7 +10,7 @@ where
 
     public add(key: K, value: V) {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i].equals(key)) {
+            if (this.keys[i] == key) {
                 this.values[i] = value;
                 return;
             }
@@ -22,7 +22,7 @@ where
 
     public get(key: K, fallback: V) -> V {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i].equals(key)) {
+            if (this.keys[i] == key) {
                 return this.values[i];
             }
         }
@@ -33,7 +33,7 @@ where
     // Returns 1 when the key was removed and 0 when it was not present.
     public remove(key: K) -> int {
         for (let i: int = 0; i < this.keys.len(); i += 1) {
-            if (this.keys[i].equals(key)) {
+            if (this.keys[i] == key) {
                 for (let j: int = i; j < this.keys.len() - 1; j += 1) {
                     this.keys[j] = this.keys[j + 1];
                     this.values[j] = this.values[j + 1];

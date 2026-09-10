@@ -198,7 +198,11 @@ impl CppCodeGenerator {
                     _ => kind.clone(),
                 }
             }
-            _ => kind.clone(),
+            _ => {
+                Type::new(Token::dummy("<type>"), kind.clone())
+                    .apply_substitution(&self.current_substitution)
+                    .kind
+            }
         }
     }
 
@@ -334,10 +338,12 @@ impl CppCodeGenerator {
                 name.clone(),
                 arguments
                     .iter()
-                    .map(|argument| Type::new(
-                        argument.name.clone(),
-                        Self::generalise_impl_kind(&argument.kind, generics),
-                    ))
+                    .map(|argument| {
+                        Type::new(
+                            argument.name.clone(),
+                            Self::generalise_impl_kind(&argument.kind, generics),
+                        )
+                    })
                     .collect(),
             ),
             TypeKind::Array(inner, depth) => TypeKind::Array(
@@ -356,49 +362,42 @@ impl CppCodeGenerator {
         actual: &TypeKind,
         substitutions: &mut HashMap<String, TypeKind>,
     ) -> bool {
-        match (pattern, actual) {
-            (TypeKind::GenericParam(name), actual) => {
-                if let Some(existing) = substitutions.get(name) {
-                    existing == actual
-                } else {
-                    substitutions.insert(name.clone(), actual.clone());
-                    true
-                }
-            }
-            (
-                TypeKind::GenericInstance(pm, pn, pa),
-                TypeKind::GenericInstance(am, an, aa),
-            ) if pm == am && pn == an && pa.len() == aa.len() => pa
-                .iter()
-                .zip(aa)
-                .all(|(p, a)| Self::match_impl_type(&p.kind, &a.kind, substitutions)),
-            (TypeKind::Array(pattern, pd), TypeKind::Array(actual, ad)) if pd == ad => {
-                Self::match_impl_type(&pattern.kind, &actual.kind, substitutions)
-            }
-            (TypeKind::Reference(pattern), TypeKind::Reference(actual))
-            | (TypeKind::MutRef(pattern), TypeKind::MutRef(actual)) => {
-                Self::match_impl_type(&pattern.kind, &actual.kind, substitutions)
-            }
-            _ => pattern == actual,
-        }
+        pattern.match_pattern(actual, substitutions)
     }
 
     fn impl_key(trait_type: &TypeKind, target: &TypeKind) -> String {
         format!("impl {} for {}", trait_type, target)
     }
 
-    fn owned_type_kind(module: &str, kind: &TypeKind) -> TypeKind {
+    fn owned_type_kind(
+        module: &str,
+        imports: &HashMap<String, String>,
+        kind: &TypeKind,
+    ) -> TypeKind {
+        let owner = |name: &str| {
+            if name.is_empty() {
+                module.to_string()
+            } else {
+                imports
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string())
+            }
+        };
+        let nested = |ty: &Type| Type {
+            kind: Self::owned_type_kind(module, imports, &ty.kind),
+            ..ty.clone()
+        };
         match kind {
-            TypeKind::User(owner, name) if owner.is_empty() => {
-                TypeKind::User(module.to_string(), name.clone())
-            }
-            TypeKind::GenericInstance(owner, name, arguments) if owner.is_empty() => {
-                TypeKind::GenericInstance(
-                    module.to_string(),
-                    name.clone(),
-                    arguments.clone(),
-                )
-            }
+            TypeKind::User(m, name) => TypeKind::User(owner(m), name.clone()),
+            TypeKind::GenericInstance(m, name, arguments) => TypeKind::GenericInstance(
+                owner(m),
+                name.clone(),
+                arguments.iter().map(nested).collect(),
+            ),
+            TypeKind::Array(inner, depth) => TypeKind::Array(Box::new(nested(inner)), *depth),
+            TypeKind::Reference(inner) => TypeKind::Reference(Box::new(nested(inner))),
+            TypeKind::MutRef(inner) => TypeKind::MutRef(Box::new(nested(inner))),
             _ => kind.clone(),
         }
     }
@@ -446,34 +445,37 @@ impl CppCodeGenerator {
             .modules
             .iter()
             .flat_map(|module| {
-                module.ast.statements.iter().filter_map(move |stmt| match &**stmt {
-                    Stmt::Impl {
-                        trait_type,
-                        target,
-                        generics,
-                        ..
-                    } => {
-                        let generic_names: Vec<String> = generics
-                            .iter()
-                            .map(|generic| generic.lexeme.clone())
-                            .collect();
-                        Some(ExplicitImpl {
-                            module: module.name.clone(),
-                            trait_type: Self::owned_type_kind(
-                                &module.name,
-                                &Self::generalise_impl_kind(
-                                    &trait_type.kind,
-                                    &generic_names,
+                module
+                    .ast
+                    .statements
+                    .iter()
+                    .filter_map(move |stmt| match &**stmt {
+                        Stmt::Impl {
+                            trait_type,
+                            target,
+                            generics,
+                            ..
+                        } => {
+                            let generic_names: Vec<String> = generics
+                                .iter()
+                                .map(|generic| generic.lexeme.clone())
+                                .collect();
+                            Some(ExplicitImpl {
+                                module: module.name.clone(),
+                                trait_type: Self::owned_type_kind(
+                                    &module.name,
+                                    &module.imports,
+                                    &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
                                 ),
-                            ),
-                            target: Self::owned_type_kind(
-                                &module.name,
-                                &Self::generalise_impl_kind(&target.kind, &generic_names),
-                            ),
-                        })
-                    }
-                    _ => None,
-                })
+                                target: Self::owned_type_kind(
+                                    &module.name,
+                                    &module.imports,
+                                    &Self::generalise_impl_kind(&target.kind, &generic_names),
+                                ),
+                            })
+                        }
+                        _ => None,
+                    })
             })
             .collect();
 
@@ -523,10 +525,7 @@ impl CppCodeGenerator {
                     .iter()
                     .filter(|stmt| matches!(&***stmt, Stmt::Class { .. }))
                     .collect();
-                let classes = Self::order_classes_by_dependencies(
-                    &classes,
-                    &gen.current_module,
-                );
+                let classes = Self::order_classes_by_dependencies(&classes, &gen.current_module);
 
                 for class in &classes {
                     gen.write_class_declaration(class);
@@ -561,8 +560,7 @@ impl CppCodeGenerator {
                     .iter()
                     .filter(|stmt| matches!(&***stmt, Stmt::Class { .. }))
                     .collect();
-                let classes =
-                    Self::order_classes_by_dependencies(&classes, &gen.current_module);
+                let classes = Self::order_classes_by_dependencies(&classes, &gen.current_module);
                 for class in &classes {
                     gen.write_class_definitions(class);
                 }
@@ -752,10 +750,6 @@ impl CppCodeGenerator {
             self.expr_types.get(&(expr as *const Expr)).map(|t| &t.kind),
             Some(TypeKind::String)
         )
-    }
-
-    fn is_string_literal(expr: &Expr) -> bool {
-        matches!(expr, Expr::Literal { value } if value.lexeme.starts_with('"'))
     }
 
     /// Works out which methods can be marked `const` in the generated C++.
@@ -1291,23 +1285,24 @@ impl CppCodeGenerator {
             else {
                 continue;
             };
-            let generic_names: Vec<String> =
-                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let generic_names: Vec<String> = generics
+                .iter()
+                .map(|generic| generic.lexeme.clone())
+                .collect();
             let trait_pattern = Self::owned_type_kind(
                 &self.current_module,
+                &self.imports,
                 &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
             );
             let target_pattern = Self::owned_type_kind(
                 &self.current_module,
+                &self.imports,
                 &Self::generalise_impl_kind(&target.kind, &generic_names),
             );
-            for substitution in
-                self.impl_specialisations(&trait_pattern, &target_pattern, generics)
+            for substitution in self.impl_specialisations(&trait_pattern, &target_pattern, generics)
             {
-                let previous = std::mem::replace(
-                    &mut self.current_substitution,
-                    substitution.clone(),
-                );
+                let previous =
+                    std::mem::replace(&mut self.current_substitution, substitution.clone());
                 let resolved_trait = Type::new(trait_type.name.clone(), trait_pattern.clone())
                     .apply_substitution(&substitution)
                     .kind;
@@ -1322,8 +1317,7 @@ impl CppCodeGenerator {
                         ..
                     } = &**method
                     {
-                        let mut parameters =
-                            format!("const {}& self", self.translate_type(target));
+                        let mut parameters = format!("const {}& self", self.translate_type(target));
                         let rest = self.translate_params(params);
                         if !rest.is_empty() {
                             parameters.push_str(", ");
@@ -1515,14 +1509,222 @@ impl CppCodeGenerator {
         }
     }
 
-    /// Chooses `.` or `->` for a member access. `this` is a pointer in C++, and
-    /// references/pointers are dereferenced, so those all use `->`.
+    /// Only class-method `this` is a pointer in C++; Cardamom borrows lower
+    /// to C++ references, whose member accesses still use `.`.
     fn member_access_operator(&self, object: &Expr) -> &'static str {
         match object {
-            Expr::Reference { .. } | Expr::MutReference { .. } => "->",
             Expr::Variable { name } if name.lexeme == "this" && !self.in_impl_method => "->",
             _ => ".",
         }
+    }
+
+    fn trait_impl_name(&self, call: &Expr, receiver: &TypeKind) -> Option<String> {
+        let site = self.trait_call_sites.get(&(call as *const Expr))?;
+        let concrete_trait = site
+            .trait_type
+            .apply_substitution(&self.current_substitution)
+            .kind;
+        let concrete = self.resolve_type_argument(receiver);
+        self.explicit_impls.iter().find_map(|implementation| {
+            let mut subs = HashMap::new();
+            if Self::match_impl_type(&implementation.target, &concrete, &mut subs)
+                && Self::match_impl_type(&implementation.trait_type, &concrete_trait, &mut subs)
+            {
+                Some(Self::impl_name(
+                    &implementation.module,
+                    &concrete_trait,
+                    &concrete,
+                    &site.method,
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
+    fn write_operand_value(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Variable { name } if name.lexeme == "this" && !self.in_impl_method => {
+                self.output.push_str("(*this)")
+            }
+            Expr::Reference { object } | Expr::MutReference { object } => {
+                self.write_operand_value(object)
+            }
+            Expr::Grouping { expression } => {
+                self.output.push('(');
+                self.write_operand_value(expression);
+                self.output.push(')');
+            }
+            _ => expr.accept(self),
+        }
+    }
+
+    fn write_operator_call(
+        &mut self,
+        expr: &Expr,
+        op: &Token,
+        receiver: &Expr,
+        rhs: Option<&Expr>,
+    ) -> bool {
+        let Some(site) = self.trait_call_sites.get(&(expr as *const Expr)).cloned() else {
+            return false;
+        };
+        let mut receiver_kind = &self
+            .expr_types
+            .get(&(receiver as *const Expr))
+            .expect("checked operator receiver")
+            .kind;
+        while let TypeKind::Reference(inner) | TypeKind::MutRef(inner) = receiver_kind {
+            receiver_kind = &inner.kind;
+        }
+        let concrete = self.resolve_type_argument(receiver_kind);
+        let builtin = match rhs {
+            Some(rhs) => {
+                let mut kind = &self
+                    .expr_types
+                    .get(&(rhs as *const Expr))
+                    .expect("checked right operand")
+                    .kind;
+                while let TypeKind::Reference(inner) | TypeKind::MutRef(inner) = kind {
+                    kind = &inner.kind;
+                }
+                crate::operators::builtin_binary(
+                    &op.kind,
+                    &concrete,
+                    &self.resolve_type_argument(kind),
+                )
+                .is_some()
+            }
+            None => crate::operators::builtin_unary(&op.kind, &concrete).is_some(),
+        };
+        let implementation = self.trait_impl_name(expr, receiver_kind);
+        // Sequence operands left-to-right, exactly once. Borrow temporaries rather
+        // than copying them, and keep both alive through the dispatch.
+        self.output
+            .push_str("([&]() { const auto& _crdm_op_left = ");
+        self.write_operand_value(receiver);
+        self.output.push_str("; ");
+        if let Some(rhs) = rhs {
+            self.output.push_str("const auto& _crdm_op_right = ");
+            self.write_operand_value(rhs);
+            self.output.push_str("; ");
+        }
+        self.output.push_str("return ");
+        if builtin {
+            if rhs.is_some() {
+                self.output.push_str("_crdm_op_left ");
+                self.output.push_str(&op.lexeme);
+                self.output.push_str(" _crdm_op_right");
+            } else {
+                self.output.push_str(&op.lexeme);
+                self.output.push_str("_crdm_op_left");
+            }
+            self.output.push_str("; }())");
+            return true;
+        }
+        use crate::token::TokenKind;
+        let comparison = matches!(
+            op.kind,
+            TokenKind::EqEq
+                | TokenKind::Neq
+                | TokenKind::Lt
+                | TokenKind::Gt
+                | TokenKind::Lte
+                | TokenKind::Gte
+        );
+        if matches!(op.kind, TokenKind::Neq | TokenKind::Lte | TokenKind::Gte) {
+            self.output.push('!');
+        }
+        if comparison {
+            self.output.push_str("static_cast<bool>(");
+        }
+        if let Some(name) = implementation {
+            self.output.push_str(&name);
+            self.output.push_str("(_crdm_op_left");
+            if rhs.is_some() {
+                self.output.push_str(", _crdm_op_right");
+            }
+        } else {
+            self.output.push_str("_crdm_op_left.");
+            self.output.push_str(&Self::ident(&site.method));
+            self.output.push('(');
+            if rhs.is_some() {
+                self.output.push_str("_crdm_op_right");
+            }
+        }
+        self.output.push(')');
+        if comparison {
+            self.output.push(')');
+        }
+        self.output.push_str("; }())");
+        true
+    }
+
+    fn write_compound_operator(&mut self, expr: &Expr) -> bool {
+        let Some(site) = self.trait_call_sites.get(&(expr as *const Expr)).cloned() else {
+            return false;
+        };
+        let receiver = &self
+            .expr_types
+            .get(&(expr as *const Expr))
+            .expect("checked compound assignment")
+            .kind;
+        let implementation = self.trait_impl_name(expr, receiver);
+        self.output.push_str("([&]() { auto& _crdm_op_left = ");
+        let value = match expr {
+            Expr::Assignment { name, value, .. } => {
+                self.output.push_str(&Self::ident(&name.lexeme));
+                value
+            }
+            Expr::MemberAssignment {
+                object,
+                name,
+                value,
+                ..
+            }
+            | Expr::StaticAssignment {
+                object,
+                name,
+                value,
+                ..
+            } => {
+                object.accept(self);
+                self.output
+                    .push_str(if matches!(expr, Expr::StaticAssignment { .. }) {
+                        "::"
+                    } else {
+                        self.member_access_operator(object)
+                    });
+                self.output.push_str(&Self::ident(&name.lexeme));
+                value
+            }
+            Expr::IndexAssignment {
+                object,
+                index,
+                value,
+                ..
+            } => {
+                object.accept(self);
+                self.output.push('[');
+                index.accept(self);
+                self.output.push(']');
+                value
+            }
+            _ => unreachable!("compound operator on non-assignment"),
+        };
+        self.output.push_str("; const auto& _crdm_op_right = ");
+        value.accept(self);
+        self.output.push_str("; _crdm_op_left = ");
+        if let Some(name) = implementation {
+            self.output.push_str(&name);
+            self.output.push_str("(_crdm_op_left, _crdm_op_right)");
+        } else {
+            self.output.push_str("_crdm_op_left.");
+            self.output.push_str(&Self::ident(&site.method));
+            self.output.push_str("(_crdm_op_right)");
+        }
+        self.output.push_str("; return _crdm_op_left; }())");
+        true
     }
 
     fn write_call_arguments(&mut self, arguments: &[Box<Expr>]) {
@@ -1558,65 +1760,22 @@ impl CppCodeGenerator {
             .get(&(object as *const Expr))
             .map(|ty| &ty.kind);
         let receiver_kind = match receiver_kind {
-            Some(TypeKind::Reference(inner)) | Some(TypeKind::MutRef(inner)) => {
-                Some(&inner.kind)
-            }
+            Some(TypeKind::Reference(inner)) | Some(TypeKind::MutRef(inner)) => Some(&inner.kind),
             other => other,
         };
         let is_array = matches!(receiver_kind, Some(TypeKind::Array(_, _)));
         let is_string = matches!(receiver_kind, Some(TypeKind::String));
 
-        if let Some(site) = self.trait_call_sites.get(&(call as *const Expr)) {
-            let concrete_trait = Type::new(
-                Token::dummy("<trait>"),
-                site.trait_type.kind.clone(),
-            )
-            .apply_substitution(&self.current_substitution)
-            .kind;
-            let concrete = receiver_kind.map(|kind| self.resolve_type_argument(kind));
-            if let Some(concrete) = concrete {
-                if let Some((implementation, substitutions)) = self
-                    .explicit_impls
-                    .iter()
-                    .find_map(|implementation| {
-                        let mut substitutions = HashMap::new();
-                        if Self::match_impl_type(
-                            &implementation.trait_type,
-                            &concrete_trait,
-                            &mut substitutions,
-                        ) && Self::match_impl_type(
-                            &implementation.target,
-                            &concrete,
-                            &mut substitutions,
-                        ) {
-                            Some((implementation, substitutions))
-                        } else {
-                            None
-                        }
-                    })
-                {
-                    let resolved_trait = Type::new(
-                        Token::dummy("<trait>"),
-                        implementation.trait_type.clone(),
-                    )
-                    .apply_substitution(&substitutions)
-                    .kind;
-                    self.output.push_str(&Self::impl_name(
-                        &implementation.module,
-                        &resolved_trait,
-                        &concrete,
-                        &site.method,
-                    ));
-                    self.output.push('(');
-                    object.accept(self);
-                    if !arguments.is_empty() {
-                        self.output.push_str(", ");
-                    }
-                    self.write_call_arguments(arguments);
-                    self.output.push(')');
-                    return;
-                }
+        if let Some(name) = receiver_kind.and_then(|kind| self.trait_impl_name(call, kind)) {
+            self.output.push_str(&name);
+            self.output.push('(');
+            object.accept(self);
+            if !arguments.is_empty() {
+                self.output.push_str(", ");
             }
+            self.write_call_arguments(arguments);
+            self.output.push(')');
+            return;
         }
 
         match (name.lexeme.as_str(), is_array, is_string) {
@@ -1941,12 +2100,14 @@ impl Visitor for CppCodeGenerator {
     // Expression visitors
     fn visit_binary(&mut self, expr: &Expr) {
         if let Expr::Binary { left, op, right } = expr {
+            if self.write_operator_call(expr, op, left, Some(right)) {
+                return;
+            }
             self.output.push('(');
 
-            // In C++ a string literal is a `const char*`, so `"a" + "b"` is pointer
-            // arithmetic rather than concatenation. Promoting the left operand to
-            // `std::string` makes the whole chain concatenate as written.
-            if op.lexeme == "+" && self.is_string_expr(expr) && Self::is_string_literal(left) {
+            // C++ string literals (including grouped literals) must compare by
+            // value, not pointer identity, and + must concatenate them.
+            if self.is_string_expr(left) {
                 self.output.push_str("std::string(");
                 left.accept(self);
                 self.output.push(')');
@@ -1964,6 +2125,9 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_unary(&mut self, expr: &Expr) {
         if let Expr::Unary { op, right } = expr {
+            if self.write_operator_call(expr, op, right, None) {
+                return;
+            }
             self.output.push_str(&op.lexeme);
             right.accept(self);
         }
@@ -1994,6 +2158,9 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_assignment(&mut self, expr: &Expr) {
+        if self.write_compound_operator(expr) {
+            return;
+        }
         if let Expr::Assignment { name, value, op } = expr {
             self.output.push_str(&Self::ident(&name.lexeme));
             self.output.push(' ');
@@ -2253,6 +2420,9 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_member_assignment(&mut self, expr: &Expr) {
+        if self.write_compound_operator(expr) {
+            return;
+        }
         if let Expr::MemberAssignment {
             object,
             name,
@@ -2271,6 +2441,9 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
+        if self.write_compound_operator(expr) {
+            return;
+        }
         if let Expr::StaticAssignment {
             object,
             name,
@@ -2289,6 +2462,9 @@ impl Visitor for CppCodeGenerator {
     }
 
     fn visit_index_assignment(&mut self, expr: &Expr) {
+        if self.write_compound_operator(expr) {
+            return;
+        }
         if let Expr::IndexAssignment {
             object,
             index,
@@ -2319,19 +2495,22 @@ impl Visitor for CppCodeGenerator {
         else {
             return;
         };
-        let generic_names: Vec<String> =
-            generics.iter().map(|generic| generic.lexeme.clone()).collect();
+        let generic_names: Vec<String> = generics
+            .iter()
+            .map(|generic| generic.lexeme.clone())
+            .collect();
         let trait_pattern = Self::owned_type_kind(
             &self.current_module,
+            &self.imports,
             &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
         );
         let target_pattern = Self::owned_type_kind(
             &self.current_module,
+            &self.imports,
             &Self::generalise_impl_kind(&target.kind, &generic_names),
         );
         for substitution in self.impl_specialisations(&trait_pattern, &target_pattern, generics) {
-            let previous =
-                std::mem::replace(&mut self.current_substitution, substitution.clone());
+            let previous = std::mem::replace(&mut self.current_substitution, substitution.clone());
             let resolved_trait = Type::new(trait_type.name.clone(), trait_pattern.clone())
                 .apply_substitution(&substitution)
                 .kind;

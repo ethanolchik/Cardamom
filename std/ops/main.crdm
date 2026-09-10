@@ -1,0 +1,83 @@
+// Operator contracts. Rhs and Output are explicit so operations may combine
+// different types and return something other than Self. Receivers are borrowed.
+public trait Add<Rhs, Output> { add(other: &Rhs) -> Output; }
+public trait Sub<Rhs, Output> { sub(other: &Rhs) -> Output; }
+public trait Mul<Rhs, Output> { mul(other: &Rhs) -> Output; }
+public trait Div<Rhs, Output> { div(other: &Rhs) -> Output; }
+public trait Rem<Rhs, Output> { rem(other: &Rhs) -> Output; }
+public trait BitAnd<Rhs, Output> { bitAnd(other: &Rhs) -> Output; }
+public trait BitOr<Rhs, Output> { bitOr(other: &Rhs) -> Output; }
+public trait BitXor<Rhs, Output> { bitXor(other: &Rhs) -> Output; }
+public trait Shl<Rhs, Output> { shl(other: &Rhs) -> Output; }
+public trait Shr<Rhs, Output> { shr(other: &Rhs) -> Output; }
+public trait Neg<Output> { neg() -> Output; }
+public trait Not<Output> { not() -> Output; }
+public trait BitNot<Output> { bitNot() -> Output; }
+
+public impl Add<int, int> for int {
+    public add(other: &int) -> int { return this + other; }
+}
+public impl Sub<int, int> for int {
+    public sub(other: &int) -> int { return this - other; }
+}
+public impl Mul<int, int> for int {
+    public mul(other: &int) -> int { return this * other; }
+}
+public impl Div<int, int> for int {
+    public div(other: &int) -> int { return this / other; }
+}
+public impl Rem<int, int> for int {
+    public rem(other: &int) -> int { return this % other; }
+}
+public impl BitAnd<int, int> for int {
+    public bitAnd(other: &int) -> int { return this & other; }
+}
+public impl BitOr<int, int> for int {
+    public bitOr(other: &int) -> int { return this | other; }
+}
+public impl BitXor<int, int> for int {
+    public bitXor(other: &int) -> int { return this ^ other; }
+}
+public impl Shl<int, int> for int {
+    public shl(other: &int) -> int { return this << other; }
+}
+public impl Shr<int, int> for int {
+    public shr(other: &int) -> int { return this >> other; }
+}
+public impl Neg<int> for int {
+    public neg() -> int { return -this; }
+}
+public impl Not<bool> for int {
+    public not() -> bool { return !this; }
+}
+public impl BitNot<int> for int {
+    public bitNot() -> int { return ~this; }
+}
+public impl Add<float, float> for float {
+    public add(other: &float) -> float { return this + other; }
+}
+public impl Sub<float, float> for float {
+    public sub(other: &float) -> float { return this - other; }
+}
+public impl Mul<float, float> for float {
+    public mul(other: &float) -> float { return this * other; }
+}
+public impl Div<float, float> for float {
+    public div(other: &float) -> float { return this / other; }
+}
+public impl Neg<float> for float {
+    public neg() -> float { return -this; }
+}
+public impl Not<bool> for bool {
+    public not() -> bool { return !this; }
+}
+public impl Add<string, string> for string {
+    public add(other: &string) -> string { return this + other; }
+}
+
+public fn add<L, R, O>(left: &L, right: &R) -> O where L: Add<R, O> {
+    return left + right;
+}
+public fn neg<T, O>(value: &T) -> O where T: Neg<O> {
+    return -value;
+}

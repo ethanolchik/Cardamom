@@ -1,0 +1,3 @@
+import cmp;
+fn equal<T>(left: &T, right: &T) -> bool { return left == right; }
+fn main() -> int { return equal<int>(1, 1); }

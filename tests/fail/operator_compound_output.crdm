@@ -1,0 +1,5 @@
+import ops;
+class Number(public value: int) {
+    public mul(other: &int) -> int { return this.value * other; }
+}
+fn main() { let n: Number = new Number(1); n *= 2; }

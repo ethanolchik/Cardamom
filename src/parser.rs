@@ -1613,12 +1613,15 @@ impl Parser {
         for (index, token) in self.tokens.iter().enumerate().skip(self.current) {
             match token.kind {
                 TokenKind::Lt if paren_depth == 0 && bracket_depth == 0 => depth += 1,
-                TokenKind::Gt if paren_depth == 0 && bracket_depth == 0 => {
-                    if depth == 0 {
+                TokenKind::Gt | TokenKind::RShift if paren_depth == 0 && bracket_depth == 0 => {
+                    // Match consume_type_gt: in a nested type argument, >> closes
+                    // two generic lists rather than being a shift expression.
+                    let closings = if token.kind == TokenKind::RShift { 2 } else { 1 };
+                    if depth < closings {
                         return false;
                     }
 
-                    depth -= 1;
+                    depth -= closings;
                     if depth == 0 {
                         return self
                             .tokens

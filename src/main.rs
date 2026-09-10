@@ -4,6 +4,7 @@ pub mod codegen;
 pub mod errors;
 pub mod lexer;
 pub mod modules;
+pub mod operators;
 pub mod parser;
 pub mod reachable;
 pub mod token;

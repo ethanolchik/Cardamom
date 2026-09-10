@@ -1,3 +1,5 @@
+mod operators;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -268,17 +270,16 @@ impl<'a> TypeChecker<'a> {
                 ..
             } = &**stmt
             {
-                let function =
-                    self.collect_exported_function(
-                        params,
-                        return_type,
-                        modifiers,
-                        generics,
-                        self.function_constraints
-                            .get(&name.lexeme)
-                            .cloned()
-                            .unwrap_or_default(),
-                    );
+                let function = self.collect_exported_function(
+                    params,
+                    return_type,
+                    modifiers,
+                    generics,
+                    self.function_constraints
+                        .get(&name.lexeme)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 if let Some(function) = function {
                     exports.functions.insert(name.lexeme.clone(), function);
                 }
@@ -607,8 +608,10 @@ impl<'a> TypeChecker<'a> {
             else {
                 continue;
             };
-            let trait_generics: Vec<String> =
-                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let trait_generics: Vec<String> = generics
+                .iter()
+                .map(|generic| generic.lexeme.clone())
+                .collect();
             let mut exported_methods = HashMap::new();
             for method in methods {
                 let Stmt::Function {
@@ -632,9 +635,9 @@ impl<'a> TypeChecker<'a> {
                 let params = params
                     .iter()
                     .filter_map(|param| match &**param {
-                        Stmt::Variable { type_, .. } => Some(
-                            self.qualify_type(&Self::generalise(type_, &all_generics)),
-                        ),
+                        Stmt::Variable { type_, .. } => {
+                            Some(self.qualify_type(&Self::generalise(type_, &all_generics)))
+                        }
                         _ => None,
                     })
                     .collect();
@@ -671,8 +674,10 @@ impl<'a> TypeChecker<'a> {
             else {
                 continue;
             };
-            let generic_names: Vec<String> =
-                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let generic_names: Vec<String> = generics
+                .iter()
+                .map(|generic| generic.lexeme.clone())
+                .collect();
             let mut exported_methods = HashMap::new();
             for method in methods {
                 let Stmt::Function {
@@ -699,9 +704,9 @@ impl<'a> TypeChecker<'a> {
                         params: params
                             .iter()
                             .filter_map(|param| match &**param {
-                                Stmt::Variable { type_, .. } => Some(
-                                    self.qualify_type(&Self::generalise(type_, &all_generics)),
-                                ),
+                                Stmt::Variable { type_, .. } => {
+                                    Some(self.qualify_type(&Self::generalise(type_, &all_generics)))
+                                }
                                 _ => None,
                             })
                             .collect(),
@@ -709,7 +714,7 @@ impl<'a> TypeChecker<'a> {
                             .qualify_type(&Self::generalise(return_type, &all_generics)),
                         generics: method_generic_names,
                         visibility: self.visibility_of(modifiers),
-                        is_static: false,
+                        is_static: is_static_member(modifiers),
                         constraints: self.normalise_constraints(constraints, &all_generics),
                     },
                 );
@@ -730,7 +735,7 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn validate_explicit_impls(&self, module: &Module) {
+    fn validate_explicit_impls(&mut self, module: &Module) {
         for stmt in &module.statements {
             let Stmt::Impl {
                 trait_type,
@@ -741,12 +746,25 @@ impl<'a> TypeChecker<'a> {
             else {
                 continue;
             };
-            let generic_names: Vec<String> =
-                generics.iter().map(|generic| generic.lexeme.clone()).collect();
-            let trait_type =
-                self.qualify_type(&Self::generalise(trait_type, &generic_names));
+            let generic_names: Vec<String> = generics
+                .iter()
+                .map(|generic| generic.lexeme.clone())
+                .collect();
+            let trait_type = self.qualify_type(&Self::generalise(trait_type, &generic_names));
             let target = self.qualify_type(&Self::generalise(target, &generic_names));
-            if let Err(reason) = self.type_satisfies_trait(&target.kind, &trait_type) {
+            let constraints = match &**stmt {
+                Stmt::Impl { constraints, .. } => {
+                    self.normalise_constraints(constraints, &generic_names)
+                }
+                _ => Vec::new(),
+            };
+            let old_constraints = std::mem::replace(
+                &mut self.current_constraints,
+                Self::constraints_by_parameter(&constraints),
+            );
+            let checked = self.type_satisfies_trait(&target.kind, &trait_type);
+            self.current_constraints = old_constraints;
+            if let Err(reason) = checked {
                 self.error_with_notes(
                     trait_type.name.clone(),
                     &format!(
@@ -1280,17 +1298,13 @@ impl<'a> TypeChecker<'a> {
                 traits: constraint
                     .traits
                     .iter()
-                    .map(|trait_| {
-                        self.qualify_type(&Self::generalise(trait_, generics))
-                    })
+                    .map(|trait_| self.qualify_type(&Self::generalise(trait_, generics)))
                     .collect(),
             })
             .collect()
     }
 
-    fn constraints_by_parameter(
-        constraints: &[GenericConstraint],
-    ) -> HashMap<String, Vec<Type>> {
+    fn constraints_by_parameter(constraints: &[GenericConstraint]) -> HashMap<String, Vec<Type>> {
         constraints
             .iter()
             .map(|constraint| {
@@ -1304,8 +1318,9 @@ impl<'a> TypeChecker<'a> {
 
     fn trait_declaration(&self, trait_type: &Type) -> Option<&ExportedTrait> {
         let (module, name) = match &trait_type.kind {
-            TypeKind::User(module, name)
-            | TypeKind::GenericInstance(module, name, _) => (module, name),
+            TypeKind::User(module, name) | TypeKind::GenericInstance(module, name, _) => {
+                (module, name)
+            }
             _ => return None,
         };
         if module.is_empty() || module == &self.module_name {
@@ -1315,14 +1330,57 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn type_satisfies_trait(
+    fn type_satisfies_trait(&self, concrete: &TypeKind, trait_type: &Type) -> Result<(), String> {
+        self.type_satisfies_trait_at_depth(concrete, trait_type, 0)
+    }
+
+    fn type_satisfies_trait_at_depth(
         &self,
         concrete: &TypeKind,
         trait_type: &Type,
+        depth: usize,
     ) -> Result<(), String> {
+        if depth > 64 {
+            return Err("recursive trait requirements exceed the resolution limit".into());
+        }
         let trait_ = self
             .trait_declaration(trait_type)
             .ok_or_else(|| format!("unknown trait `{}`", trait_type.kind))?;
+        let argument_count = match &trait_type.kind {
+            TypeKind::GenericInstance(_, _, args) => args.len(),
+            _ => 0,
+        };
+        if argument_count != trait_.generics.len() {
+            return Err(format!(
+                "trait `{}` expects {} type arguments, got {}",
+                trait_type.kind,
+                trait_.generics.len(),
+                argument_count
+            ));
+        }
+        if let TypeKind::GenericParam(parameter) = concrete {
+            if self
+                .current_constraints
+                .get(parameter)
+                .into_iter()
+                .flatten()
+                .any(|bound| bound.kind.same_type(&trait_type.kind))
+            {
+                return Ok(());
+            }
+            if self.explicit_impl_candidates(concrete, trait_type).is_empty() {
+                return Err(format!(
+                    "type parameter `{}` needs a `{}` bound",
+                    parameter, trait_type.kind
+                ));
+            }
+        }
+        if self.explicit_impl_candidates(concrete, trait_type).len() > 1 {
+            return Err(format!(
+                "ambiguous implementations of `{}` for `{}`",
+                trait_type.kind, concrete
+            ));
+        }
 
         if let Some((implementation, impl_substitutions)) =
             self.matching_explicit_impl(concrete, trait_type)
@@ -1331,12 +1389,9 @@ impl<'a> TypeChecker<'a> {
                 let Some(bound) = impl_substitutions.get(&constraint.parameter.lexeme) else {
                     continue;
                 };
-                if self.is_unresolved(bound) {
-                    continue;
-                }
                 for required_trait in &constraint.traits {
                     let required_trait = required_trait.apply_substitution(&impl_substitutions);
-                    self.type_satisfies_trait(bound, &required_trait)?;
+                    self.type_satisfies_trait_at_depth(bound, &required_trait, depth + 1)?;
                 }
             }
 
@@ -1362,12 +1417,19 @@ impl<'a> TypeChecker<'a> {
                     .iter()
                     .map(|param| param.apply_substitution(&impl_substitutions))
                     .collect();
-                if required_params.len() != candidate_params.len()
-                    || !required_params.iter().zip(&candidate_params).all(|(a, b)| {
-                        a.is_compatible_with(b) && b.is_compatible_with(a)
-                    })
+                if candidate.visibility != Visibility::Public
+                    || candidate.is_static != required.is_static
+                    || candidate.generics.len() != required.generics.len()
+                    || required_params.len() != candidate_params.len()
+                    || !required_params
+                        .iter()
+                        .zip(&candidate_params)
+                        .all(|(a, b)| a.is_compatible_with(b) && b.is_compatible_with(a))
                 {
-                    return Err(format!("impl method `{}` has an incompatible signature", name));
+                    return Err(format!(
+                        "impl method `{}` has an incompatible signature",
+                        name
+                    ));
                 }
                 let required_return = required
                     .return_type
@@ -1378,7 +1440,10 @@ impl<'a> TypeChecker<'a> {
                 if !required_return.is_compatible_with(&candidate_return)
                     || !candidate_return.is_compatible_with(&required_return)
                 {
-                    return Err(format!("impl method `{}` has an incompatible return type", name));
+                    return Err(format!(
+                        "impl method `{}` has an incompatible return type",
+                        name
+                    ));
                 }
             }
             return Ok(());
@@ -1474,9 +1539,10 @@ impl<'a> TypeChecker<'a> {
                 .return_type
                 .apply_substitution(&class_substitutions);
             let params_match = required_params.len() == candidate_params.len()
-                && required_params.iter().zip(&candidate_params).all(|(a, b)| {
-                    a.is_compatible_with(b) && b.is_compatible_with(a)
-                });
+                && required_params
+                    .iter()
+                    .zip(&candidate_params)
+                    .all(|(a, b)| a.is_compatible_with(b) && b.is_compatible_with(a));
             if candidate.is_static != required.is_static
                 || candidate.generics.len() != required.generics.len()
                 || !params_match
@@ -1489,11 +1555,10 @@ impl<'a> TypeChecker<'a> {
         Ok(())
     }
 
-    fn record_explicit_impl_instantiations(
-        &mut self,
-        concrete: &TypeKind,
-        trait_type: &Type,
-    ) {
+    fn record_explicit_impl_instantiations(&mut self, concrete: &TypeKind, trait_type: &Type) {
+        if matches!(concrete, TypeKind::GenericParam(_)) {
+            return;
+        }
         let Some((implementation, substitutions)) =
             self.matching_explicit_impl(concrete, trait_type)
         else {
@@ -1522,6 +1587,24 @@ impl<'a> TypeChecker<'a> {
             return;
         }
         let key = Self::impl_key(&implementation.trait_type, &implementation.target);
+        if arguments
+            .iter()
+            .any(|argument| self.is_unresolved(argument))
+        {
+            if let Some(caller) = self.current_generic_owner.clone() {
+                let site = GenericCallSite {
+                    caller_module: self.module_name.clone(),
+                    caller,
+                    callee_module: implementation.module,
+                    callee: key,
+                    arguments,
+                };
+                if !self.generic_call_sites.contains(&site) {
+                    self.generic_call_sites.push(site);
+                }
+            }
+            return;
+        }
         let instances = self
             .instantiations
             .entry(implementation.module)
@@ -1543,15 +1626,15 @@ impl<'a> TypeChecker<'a> {
             let Some(concrete) = substitutions.get(&constraint.parameter.lexeme) else {
                 continue;
             };
-            if self.is_unresolved(concrete) {
-                continue;
-            }
             for trait_type in &constraint.traits {
                 let trait_type = trait_type.apply_substitution(substitutions);
                 if let Err(reason) = self.type_satisfies_trait(concrete, &trait_type) {
                     self.error_with_notes(
                         token.clone(),
-                        &format!("Type `{}` does not satisfy trait `{}`", concrete, trait_type.kind),
+                        &format!(
+                            "Type `{}` does not satisfy trait `{}`",
+                            concrete, trait_type.kind
+                        ),
                         vec![Note::new(
                             reason,
                             token.line,
@@ -1613,11 +1696,7 @@ impl<'a> TypeChecker<'a> {
                         TypeKind::GenericInstance(self.module_name.clone(), name.clone(), args)
                     }
                 } else {
-                    TypeKind::GenericInstance(
-                        self.resolve_module_name(module),
-                        name.clone(),
-                        args,
-                    )
+                    TypeKind::GenericInstance(self.resolve_module_name(module), name.clone(), args)
                 }
             }
             TypeKind::Array(inner, depth) => {
@@ -1680,9 +1759,9 @@ impl<'a> TypeChecker<'a> {
 
                 self.record_class_instantiation(&owner, name, &generics, &substitutions);
             }
-            TypeKind::Array(inner, _)
-            | TypeKind::Reference(inner)
-            | TypeKind::MutRef(inner) => self.record_type_instantiations(inner),
+            TypeKind::Array(inner, _) | TypeKind::Reference(inner) | TypeKind::MutRef(inner) => {
+                self.record_type_instantiations(inner)
+            }
             TypeKind::Function(params, return_type) => {
                 for param in params {
                     self.record_type_instantiations(param);
@@ -1755,7 +1834,19 @@ impl<'a> TypeChecker<'a> {
         concrete: &TypeKind,
         trait_type: &Type,
     ) -> Option<(ExportedImpl, HashMap<String, TypeKind>)> {
-        let actual = Type::new(Token::dummy("<impl target>"), concrete.clone());
+        let mut candidates = self.explicit_impl_candidates(concrete, trait_type);
+        if candidates.len() == 1 {
+            candidates.pop()
+        } else {
+            None
+        }
+    }
+
+    fn explicit_impl_candidates(
+        &self,
+        concrete: &TypeKind,
+        trait_type: &Type,
+    ) -> Vec<(ExportedImpl, HashMap<String, TypeKind>)> {
         self.explicit_impls
             .iter()
             .chain(
@@ -1763,35 +1854,23 @@ impl<'a> TypeChecker<'a> {
                     .values()
                     .flat_map(|exports| exports.implementations.iter()),
             )
-            .find_map(|implementation| {
+            .filter_map(|implementation| {
                 let mut substitutions = HashMap::new();
-                Self::infer_substitution(
-                    &implementation.trait_type,
-                    trait_type,
-                    &mut substitutions,
-                );
-                let resolved_trait = implementation
-                    .trait_type
-                    .apply_substitution(&substitutions);
-                if !resolved_trait.is_compatible_with(trait_type)
-                    || !trait_type.is_compatible_with(&resolved_trait)
-                {
-                    return None;
-                }
-                Self::infer_substitution(
-                    &implementation.target,
-                    &actual,
-                    &mut substitutions,
-                );
-                let resolved = implementation.target.apply_substitution(&substitutions);
-                if resolved.is_compatible_with(&actual)
-                    && actual.is_compatible_with(&resolved)
+                if implementation
+                    .target
+                    .kind
+                    .match_pattern(concrete, &mut substitutions)
+                    && implementation
+                        .trait_type
+                        .kind
+                        .match_pattern(&trait_type.kind, &mut substitutions)
                 {
                     Some((implementation.clone(), substitutions))
                 } else {
                     None
                 }
             })
+            .collect()
     }
 
     /// Records that a generic class is used at a particular instantiation.
@@ -1878,7 +1957,10 @@ impl<'a> TypeChecker<'a> {
         arguments.extend(method_arguments);
         let callee = Self::method_key(&signature.class_name, &signature.method_name);
 
-        if arguments.iter().any(|argument| self.is_unresolved(argument)) {
+        if arguments
+            .iter()
+            .any(|argument| self.is_unresolved(argument))
+        {
             if let Some(caller) = self.current_generic_owner.clone() {
                 let site = GenericCallSite {
                     caller_module: self.module_name.clone(),
@@ -1956,7 +2038,11 @@ impl<'a> TypeChecker<'a> {
             argument_types,
         );
         let mut all_substitutions = class_substitutions;
-        all_substitutions.extend(method_substitutions.iter().map(|(k, v)| (k.clone(), v.clone())));
+        all_substitutions.extend(
+            method_substitutions
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
         self.validate_constraints(token, &signature.constraints, &all_substitutions);
         for (index, (expected, actual)) in params.iter().zip(argument_types).enumerate() {
             let expected = expected.apply_substitution(&method_substitutions);
@@ -2586,47 +2672,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 Type::new(token, TypeKind::User("".to_string(), "error".to_string()))
             });
 
-            // Example: handle arithmetic vs. comparison operators
-            let result_ty = if left_ty.is_compatible_with(&right_ty) {
-                match op.kind {
-                    TokenKind::Plus | TokenKind::Minus | TokenKind::Mul | TokenKind::Div => {
-                        if left_ty.kind == TypeKind::Float || right_ty.kind == TypeKind::Float {
-                            if left_ty.kind == TypeKind::Float {
-                                left_ty
-                            } else {
-                                right_ty
-                            }
-                        } else {
-                            left_ty
-                        }
-                    }
-                    TokenKind::EqEq
-                    | TokenKind::Neq
-                    | TokenKind::Lt
-                    | TokenKind::Gt
-                    | TokenKind::Lte
-                    | TokenKind::Gte => {
-                        Type::new(Token::dummy("bool"), TypeKind::Bool)
-                    }
-                    _ => {
-                        // fallback: just assume same as left
-                        left_ty
-                    }
-                }
-            } else {
-                self.error_token(
-                    &op,
-                    &format!(
-                        "Type mismatch in binary operation: `{}` vs `{}` using `{}`",
-                        left_ty.kind, right_ty.kind, op.lexeme
-                    ),
-                );
-
-                Type::new(
-                    op.clone(),
-                    TypeKind::User("".to_string(), "error".to_string()),
-                )
-            };
+            let result_ty = self.check_operator(expr, op, &left_ty, Some(&right_ty));
 
             self.set_expr_type(expr, result_ty);
         }
@@ -2643,24 +2689,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 )
             });
 
-            let result_ty = match op.kind {
-                TokenKind::Minus => {
-                    // numeric only
-                    if right_ty.is_primitive() {
-                        right_ty.clone()
-                    } else {
-                        self.error_token(
-                            &op,
-                            &format!("Cannot apply unary minus to `{}`", right_ty.kind),
-                        );
-                        Type::new(
-                            op.clone(),
-                            TypeKind::User("".to_string(), "error".to_string()),
-                        )
-                    }
-                }
-                _ => right_ty.clone(),
-            };
+            let result_ty = self.check_operator(expr, op, &right_ty, None);
 
             self.set_expr_type(expr, result_ty);
         }
@@ -2673,9 +2702,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 TokenKind::Integer => Type::new(value.clone(), TypeKind::Int),
                 TokenKind::Float => Type::new(value.clone(), TypeKind::Float),
                 TokenKind::String => Type::new(value.clone(), TypeKind::String),
-                TokenKind::True | TokenKind::False => {
-                    Type::new(value.clone(), TypeKind::Bool)
-                }
+                TokenKind::True | TokenKind::False => Type::new(value.clone(), TypeKind::Bool),
                 _ => {
                     // fallback
                     Type::new(
@@ -2801,6 +2828,9 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_assignment(&mut self, expr: &Expr) {
+        if self.check_compound_assignment(expr) {
+            return;
+        }
         if let Expr::Assignment { name, value, .. } = expr {
             self.current_assignment = Some(expr.clone());
             value.accept(self);
@@ -2900,6 +2930,9 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_member_assignment(&mut self, expr: &Expr) {
+        if self.check_compound_assignment(expr) {
+            return;
+        }
         if let Expr::MemberAssignment {
             object,
             name,
@@ -3134,6 +3167,9 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_static_assignment(&mut self, expr: &Expr) {
+        if self.check_compound_assignment(expr) {
+            return;
+        }
         if let Expr::StaticAssignment {
             object,
             name,
@@ -3224,6 +3260,9 @@ impl<'a> Visitor for TypeChecker<'a> {
     }
 
     fn visit_index_assignment(&mut self, expr: &Expr) {
+        if self.check_compound_assignment(expr) {
+            return;
+        }
         if let Expr::IndexAssignment {
             object,
             index,
@@ -3615,12 +3654,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 };
                 let explicit = self.generalise_explicit(explicit);
                 let result = self.check_method_signature(
-                    expr,
-                    &token,
-                    &signature,
-                    &explicit,
-                    arguments,
-                    &arg_tys,
+                    expr, &token, &signature, &explicit, arguments, &arg_tys,
                 );
                 self.set_expr_type(expr, result);
                 return;
@@ -3938,8 +3972,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                         if let Some(trait_) = self.trait_declaration(&trait_type) {
                             if let TypeKind::GenericInstance(_, _, arguments) = &trait_type.kind {
                                 for (generic, argument) in trait_.generics.iter().zip(arguments) {
-                                    substitutions
-                                        .insert(generic.clone(), argument.kind.clone());
+                                    substitutions.insert(generic.clone(), argument.kind.clone());
                                 }
                             }
                         }
@@ -3953,11 +3986,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                                         .iter()
                                         .map(|param| param.apply_substitution(&substitutions))
                                         .collect(),
-                                    Box::new(
-                                        method
-                                            .return_type
-                                            .apply_substitution(&substitutions),
-                                    ),
+                                    Box::new(method.return_type.apply_substitution(&substitutions)),
                                 ),
                             ),
                         );
@@ -4292,14 +4321,13 @@ impl<'a> Visitor for TypeChecker<'a> {
                 .collect();
 
             let (owner, class_name) = match name.lexeme.rsplit_once('.') {
-                Some((module, class)) => {
-                    (self.resolve_module_name(module), class.to_string())
-                }
+                Some((module, class)) => (self.resolve_module_name(module), class.to_string()),
                 None => (self.module_name.clone(), name.lexeme.clone()),
             };
 
-            let (class_generics, constructor_params, fully_defined, class_constraints) =
-                if owner == self.module_name {
+            let (class_generics, constructor_params, fully_defined, class_constraints) = if owner
+                == self.module_name
+            {
                 match self.symtable.lookup_class(&class_name) {
                     Some(Symbol::Class {
                         generics,
@@ -4900,11 +4928,8 @@ impl<'a> Visitor for TypeChecker<'a> {
             let old_generic_owner =
                 std::mem::replace(&mut self.current_generic_owner, owner.clone());
             let mut active_constraints = self.current_constraints.clone();
-            let normalised_constraints =
-                self.normalise_constraints(constraints, &generic_names);
-            active_constraints.extend(Self::constraints_by_parameter(
-                &normalised_constraints,
-            ));
+            let normalised_constraints = self.normalise_constraints(constraints, &generic_names);
+            active_constraints.extend(Self::constraints_by_parameter(&normalised_constraints));
             let old_constraints =
                 std::mem::replace(&mut self.current_constraints, active_constraints);
 
@@ -5246,11 +5271,8 @@ impl<'a> Visitor for TypeChecker<'a> {
             let old_generic_owner =
                 std::mem::replace(&mut self.current_generic_owner, class_owner.clone());
             let mut active_constraints = self.current_constraints.clone();
-            let normalised_constraints =
-                self.normalise_constraints(constraints, &generic_names);
-            active_constraints.extend(Self::constraints_by_parameter(
-                &normalised_constraints,
-            ));
+            let normalised_constraints = self.normalise_constraints(constraints, &generic_names);
+            active_constraints.extend(Self::constraints_by_parameter(&normalised_constraints));
             let old_constraints =
                 std::mem::replace(&mut self.current_constraints, active_constraints);
 
@@ -5263,8 +5285,7 @@ impl<'a> Visitor for TypeChecker<'a> {
 
             for field in fields {
                 if let Stmt::Variable { type_, .. } = &**field {
-                    let field_type =
-                        self.qualify_type(&Self::generalise(type_, &generic_names));
+                    let field_type = self.qualify_type(&Self::generalise(type_, &generic_names));
                     self.record_type_instantiations(&field_type);
                 }
                 field.accept(self);
@@ -5281,9 +5302,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             } else {
                 let arguments = generic_names
                     .iter()
-                    .map(|generic| {
-                        Type::new(name.clone(), TypeKind::GenericParam(generic.clone()))
-                    })
+                    .map(|generic| Type::new(name.clone(), TypeKind::GenericParam(generic.clone())))
                     .collect();
                 Type::new(
                     name.clone(),
@@ -5321,6 +5340,7 @@ impl<'a> Visitor for TypeChecker<'a> {
 
     fn visit_impl(&mut self, stmt: &Stmt) {
         if let Stmt::Impl {
+            trait_type,
             target,
             generics,
             constraints,
@@ -5328,13 +5348,20 @@ impl<'a> Visitor for TypeChecker<'a> {
             ..
         } = stmt
         {
-            let generic_names: Vec<String> =
-                generics.iter().map(|generic| generic.lexeme.clone()).collect();
+            let generic_names: Vec<String> = generics
+                .iter()
+                .map(|generic| generic.lexeme.clone())
+                .collect();
             let target = self.qualify_type(&Self::generalise(target, &generic_names));
-            let old_generics = std::mem::replace(
-                &mut self.current_function_generics,
-                generic_names.clone(),
-            );
+            let trait_type = self.qualify_type(&Self::generalise(trait_type, &generic_names));
+            let owner = Self::impl_key(&trait_type, &target);
+            self.function_generics
+                .entry(self.module_name.clone())
+                .or_default()
+                .insert(owner.clone(), generic_names.clone());
+            let old_owner = std::mem::replace(&mut self.current_generic_owner, Some(owner));
+            let old_generics =
+                std::mem::replace(&mut self.current_function_generics, generic_names.clone());
             let mut active_constraints = self.current_constraints.clone();
             let normalised = self.normalise_constraints(constraints, &generic_names);
             active_constraints.extend(Self::constraints_by_parameter(&normalised));
@@ -5357,6 +5384,7 @@ impl<'a> Visitor for TypeChecker<'a> {
             self.symtable.end_scope();
             self.current_function_generics = old_generics;
             self.current_constraints = old_constraints;
+            self.current_generic_owner = old_owner;
         }
     }
 
@@ -5525,10 +5553,7 @@ pub fn expand_instantiations(
                     .collect();
 
                 // Still symbolic: the caller is itself only used generically so far.
-                if resolved
-                    .iter()
-                    .any(|argument| matches!(argument, TypeKind::GenericParam(_)))
-                {
+                if resolved.iter().any(TypeKind::contains_generics) {
                     continue;
                 }
 
@@ -5545,6 +5570,35 @@ pub fn expand_instantiations(
         }
 
         if discovered.is_empty() {
+            // Source locations are not type identity. Different uses of Box<int>
+            // must produce one specialisation, and nested instances need their
+            // contained types defined first.
+            fn depth(kind: &TypeKind) -> usize {
+                match kind {
+                    TypeKind::GenericInstance(_, _, args) | TypeKind::Tuple(args) => {
+                        1 + args.iter().map(|a| depth(&a.kind)).max().unwrap_or(0)
+                    }
+                    TypeKind::Array(inner, _)
+                    | TypeKind::Reference(inner)
+                    | TypeKind::MutRef(inner) => 1 + depth(&inner.kind),
+                    _ => 0,
+                }
+            }
+            for module in instantiations.values_mut() {
+                for instances in module.values_mut() {
+                    let mut unique: Vec<Vec<TypeKind>> = Vec::new();
+                    for args in instances.drain(..) {
+                        if !unique.iter().any(|existing| {
+                            existing.len() == args.len()
+                                && existing.iter().zip(&args).all(|(a, b)| a.same_type(b))
+                        }) {
+                            unique.push(args);
+                        }
+                    }
+                    unique.sort_by_key(|args| args.iter().map(depth).max().unwrap_or(0));
+                    *instances = unique;
+                }
+            }
             return;
         }
 

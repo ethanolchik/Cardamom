@@ -1,0 +1,9 @@
+import ops;
+class Number(public value: int) {}
+impl ops.Add<int, int> for Number {
+    public add(other: &int) -> int { return this.value + other; }
+}
+impl ops.Add<int, string> for Number {
+    public add(other: &int) -> string { return "ambiguous"; }
+}
+fn main() { let result: int = new Number(1) + 2; }

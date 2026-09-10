@@ -1,0 +1,5 @@
+import cmp;
+class Number(public value: int) {}
+impl cmp.Eq for Number { public equals(other: &Number) -> bool { return true; } }
+impl cmp.Eq for Number { public equals(other: &Number) -> bool { return false; } }
+fn main() -> int { return new Number(1) == new Number(1); }
