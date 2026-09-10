@@ -1,0 +1,58 @@
+import fmt.{Printable as Display};
+import convert.{Into};
+import io;
+
+fn text(value: &dynamic Display) -> string {
+    return value.text();
+}
+
+fn forwarded(value: &dynamic Display) -> string {
+    return text(as &dynamic Display value);
+}
+
+fn show(value: &dynamic Display) {
+    io.println(text(value));
+}
+
+fn truncated(value: &dynamic Into<int>) -> int {
+    return value.into();
+}
+
+// Structural implementation, including a transitive read-only method.
+class Label(private value: string) {
+    private contents() -> string { return this.value; }
+    public text() -> string { return this.contents(); }
+}
+
+// A concrete generic class can be erased into a concrete generic trait.
+trait Read<T> { read() -> T; }
+class Box<T>(private value: T) {
+    public read() -> T { return this.value; }
+}
+fn readBox(value: &dynamic Read<string>) -> string {
+    return value.read();
+}
+
+fn main() -> int {
+    let number: int = 42;
+    let label: string = "Cardamom";
+    let flag: bool = true;
+    let fraction: float = 3.75;
+    let values: int[] = [1, 2, 3];
+    let words: string[] = ["one", "two"];
+    let named: Label = new Label("structural");
+    let boxed: Box<string> = new Box<string>("generic");
+    if (text(as &dynamic Display (&number)) != "42") { return 1; }
+    if (forwarded(as &dynamic Display (&label)) != "Cardamom") { return 2; }
+    if (text(as &dynamic Display (&flag)) != "true") { return 3; }
+    if (text(as &dynamic Display (&fraction)) != "3.750000") { return 4; }
+    if (text(as &dynamic Display (&values)) != "[1, 2, 3]") { return 5; }
+    if (text(as &dynamic Display (&words)) != "[one, two]") { return 6; }
+    if (text(as &dynamic Display (&named)) != "structural") { return 7; }
+    if (readBox(as &dynamic Read<string> (&boxed)) != "generic") { return 8; }
+    if (truncated(as &dynamic Into<int> (&fraction)) != 3) { return 9; }
+    if ((as &dynamic Display (&number)).text() != "42") { return 10; }
+    show(as &dynamic Display (&number));
+    show(as &dynamic Display (&label));
+    return 0;
+}

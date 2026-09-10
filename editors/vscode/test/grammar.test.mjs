@@ -132,6 +132,15 @@ impl Printable for int { public text() -> string { return "int"; } }`;
   hasScope(source, 'impl', 'keyword.declaration.impl.cardamom');
 });
 
+test('dynamic trait borrows and casts highlight the modifier', () => {
+  const source = 'fn show(value: &dynamic Printable) {}\nshow(as &dynamic fmt.Printable (&number));';
+  hasScope(source, 'dynamic', 'storage.modifier.cardamom');
+  hasScope(source, 'dynamic', 'storage.modifier.cardamom', 1);
+  hasScope(source, 'Printable', 'entity.name.type.cardamom');
+  hasScope(source, '&', 'keyword.operator.cardamom');
+  hasScope(source, 'as', 'keyword.operator.cast.cardamom');
+});
+
 test('strings and line comments shield keywords and comment markers', () => {
   const source = `let text: string = "class // return 123";
 // fn fake() -> int { return 42; }

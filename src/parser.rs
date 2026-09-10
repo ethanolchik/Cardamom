@@ -732,6 +732,11 @@ impl Parser {
             }
         }
 
+        let dynamic = self.match_token(TokenKind::Dynamic);
+        if dynamic && !self.check(TokenKind::Identifier) {
+            return Err(self.error("Expected trait name after 'dynamic'.".to_string()));
+        }
+
         if self.match_token(TokenKind::Fn) {
             if self.match_token(TokenKind::Lt) {
                 loop {
@@ -869,6 +874,10 @@ impl Parser {
                 };
                 kind = TypeKind::GenericInstance(module, class_name, generics.clone());
             }
+        }
+
+        if dynamic {
+            kind = TypeKind::DynTrait(Box::new(Type::new(name.clone(), kind)));
         }
 
         // Postfix `[]`, repeated for multiple dimensions: `int[][]` is an array of

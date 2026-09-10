@@ -1,3 +1,5 @@
+mod dynamic;
+
 use crate::ast::{
     is_constructor_field, is_static_member, member_modifiers, member_visibility, Modifier,
 };
@@ -7,6 +9,7 @@ use crate::reachable::{self, FunctionRef};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
 use crate::typecheck::TraitCallSite;
+use crate::utils::readonly::const_methods;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
@@ -21,6 +24,7 @@ pub type ExprTypes = HashMap<*const Expr, Type>;
 pub type CallInstantiations = HashMap<*const Expr, Vec<TypeKind>>;
 pub type TraitCallSites = HashMap<*const Expr, TraitCallSite>;
 pub use crate::typecheck::FunctionRefs;
+pub use crate::typecheck::{DynamicCasts, DynamicTraits};
 
 #[derive(Clone)]
 struct ExplicitImpl {
@@ -38,6 +42,9 @@ pub struct CppCodeGenerator {
     indent_level: usize,
     expr_types: ExprTypes,
     function_refs: FunctionRefs,
+    dynamic_traits: DynamicTraits,
+    dynamic_casts: DynamicCasts,
+    mutable_arguments: HashSet<*const Expr>,
     /// True while generating the body of a `main` that was declared as returning `void`,
     /// so bare `return;` statements can be lowered to `return 0;`.
     in_synthesised_int_main: bool,
@@ -75,6 +82,9 @@ impl CppCodeGenerator {
             indent_level: 0,
             expr_types: ExprTypes::new(),
             function_refs: FunctionRefs::new(),
+            dynamic_traits: DynamicTraits::new(),
+            dynamic_casts: DynamicCasts::new(),
+            mutable_arguments: HashSet::new(),
             in_synthesised_int_main: false,
             call_instantiations: CallInstantiations::new(),
             trait_call_sites: TraitCallSites::new(),
@@ -115,6 +125,15 @@ impl CppCodeGenerator {
 
     pub fn set_function_refs(&mut self, refs: FunctionRefs) {
         self.function_refs = refs;
+    }
+
+    pub fn set_dynamic_dispatch(&mut self, traits: DynamicTraits, casts: DynamicCasts) {
+        self.dynamic_traits = traits;
+        self.dynamic_casts = casts;
+    }
+
+    pub fn set_mutable_arguments(&mut self, arguments: HashSet<*const Expr>) {
+        self.mutable_arguments = arguments;
     }
 
     /// The C++ symbol for one specialisation of a generic function.
@@ -328,6 +347,7 @@ impl CppCodeGenerator {
             TypeKind::Array(inner, _) => format!("{}arr", Self::type_tag(&inner.kind)),
             TypeKind::Reference(inner) => format!("ref{}", Self::type_tag(&inner.kind)),
             TypeKind::MutRef(inner) => format!("mut{}", Self::type_tag(&inner.kind)),
+            TypeKind::DynTrait(inner) => format!("dynamic{}", Self::type_tag(&inner.kind)),
             TypeKind::Tuple(elements) => {
                 let parts: Vec<String> = elements.iter().map(|e| Self::type_tag(&e.kind)).collect();
                 format!("tup{}", parts.join("_"))
@@ -433,6 +453,7 @@ impl CppCodeGenerator {
             TypeKind::Array(inner, depth) => TypeKind::Array(Box::new(nested(inner)), *depth),
             TypeKind::Reference(inner) => TypeKind::Reference(Box::new(nested(inner))),
             TypeKind::MutRef(inner) => TypeKind::MutRef(Box::new(nested(inner))),
+            TypeKind::DynTrait(inner) => TypeKind::DynTrait(Box::new(nested(inner))),
             TypeKind::Function(params, ret) => {
                 TypeKind::Function(params.iter().map(nested).collect(), Box::new(nested(ret)))
             }
@@ -539,6 +560,9 @@ impl CppCodeGenerator {
             gen.writeln("");
         });
         body.push_str(&forward_declarations);
+        body.push_str(&self.capture_output(|gen| {
+            gen.with_canonical_type_names(|gen| gen.write_dynamic_declarations())
+        }));
 
         for module in &program.modules {
             self.current_module = module.name.clone();
@@ -580,6 +604,10 @@ impl CppCodeGenerator {
 
             body.push_str(&module_code);
         }
+
+        body.push_str(&self.capture_output(|gen| {
+            gen.with_canonical_type_names(|gen| gen.write_dynamic_definitions())
+        }));
 
         // Only emit bodies after every class is complete. A generic function in one
         // module may be specialised with a class from an unrelated later module.
@@ -796,58 +824,6 @@ impl CppCodeGenerator {
         )
     }
 
-    /// Works out which methods can be marked `const` in the generated C++.
-    ///
-    /// A method is const unless it writes to a member of `this` or calls another
-    /// method on `this` that is not itself const. The second condition makes this a
-    /// fixpoint: assume every method is const, then repeatedly drop the ones that turn
-    /// out not to be, until nothing changes.
-    fn const_methods(methods: &[Box<Stmt>]) -> HashSet<String> {
-        let mut candidates: HashSet<String> = methods
-            .iter()
-            .filter_map(|method| match &**method {
-                // A static method has no `this`, so `const` does not apply.
-                Stmt::Function {
-                    name, modifiers, ..
-                } if !is_static_member(modifiers) => Some(name.lexeme.clone()),
-                _ => None,
-            })
-            .collect();
-
-        loop {
-            let mut changed = false;
-
-            for method in methods {
-                let Stmt::Function { name, body, .. } = &**method else {
-                    continue;
-                };
-                if !candidates.contains(&name.lexeme) {
-                    continue;
-                }
-
-                let mutates = {
-                    let mut detector = MutationDetector {
-                        const_methods: &candidates,
-                        mutates: false,
-                    };
-                    for stmt in body {
-                        detector.walk_stmt(stmt);
-                    }
-                    detector.mutates
-                };
-
-                if mutates {
-                    candidates.remove(&name.lexeme);
-                    changed = true;
-                }
-            }
-
-            if !changed {
-                return candidates;
-            }
-        }
-    }
-
     /// Orders classes so a class used as a field is complete before its owner is
     /// defined. Forward declarations alone are insufficient for by-value fields.
     fn order_classes_by_dependencies<'b>(
@@ -999,7 +975,7 @@ impl CppCodeGenerator {
             ..
         } = stmt
         {
-            let const_methods = Self::const_methods(methods);
+            let const_methods = const_methods(methods, &self.expr_types, &self.mutable_arguments);
 
             self.writeln(&format!("class {} {{", class_name));
             self.indent_level += 1;
@@ -1187,7 +1163,7 @@ impl CppCodeGenerator {
             ..
         } = stmt
         {
-            let const_methods = Self::const_methods(methods);
+            let const_methods = const_methods(methods, &self.expr_types, &self.mutable_arguments);
 
             // Static data members need a definition outside the class body.
             for field in fields {
@@ -1528,8 +1504,19 @@ impl CppCodeGenerator {
             // Borrows are real C++ references: `&T` is read-only, `#T` allows writing
             // through it. The type checker rejects assignment through a `const T&`, so
             // the two agree about what is allowed.
+            // A dynamic borrow already contains its data pointer; pass the small
+            // handle by value rather than borrowing the temporary handle itself.
+            TypeKind::Reference(inner) if matches!(inner.kind, TypeKind::DynTrait(_)) => {
+                self.translate_type(inner)
+            }
             TypeKind::Reference(inner) => format!("const {}&", self.translate_type(inner)),
             TypeKind::MutRef(inner) => format!("{}&", self.translate_type(inner)),
+            TypeKind::DynTrait(inner) => Self::dynamic_name(&Self::owned_type_kind(
+                &self.current_module,
+                &self.imports,
+                &self.member_imports,
+                &inner.kind,
+            )),
             TypeKind::Tuple(elements) => {
                 let elements_str = elements
                     .iter()
@@ -2342,6 +2329,9 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_cast(&mut self, expr: &Expr) {
         if let Expr::Cast { object, type_ } = expr {
+            if self.write_dynamic_cast(expr, object) {
+                return;
+            }
             self.output.push('(');
             self.output.push_str(&self.translate_type(type_));
             self.output.push_str(") ");
@@ -2705,6 +2695,9 @@ mod tests {
         let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
         let mut expr_types = ExprTypes::new();
         let mut function_refs = FunctionRefs::new();
+        let mut dynamic_traits = DynamicTraits::new();
+        let mut dynamic_casts = DynamicCasts::new();
+        let mut mutable_arguments = HashSet::new();
         let mut call_instantiations = CallInstantiations::new();
         let mut trait_call_sites = TraitCallSites::new();
         let mut instantiations = Instantiations::new();
@@ -2733,15 +2726,23 @@ mod tests {
             exports.insert(module.name.clone(), checker.exports(&module.ast));
             expr_types.extend(checker.expr_types.clone());
             function_refs.extend(checker.function_refs.clone());
+            dynamic_traits.extend(checker.dynamic_traits.clone());
+            dynamic_casts.extend(checker.dynamic_casts.clone());
+            mutable_arguments.extend(checker.mutable_arguments.borrow().iter().copied());
             call_instantiations.extend(checker.call_instantiations.clone());
             trait_call_sites.extend(checker.trait_call_sites.clone());
             generic_call_sites.extend(checker.generic_call_sites.clone());
 
             for (module_name, functions) in checker.instantiations.clone() {
-                instantiations
-                    .entry(module_name)
-                    .or_default()
-                    .extend(functions);
+                let module = instantiations.entry(module_name).or_default();
+                for (function, arguments) in functions {
+                    let instances = module.entry(function).or_default();
+                    for arguments in arguments {
+                        if !instances.contains(&arguments) {
+                            instances.push(arguments);
+                        }
+                    }
+                }
             }
             for (module_name, functions) in checker.function_generics.clone() {
                 function_generics
@@ -2759,6 +2760,8 @@ mod tests {
 
         let mut generator = CppCodeGenerator::with_types(expr_types);
         generator.set_function_refs(function_refs);
+        generator.set_dynamic_dispatch(dynamic_traits, dynamic_casts);
+        generator.set_mutable_arguments(mutable_arguments);
         generator.set_instantiations(call_instantiations, instantiations);
         generator.set_trait_call_sites(trait_call_sites);
         generator.generate_program(&program)
@@ -2896,138 +2899,5 @@ mod tests {
             "an uncalled function should not drag in its includes:\n{}",
             code
         );
-    }
-}
-
-/// Detects whether a method body mutates the object it is called on.
-///
-/// Used to decide if a method can be `const` in the generated C++.
-struct MutationDetector<'a> {
-    /// Methods currently believed to be const, for resolving calls on `this`.
-    const_methods: &'a HashSet<String>,
-    mutates: bool,
-}
-
-impl<'a> MutationDetector<'a> {
-    /// Whether an expression ultimately refers to `this`.
-    fn targets_this(expr: &Expr) -> bool {
-        match expr {
-            Expr::Variable { name } => name.lexeme == "this",
-            Expr::MemberAccess { object, .. } | Expr::Index { object, .. } => {
-                Self::targets_this(object)
-            }
-            Expr::Grouping { expression } => Self::targets_this(expression),
-            _ => false,
-        }
-    }
-
-    fn walk_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Expression { expression } => self.walk_expr(expression),
-            Stmt::Block { statements } => statements.iter().for_each(|s| self.walk_stmt(s)),
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.walk_expr(condition);
-                self.walk_stmt(then_branch);
-                if let Some(else_branch) = else_branch {
-                    self.walk_stmt(else_branch);
-                }
-            }
-            Stmt::While { condition, body } => {
-                self.walk_expr(condition);
-                self.walk_stmt(body);
-            }
-            Stmt::For {
-                initialiser,
-                condition,
-                increment,
-                body,
-            } => {
-                if let Some(initialiser) = initialiser {
-                    self.walk_stmt(initialiser);
-                }
-                if let Some(condition) = condition {
-                    self.walk_expr(condition);
-                }
-                if let Some(increment) = increment {
-                    self.walk_expr(increment);
-                }
-                self.walk_stmt(body);
-            }
-            Stmt::Return {
-                value: Some(value), ..
-            } => self.walk_expr(value),
-            Stmt::Variable {
-                initialiser: Some(initialiser),
-                ..
-            } => self.walk_expr(initialiser),
-            _ => {}
-        }
-    }
-
-    fn walk_expr(&mut self, expr: &Expr) {
-        match expr {
-            // Any write reaching `this` rules the method out.
-            Expr::MemberAssignment { object, value, .. } => {
-                if Self::targets_this(object) {
-                    self.mutates = true;
-                }
-                self.walk_expr(value);
-            }
-            Expr::IndexAssignment {
-                object,
-                index,
-                value,
-                ..
-            } => {
-                if Self::targets_this(object) {
-                    self.mutates = true;
-                }
-                self.walk_expr(object);
-                self.walk_expr(index);
-                self.walk_expr(value);
-            }
-            Expr::Call {
-                callee, arguments, ..
-            } => {
-                // Calling a non-const method on `this` mutates it transitively.
-                if let Expr::MemberAccess { object, name } = &**callee {
-                    if Self::targets_this(object) && !self.const_methods.contains(&name.lexeme) {
-                        self.mutates = true;
-                    }
-                }
-                self.walk_expr(callee);
-                arguments.iter().for_each(|a| self.walk_expr(a));
-            }
-            Expr::Binary { left, right, .. } => {
-                self.walk_expr(left);
-                self.walk_expr(right);
-            }
-            Expr::Unary { right, .. } => self.walk_expr(right),
-            Expr::Grouping { expression } => self.walk_expr(expression),
-            Expr::Array { elements, .. } | Expr::Tuple { elements } => {
-                elements.iter().for_each(|e| self.walk_expr(e))
-            }
-            Expr::Assignment { value, .. } | Expr::StaticAssignment { value, .. } => {
-                self.walk_expr(value)
-            }
-            Expr::MemberAccess { object, .. }
-            | Expr::StaticAccess { object, .. }
-            | Expr::Cast { object, .. }
-            | Expr::Reference { object }
-            | Expr::MutReference { object } => self.walk_expr(object),
-            Expr::Index { object, index, .. } => {
-                self.walk_expr(object);
-                self.walk_expr(index);
-            }
-            Expr::ClassInit { arguments, .. } | Expr::GenericCall { arguments, .. } => {
-                arguments.iter().for_each(|a| self.walk_expr(a))
-            }
-            Expr::Closure { body, .. } => self.walk_stmt(body),
-            Expr::Intrinsic { .. } | Expr::Literal { .. } | Expr::Variable { .. } => {}
-        }
     }
 }

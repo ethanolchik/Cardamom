@@ -12,7 +12,7 @@ pub mod ty;
 pub mod typecheck;
 pub mod utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::process::Command;
@@ -58,6 +58,9 @@ fn run_file(options: cli::Options) -> bool {
     let mut exports: HashMap<String, ModuleExports> = HashMap::new();
     let mut expr_types = codegen::ExprTypes::new();
     let mut function_refs = codegen::FunctionRefs::new();
+    let mut dynamic_traits = codegen::DynamicTraits::new();
+    let mut dynamic_casts = codegen::DynamicCasts::new();
+    let mut mutable_arguments = HashSet::new();
     let mut call_instantiations = codegen::CallInstantiations::new();
     let mut trait_call_sites = codegen::TraitCallSites::new();
     let mut instantiations = typecheck::Instantiations::new();
@@ -89,15 +92,23 @@ fn run_file(options: cli::Options) -> bool {
         // kept alive by `program`, so the maps can simply be merged.
         expr_types.extend(tc.expr_types.clone());
         function_refs.extend(tc.function_refs.clone());
+        dynamic_traits.extend(tc.dynamic_traits.clone());
+        dynamic_casts.extend(tc.dynamic_casts.clone());
+        mutable_arguments.extend(tc.mutable_arguments.borrow().iter().copied());
         call_instantiations.extend(tc.call_instantiations.clone());
         trait_call_sites.extend(tc.trait_call_sites.clone());
         generic_call_sites.extend(tc.generic_call_sites.clone());
 
         for (module_name, functions) in tc.instantiations.clone() {
-            instantiations
-                .entry(module_name)
-                .or_default()
-                .extend(functions);
+            let module = instantiations.entry(module_name).or_default();
+            for (function, arguments) in functions {
+                let instances = module.entry(function).or_default();
+                for arguments in arguments {
+                    if !instances.contains(&arguments) {
+                        instances.push(arguments);
+                    }
+                }
+            }
         }
         for (module_name, functions) in tc.function_generics.clone() {
             function_generics
@@ -118,6 +129,8 @@ fn run_file(options: cli::Options) -> bool {
 
     let mut cg = CppCodeGenerator::with_types(expr_types);
     cg.set_function_refs(function_refs);
+    cg.set_dynamic_dispatch(dynamic_traits, dynamic_casts);
+    cg.set_mutable_arguments(mutable_arguments);
     cg.set_instantiations(call_instantiations, instantiations);
     cg.set_trait_call_sites(trait_call_sites);
     let code = cg.generate_program(&program);

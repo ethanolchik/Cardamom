@@ -53,6 +53,128 @@ fn fixture(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn dynamic_traits_compile_and_execute() {
+    let workspace = Workspace::new();
+    for name in ["dynamic_traits", "dynamic_imports", "dynamic_values"] {
+        let binary = workspace.path(name);
+        success(
+            workspace
+                .compiler()
+                .arg(fixture(&format!("tests/pass/{name}.crdm")))
+                .arg("-o")
+                .arg(&binary)
+                .arg("-out"),
+        );
+        let output = success(&mut Command::new(&binary));
+        if name == "dynamic_traits" {
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "42\nCardamom\n");
+            let cpp = fs::read_to_string(binary.with_extension("cpp")).unwrap();
+            // Both concrete values enter the same unspecialised function, and
+            // repeated casts share a single immutable table.
+            assert_eq!(
+                cpp.matches("void show(cardamom_dynamic_fmt_2ePrintable value)\n")
+                    .count(),
+                1
+            );
+            assert_eq!(cpp.matches("static const cardamom_dynamic_fmt_2ePrintable_vtable cardamom_dynamic_fmt_2ePrintable_for_int_impl_fmt_table =").count(), 1);
+        }
+    }
+}
+
+#[test]
+fn invalid_dynamic_traits_are_rejected_before_codegen() {
+    let workspace = Workspace::new();
+    let prelude = r#"
+import fmt.{Printable};
+fn show(value: &dynamic Printable) { value.text(); }
+"#;
+    let cases = [
+        ("fn bad(value: dynamic Printable) {}", "only supported as direct"),
+        ("fn bad(value: &mut dynamic Printable) {}", "only supported as direct"),
+        ("fn bad(value: & &dynamic Printable) {}", "only supported as direct"),
+        ("fn bad(value: &dynamic Missing) {}", "Unknown dynamic trait"),
+        ("class Thing {} fn bad(value: &dynamic Thing) {}", "Unknown dynamic trait"),
+        ("fn bad(value: &dynamic Printable<int>) {}", "expects 0 type arguments"),
+        ("trait Read<T> { read() -> T; } fn bad(value: &dynamic Read) {}", "expects 1 type arguments"),
+        ("trait Read<T> { read() -> T; } fn bad<U>(value: &dynamic Read<U>) {}", "must be concrete owned types"),
+        ("trait Read<T> { read() -> T; } fn bad(value: &dynamic Read<Missing>) {}", "must be concrete owned types"),
+        ("trait Read<T> { read() -> T; } class Box<T> {} fn bad(value: &dynamic Read<Box>) {}", "must be concrete owned types"),
+        ("trait Read<T> { read() -> T; } class Box<T> {} fn bad(value: &dynamic Read<Box<int, string>>) {}", "must be concrete owned types"),
+        ("trait Read<T> { read() -> T; } fn bad(value: &dynamic Read<&int>) {}", "must be concrete owned types"),
+        ("trait Bad { make() -> Self; } fn bad(value: &dynamic Bad) {}", "cannot use Self"),
+        ("trait Bad { equal(value: Self) -> bool; } fn bad(value: &dynamic Bad) {}", "cannot use Self"),
+        ("trait Bad { generic<T>(value: T) -> T; } fn bad(value: &dynamic Bad) {}", "generic methods"),
+        ("trait Bad { static make() -> int; } fn bad(value: &dynamic Bad) {}", "static methods"),
+        ("trait Bad { borrow() -> &int; } fn bad(value: &dynamic Bad) {}", "borrowed results"),
+        ("trait Bad { read() -> Missing; } fn bad(value: &dynamic Bad) {}", "concrete valid signature types"),
+        ("trait Bad { read(value: void); } fn bad(value: &dynamic Bad) {}", "parameters cannot have type void"),
+        ("trait Bad { accept(value: &dynamic Printable); } fn bad(value: &dynamic Bad) {}", "other dynamic objects"),
+        ("trait Bad { read() -> int where Self: Printable; } fn bad(value: &dynamic Bad) {}", "generic methods"),
+        ("fn extern native(value: &dynamic Printable) {}", "only supported as direct"),
+        ("class Holder(private value: &dynamic Printable) {}", "cannot be stored or returned"),
+        ("fn bad(values: (&dynamic Printable)[]) {}", "only supported as direct"),
+        ("fn bad(callback: fn(&dynamic Printable) -> string) {}", "only supported as direct"),
+        ("fn leak(value: &dynamic Printable) -> &dynamic Printable { return value; }", "cannot be stored or returned"),
+        ("fn bad(value: &dynamic Printable) { let saved: &dynamic Printable = value; }", "cannot be stored or returned"),
+        ("fn bad(value: &dynamic Printable) { [value]; }", "cannot escape"),
+        ("fn bad(value: &dynamic Printable) { (1, value); }", "cannot escape"),
+        ("fn bad(value: &dynamic Printable) { let f: fn() -> string = || string -> { return value.text(); }; }", "cannot capture"),
+        ("fn bad() { let n: int = 1; as &dynamic Printable (&n); }", "cannot escape"),
+        ("fn bad() { let n: int = 1; show(&n); }", "mismatch"),
+        ("fn bad() { let n: int = 1; show(as &dynamic Printable n); }", "explicit immutable borrow"),
+        ("fn bad() { let n: int = 1; show(as &dynamic Printable (&mut n)); }", "explicit immutable borrow"),
+        ("fn bad() { show(as &dynamic Printable (&1)); }", "not temporaries, fields or indexes"),
+        ("fn make() -> int { return 1; } fn bad() { show(as &dynamic Printable (&make())); }", "not temporaries, fields or indexes"),
+        ("fn bad(n: &int) { show(as &dynamic Printable (&n)); }", "owned named value with a concrete type"),
+        ("fn bad(n: &mut int) { show(as &dynamic Printable (&n)); }", "owned named value with a concrete type"),
+        ("fn bad<T>(n: T) where T: Printable { show(as &dynamic Printable (&n)); }", "owned named value with a concrete type"),
+        ("fn bad() { let n: int[] = [1]; show(as &dynamic Printable (&n[0])); }", "not temporaries, fields or indexes"),
+        ("class Box(public n: int) {} fn bad() { let b: Box = new Box(1); show(as &dynamic Printable (&b.n)); }", "not temporaries, fields or indexes"),
+        ("class Box { public text() -> string { return \"box\"; } public bad() { show(as &dynamic Printable (&this)); } }", "owned named value with a concrete type"),
+        ("fn bad(value: &dynamic Printable) { let f: fn() -> string = value.text; }", "must be called directly"),
+        ("fn bad(value: &dynamic Printable) { value.text<int>(); }", "do not accept type arguments"),
+        ("fn identity<T>(value: T) -> T { return value; } fn bad(value: &dynamic Printable) { show(identity(value)); }", "cannot escape"),
+        ("fn bad() { let f: fn(&dynamic Printable) -> void = show; }", "cannot be stored or returned"),
+        ("class Box<T>(private value: T) {} fn bad(value: &dynamic Printable) { new Box<&dynamic Printable>(value); }", "cannot escape"),
+        ("class Empty {} fn bad() { let e: Empty = new Empty(); show(as &dynamic Printable (&e)); }", "missing method `text`"),
+        ("class Private { private text() -> string { return \"x\"; } } fn bad() { let e: Private = new Private(); show(as &dynamic Printable (&e)); }", "missing method `text`"),
+        ("class Wrong { public text() -> int { return 1; } } fn bad() { let e: Wrong = new Wrong(); show(as &dynamic Printable (&e)); }", "incompatible signature"),
+        ("class Mutable(private n: int) { public text() -> string { this.n += 1; return \"x\"; } } fn bad() { let e: Mutable = new Mutable(0); show(as &dynamic Printable (&e)); }", "must be read-only"),
+        ("class Mutable(private n: int) { private change<T>(value: T) { this.n += 1; } public text() -> string { this.change<int>(1); return \"x\"; } } fn bad() { let e: Mutable = new Mutable(0); show(as &dynamic Printable (&e)); }", "must be read-only"),
+        ("fn change(n: &mut int) { n += 1; } class Mutable(private n: int) { public text() -> string { change(&mut this.n); return \"x\"; } } fn bad() { let e: Mutable = new Mutable(0); show(as &dynamic Printable (&e)); }", "must be read-only"),
+        ("fn change(n: &mut int) { n += 1; } class Mutable(private n: int) { public text() -> string { change(this.n); return \"x\"; } } fn bad() { let e: Mutable = new Mutable(0); show(as &dynamic Printable (&e)); }", "must be read-only"),
+        ("class Mutable(private n: int) { public text() -> string { let alias: &mut int = this.n; alias += 1; return \"x\"; } } fn bad() { let e: Mutable = new Mutable(0); show(as &dynamic Printable (&e)); }", "must be read-only"),
+    ];
+    let mut failures = Vec::new();
+    for (index, (source, diagnostic)) in cases.iter().enumerate() {
+        let input = workspace.path("input.crdm");
+        fs::write(&input, format!("{prelude}\n{source}\nfn main() {{}}\n")).unwrap();
+        let rejected = workspace.path(&format!("rejected_{index}"));
+        let output = workspace
+            .compiler()
+            .arg(&input)
+            .arg("--cxx")
+            .arg(workspace.path("must not run"))
+            .arg("-o")
+            .arg(&rejected)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success()
+            || stderr.contains("panicked")
+            || !stderr.contains(diagnostic)
+            || stderr.contains("Could not run C++ compiler")
+            || rejected.with_extension("cpp").exists()
+        {
+            failures.push(format!(
+                "{source}: expected `{diagnostic}` before codegen:\n{stderr}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
 fn selective_imports_compile_and_execute() {
     let workspace = Workspace::new();
     for name in ["selective_imports", "selective_import_types"] {

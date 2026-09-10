@@ -74,12 +74,12 @@ detected and reported with the full chain.
 To use individual exports without a module prefix, select them with `.{...}`:
 
 ```cpp
-import math.{sin, sqrt as root};
+import math.{abs, sqrt as root};
 import io.{println};
 import str.{fromFloat};
 
 fn main() {
-    let value: float = root(9.0) + sin(0.0);
+    let value: float = root(9.0) + abs(-2);
     println(fromFloat(value));
 }
 ```
@@ -237,8 +237,46 @@ impl<T> Printable for Box<T> where T: Printable {
 }
 ```
 
-Traits use static monomorphised dispatch; they do not introduce vtables or runtime
-trait objects.
+Generic bounds use static monomorphised dispatch. For runtime dispatch, a shared
+borrow written `&dynamic Trait` carries a data pointer and a shared method table:
+
+```cpp
+import fmt.{Printable};
+import io;
+
+fn show(value: &dynamic Printable) {
+    io.println(value.text());
+}
+
+fn main() {
+    let number: int = 42;
+    let label: string = "Cardamom";
+    show(as &dynamic Printable (&number));
+    show(as &dynamic Printable (&label));
+}
+```
+
+Both calls use the same `show` function. Casts use Cardamom's prefix `as Type value`
+syntax. Explicit implementations and read-only public class methods work, including
+concrete generic classes and traits such as `&dynamic convert.Into<int>`. Import
+aliases refer to the same trait and method table.
+
+This first version supports borrowed, read-only objects with restricted lifetimes:
+
+- Create a handle from an explicit immutable borrow of an owned, named, concrete
+  value. Temporaries, fields, indexes, existing borrows, `this`, and unresolved
+  generic values cannot be used as cast sources.
+- Use handles directly as call arguments or method receivers. Named functions and
+  methods may take them as parameters and forward them to other dynamic parameters.
+  Storing, returning, capturing, or using handles as generic arguments is unsupported;
+  function values with dynamic parameters and `extern` dynamic signatures are also
+  unsupported. Bare `dynamic Trait` and `&mut dynamic Trait` are rejected.
+- Dynamic traits require concrete owned type arguments. Their methods cannot be
+  static or generic, use `Self` in signatures, return borrows, or include other dynamic
+  objects in their signatures. Methods must be called directly.
+
+These restrictions prevent handles from escaping their calls without introducing a
+general lifetime checker. `@cpp` remains an unchecked native escape hatch.
 
 Operators use these contracts too: `==`/`!=` use `cmp.Eq`, ordering uses
 `cmp.Comparable`, and arithmetic/bitwise operations use traits from `ops`.

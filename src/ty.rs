@@ -34,6 +34,8 @@ pub enum TypeKind {
     /// Modules are namespaces, not values, so this type only ever appears as the
     /// type of the name to the left of a `.`.
     Module(String),
+    /// A trait whose implementation is carried by a borrowed runtime value.
+    DynTrait(Box<Type>),
 }
 
 impl Display for Type {
@@ -53,9 +55,9 @@ impl TypeKind {
     pub fn same_type(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Array(a, ad), Self::Array(b, bd)) => ad == bd && a.kind.same_type(&b.kind),
-            (Self::Reference(a), Self::Reference(b)) | (Self::MutRef(a), Self::MutRef(b)) => {
-                a.kind.same_type(&b.kind)
-            }
+            (Self::Reference(a), Self::Reference(b))
+            | (Self::MutRef(a), Self::MutRef(b))
+            | (Self::DynTrait(a), Self::DynTrait(b)) => a.kind.same_type(&b.kind),
             (Self::GenericInstance(am, an, aa), Self::GenericInstance(bm, bn, ba)) => {
                 am == bm
                     && an == bn
@@ -77,7 +79,9 @@ impl TypeKind {
     pub fn contains_generics(&self) -> bool {
         match self {
             Self::GenericParam(_) => true,
-            Self::Array(t, _) | Self::Reference(t) | Self::MutRef(t) => t.kind.contains_generics(),
+            Self::Array(t, _) | Self::Reference(t) | Self::MutRef(t) | Self::DynTrait(t) => {
+                t.kind.contains_generics()
+            }
             Self::GenericInstance(_, _, args) | Self::Tuple(args) => {
                 args.iter().any(|a| a.kind.contains_generics())
             }
@@ -85,6 +89,31 @@ impl TypeKind {
                 ret.kind.contains_generics() || args.iter().any(|a| a.kind.contains_generics())
             }
             _ => false,
+        }
+    }
+
+    pub fn contains_dynamic(&self) -> bool {
+        match self {
+            Self::DynTrait(_) => true,
+            Self::Array(t, _) | Self::Reference(t) | Self::MutRef(t) => t.kind.contains_dynamic(),
+            Self::GenericInstance(_, _, args) | Self::Tuple(args) => {
+                args.iter().any(|arg| arg.kind.contains_dynamic())
+            }
+            Self::Function(args, ret) => {
+                ret.kind.contains_dynamic() || args.iter().any(|arg| arg.kind.contains_dynamic())
+            }
+            _ => false,
+        }
+    }
+
+    /// Only shared references can carry dynamic trait objects in the initial ABI.
+    pub fn dynamic_trait(&self) -> Option<&Type> {
+        match self {
+            Self::Reference(inner) => match &inner.kind {
+                Self::DynTrait(trait_type) => Some(trait_type),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -112,9 +141,9 @@ impl TypeKind {
             (Self::Array(p, pd), Self::Array(a, ad)) => {
                 pd == ad && p.kind.match_pattern(&a.kind, subs)
             }
-            (Self::Reference(p), Self::Reference(a)) | (Self::MutRef(p), Self::MutRef(a)) => {
-                p.kind.match_pattern(&a.kind, subs)
-            }
+            (Self::Reference(p), Self::Reference(a))
+            | (Self::MutRef(p), Self::MutRef(a))
+            | (Self::DynTrait(p), Self::DynTrait(a)) => p.kind.match_pattern(&a.kind, subs),
             _ => self.same_type(actual),
         }
     }
@@ -248,6 +277,9 @@ impl TypeKind {
                 };
                 format!("{}<{}>", base, types_str)
             }
+            TypeKind::DynTrait(ty) => {
+                format!("dynamic {}", ty.kind)
+            }
         }
     }
 }
@@ -280,6 +312,12 @@ impl Type {
         let is_error = |kind: &TypeKind| matches!(kind, TypeKind::User(_, name) if name == "error");
         if is_error(&self.kind) || is_error(&other.kind) {
             return true;
+        }
+
+        // Erasure needs an explicit conversion. In particular, ordinary borrow
+        // coercions and int/bool compatibility cannot change a vtable's identity.
+        if self.kind.contains_dynamic() || other.kind.contains_dynamic() {
+            return self.kind.same_type(&other.kind);
         }
 
         // Exact equality check
@@ -507,6 +545,10 @@ impl Type {
                     ..self.clone()
                 }
             }
+            TypeKind::DynTrait(inner) => Type {
+                kind: TypeKind::DynTrait(Box::new(inner.apply_substitution(subs))),
+                ..self.clone()
+            },
 
             // If it's not generic, just return itself
             _ => self.clone(),

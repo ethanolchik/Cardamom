@@ -308,7 +308,7 @@
         },
         {
           "name": "storage.modifier.cardamom",
-          "match": "\\b(?:public|private|protected|static|extern|mut)\\b"
+          "match": "\\b(?:public|private|protected|static|extern|mut|dynamic)\\b"
         },
         {
           "name": "storage.type.cardamom",

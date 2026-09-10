@@ -1,0 +1,50 @@
+import fmt.{Printable};
+import fmt;
+import str;
+import dynamic_model.{Meter};
+
+// Returning a concrete class requires wrapper definitions after class declarations.
+trait Make<T> { make() -> T; }
+class Copy<T>(private value: T) { public make() -> T { return this.value; } }
+fn make(value: &dynamic Make<Meter<int>>) -> Meter<int> { return value.make(); }
+
+// These two types would collide if table names just joined type names with '_'.
+trait Named_int { name() -> string; }
+trait Named<T> { name() -> string; }
+class Name { public name() -> string { return "name"; } }
+fn nameOne(value: &dynamic Named_int) -> string { return value.name(); }
+fn nameTwo(value: &dynamic Named<int>) -> string { return value.name(); }
+
+// Builtin read-only methods and calls taking values must remain read-only.
+class Text(private value: string) {
+    public text() -> string { return str.fromInt(this.value.len()); }
+}
+
+class Functions {
+    public static render(value: &dynamic Printable) -> string { return value.text(); }
+}
+
+fn text<T>(value: &dynamic Printable, fallback: T) -> string { return value.text(); }
+fn qualified<Printable>(value: &dynamic fmt.Printable, fallback: Printable) -> string {
+    return value.text();
+}
+
+fn main() -> int {
+    let meter: Meter<int> = new Meter<int>(4, 0);
+    let copy: Copy<Meter<int>> = new Copy<Meter<int>>(meter);
+    if (make(as &dynamic Make<Meter<int>> (&copy)).zero() != 40) { return 1; }
+    let named: Name = new Name();
+    if (nameOne(as &dynamic Named_int (&named)) != "name") { return 2; }
+    if (nameTwo(as &dynamic Named<int> (&named)) != "name") { return 3; }
+    let label: Text = new Text("test");
+    if (text<int>(as &dynamic Printable (&label), 0) != "4") { return 4; }
+    if ((Functions::render)(as &dynamic Printable (&label)) != "4") { return 5; }
+    // A closure may make a fresh borrow inside its own invocation.
+    let callback: fn() -> string = || string -> {
+        let number: int = 5;
+        return text<int>(as &dynamic Printable (&number), 0);
+    };
+    if (callback() != "5") { return 6; }
+    if (qualified<int>(as &dynamic fmt.Printable (&label), 0) != "4") { return 7; }
+    return 0;
+}

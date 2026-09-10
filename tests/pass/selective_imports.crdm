@@ -1,4 +1,4 @@
-import math.{sqrt as root, sin};
+import math.{sqrt as root, abs};
 import math as numbers;
 import io.{println};
 import selective_source.{
@@ -14,7 +14,7 @@ fn callShadow(shadowed: fn(int) -> int) -> int {
 }
 
 fn main() -> int {
-    if (root(9.0) != 3.0 || sin(0.0) != 0.0) { return 1; }
+    if (root(9.0) != 3.0 || abs(-3) != 3) { return 1; }
     if (numbers.sqrt(16.0) != 4.0 || compute(21) != 42) { return 2; }
 
     // Imported functions work as values and in grouped calls.

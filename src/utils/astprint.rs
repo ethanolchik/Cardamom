@@ -618,6 +618,10 @@ fn printtype(type_: Type, indent: usize) {
             println!("{}MutRef: ", String::from("\t").repeat(indent));
             printtype(*inner.clone(), indent + 1);
         }
+        TypeKind::DynTrait(ref inner) => {
+            println!("{}Dynamic trait: ", String::from("\t").repeat(indent));
+            printtype(*inner.clone(), indent + 1);
+        }
         TypeKind::Tuple(ref fields) => {
             println!("{}Tuple: ", String::from("\t").repeat(indent));
             for field in fields.iter() {

@@ -1,0 +1,18 @@
+// Deliberately unsorted methods with arguments, references and a void result.
+public trait Measure {
+    zero() -> int;
+    add(value: int) -> int;
+    append(value: &mut int);
+    read(value: &int) -> int;
+}
+
+public fn measure(value: &dynamic Measure) -> int {
+    let appended: int = 0;
+    let borrowed: int = 3;
+    value.append(&mut appended);
+    return value.zero() + value.add(2) + value.read(&borrowed) + appended;
+}
+
+public fn forward(value: &dynamic Measure) -> int {
+    return measure(value);
+}

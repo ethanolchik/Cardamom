@@ -1,0 +1,22 @@
+import dynamic_contract as contract;
+import dynamic_contract.{Measure as Metric, measure, forward};
+import dynamic_model.{Meter as Gauge, inModule};
+
+class Report {
+    public check(value: &dynamic Metric) -> int { return measure(value); }
+}
+
+fn main() -> int {
+    let small: Gauge<int> = new Gauge<int>(4, 0);
+    let large: Gauge<string> = new Gauge<string>(7, "payload");
+    let numbers: int[] = [1, 2];
+    let words: string[] = ["one", "two", "three"];
+    let report: Report = new Report();
+    if (measure(as &dynamic Metric (&small)) != 57) { return 1; }
+    if (forward(as &dynamic contract.Measure (&large)) != 96) { return 2; }
+    if (contract.measure(as &dynamic Metric (&numbers)) != 31) { return 3; }
+    if (measure(as &dynamic Metric (&words)) != 44) { return 4; }
+    if (report.check(as &dynamic contract.Measure (&small)) != 57) { return 5; }
+    if (inModule() != 18) { return 6; }
+    return 0;
+}

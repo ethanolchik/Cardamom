@@ -1,0 +1,22 @@
+import dynamic_contract.{Measure, measure};
+
+fn hidden(value: int) -> int { return value * 10; }
+
+public class Meter<T>(private size: int, private payload: T) {
+    public zero() -> int { return hidden(this.size); }
+    public add(value: int) -> int { return this.size + value; }
+    public append(value: &mut int) { value += this.size; }
+    public read(value: &int) -> int { return value + this.size; }
+}
+
+public impl<T> Measure for T[] {
+    public zero() -> int { return hidden(this.len()); }
+    public add(value: int) -> int { return this.len() + value; }
+    public append(value: &mut int) { value += this.len(); }
+    public read(value: &int) -> int { return value + this.len(); }
+}
+
+public fn inModule() -> int {
+    let values: bool[] = [true];
+    return measure(as &dynamic Measure (&values));
+}

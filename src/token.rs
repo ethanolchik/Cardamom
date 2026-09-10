@@ -108,6 +108,7 @@ pub enum TokenKind {
     Where,
     True,
     False,
+    Dynamic,
 
     // Misc
     Error,
@@ -226,6 +227,7 @@ impl TokenKind {
             TokenKind::Where => "Where".to_string(),
             TokenKind::True => "True".to_string(),
             TokenKind::False => "False".to_string(),
+            TokenKind::Dynamic => "Dynamic".to_string(),
             TokenKind::Error => "Error".to_string(),
         }
     }

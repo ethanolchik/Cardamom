@@ -369,6 +369,7 @@ impl Lexer {
             "where" => TokenKind::Where,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
+            "dynamic" => TokenKind::Dynamic,
             _ => TokenKind::Identifier,
         };
         self.add_token(kind);

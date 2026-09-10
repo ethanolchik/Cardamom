@@ -1,13 +1,17 @@
+mod dynamic;
 mod operators;
 
+pub use dynamic::{DynamicCast, DynamicCasts, DynamicTrait, DynamicTraits};
+
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::errors::{Error, Help, Note};
 use crate::modules::MemberImports;
 use crate::token::{Token, TokenKind};
 use crate::ty::{Type, TypeKind};
+use crate::utils::readonly::const_methods;
 use crate::utils::symtable::{Symbol, SymbolTable, Visibility};
 
 /// A map from expressions to their inferred types.
@@ -27,6 +31,11 @@ pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
     pub function_refs: FunctionRefs,
+    pub dynamic_traits: DynamicTraits,
+    pub dynamic_casts: DynamicCasts,
+    /// Arguments borrowed mutably, including implicit borrows of owned lvalues.
+    pub mutable_arguments: RefCell<HashSet<*const Expr>>,
+    class_const_methods: HashMap<String, HashSet<String>>,
     pub errors: RefCell<Vec<Error>>,
 
     /// The name of the file we're currently checking, so we can attach it to errors.
@@ -129,6 +138,7 @@ pub struct ExportedClass {
     pub methods: HashMap<String, ExportedMethod>,
     pub constructor_params: Vec<Type>,
     pub constraints: Vec<GenericConstraint>,
+    pub const_methods: HashSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +209,10 @@ impl<'a> TypeChecker<'a> {
             symtable,
             expr_types: HashMap::new(),
             function_refs: FunctionRefs::new(),
+            dynamic_traits: DynamicTraits::new(),
+            dynamic_casts: DynamicCasts::new(),
+            mutable_arguments: RefCell::new(HashSet::new()),
+            class_const_methods: HashMap::new(),
             errors: RefCell::new(Vec::new()),
 
             filename,
@@ -260,6 +274,8 @@ impl<'a> TypeChecker<'a> {
         self.register_extensions(module);
 
         module.accept(self);
+
+        self.check_dynamic_uses(module);
 
         self.check_entry_point(module);
     }
@@ -460,6 +476,11 @@ impl<'a> TypeChecker<'a> {
             methods: method_exports,
             constructor_params,
             constraints,
+            const_methods: const_methods(
+                methods,
+                &self.expr_types,
+                &self.mutable_arguments.borrow(),
+            ),
         })
     }
 
@@ -700,6 +721,7 @@ impl<'a> TypeChecker<'a> {
                     return_type,
                     generics: method_generics,
                     modifiers,
+                    constraints,
                     ..
                 } = &**method
                 else {
@@ -730,7 +752,7 @@ impl<'a> TypeChecker<'a> {
                         generics: method_generic_names,
                         visibility: self.visibility_of(modifiers),
                         is_static: is_static_member(modifiers),
-                        constraints: Vec::new(),
+                        constraints: self.normalise_constraints(constraints, &all_generics),
                     },
                 );
             }
@@ -1199,8 +1221,11 @@ impl<'a> TypeChecker<'a> {
     /// Resolves a method call while preserving both the receiver's class arguments and
     /// the type parameters declared by the method itself.
     fn method_callee(&self, callee: &Expr) -> Option<MethodSignature> {
-        let Expr::MemberAccess { object, name } = callee else {
-            return None;
+        let (object, name) = match callee {
+            Expr::MemberAccess { object, name } | Expr::StaticAccess { object, name } => {
+                (object, name)
+            }
+            _ => return None,
         };
         let object_type = Self::without_borrows(self.get_expr_type(object)?);
         let (module, class_name, class_arguments) = match object_type.kind {
@@ -1793,6 +1818,7 @@ impl<'a> TypeChecker<'a> {
             }
             TypeKind::Reference(inner) => TypeKind::Reference(Box::new(self.qualify_type(inner))),
             TypeKind::MutRef(inner) => TypeKind::MutRef(Box::new(self.qualify_type(inner))),
+            TypeKind::DynTrait(inner) => TypeKind::DynTrait(Box::new(self.qualify_type(inner))),
             TypeKind::Function(params, ret) => TypeKind::Function(
                 params
                     .iter()
@@ -2233,7 +2259,9 @@ impl<'a> TypeChecker<'a> {
                 name == "error" || self.current_function_generics.contains(name)
             }
             TypeKind::Array(inner, _) => self.is_unresolved(&inner.kind),
-            TypeKind::Reference(inner) | TypeKind::MutRef(inner) => self.is_unresolved(&inner.kind),
+            TypeKind::Reference(inner) | TypeKind::MutRef(inner) | TypeKind::DynTrait(inner) => {
+                self.is_unresolved(&inner.kind)
+            }
             TypeKind::Function(params, ret) => {
                 params.iter().any(|p| self.is_unresolved(&p.kind)) || self.is_unresolved(&ret.kind)
             }
@@ -2253,7 +2281,7 @@ impl<'a> TypeChecker<'a> {
     /// `GenericParam`, so this conversion is what makes a signature actually generic.
     fn generalise(ty: &Type, generics: &[String]) -> Type {
         let kind = match &ty.kind {
-            TypeKind::User(_, name) if generics.contains(name) => {
+            TypeKind::User(module, name) if module.is_empty() && generics.contains(name) => {
                 TypeKind::GenericParam(name.clone())
             }
             TypeKind::Array(inner, depth) => {
@@ -2264,6 +2292,9 @@ impl<'a> TypeChecker<'a> {
             }
             TypeKind::MutRef(inner) => {
                 TypeKind::MutRef(Box::new(Self::generalise(inner, generics)))
+            }
+            TypeKind::DynTrait(inner) => {
+                TypeKind::DynTrait(Box::new(Self::generalise(inner, generics)))
             }
             TypeKind::Function(params, ret) => TypeKind::Function(
                 params
@@ -2369,6 +2400,9 @@ impl<'a> TypeChecker<'a> {
         if !matches!(expected.kind, TypeKind::MutRef(_)) {
             return;
         }
+        self.mutable_arguments
+            .borrow_mut()
+            .insert(argument as *const Expr);
 
         // Passing an existing mutable borrow along is fine whatever it came from.
         if matches!(actual.kind, TypeKind::MutRef(_)) {
@@ -2608,6 +2642,7 @@ impl<'a> TypeChecker<'a> {
                 params.iter().all(|p| self.type_exists(p))
             }
             TypeKind::Tuple(types) => types.iter().all(|ty| self.type_exists(ty)),
+            TypeKind::DynTrait(ty) => self.trait_declaration(ty).is_some(),
         }
     }
 
@@ -3959,6 +3994,37 @@ impl<'a> Visitor for TypeChecker<'a> {
             };
 
             match &obj_ty.kind {
+                TypeKind::DynTrait(trait_type) => {
+                    let Some(dynamic) = self.dynamic_trait(trait_type) else {
+                        self.set_expr_type(expr, self.error_type(name));
+                        return;
+                    };
+                    if let Some((_, method)) = dynamic
+                        .methods
+                        .iter()
+                        .find(|(method, _)| method == &name.lexeme)
+                    {
+                        if !self.in_call {
+                            self.error_token(name, "Dynamic trait methods must be called directly");
+                        }
+                        let ty = self.function_type(
+                            name,
+                            method.params.clone(),
+                            method.return_type.clone(),
+                        );
+                        self.set_expr_type(expr, ty);
+                    } else {
+                        self.error_token(
+                            name,
+                            &format!(
+                                "No method `{}` in dynamic trait `{}`",
+                                name.lexeme, trait_type.kind
+                            ),
+                        );
+                        self.set_expr_type(expr, self.error_type(name));
+                    }
+                    return;
+                }
                 TypeKind::Module(module_name) => {
                     // `io.println` and friends: resolve against the module's exports.
                     let exports = self
@@ -4394,7 +4460,8 @@ impl<'a> Visitor for TypeChecker<'a> {
     fn visit_cast(&mut self, expr: &Expr) {
         if let Expr::Cast { object, type_ } = expr {
             object.accept(self);
-            let target_ty = self.qualify_type(type_);
+            let target_ty =
+                self.qualify_type(&Self::generalise(type_, &self.current_function_generics));
 
             let name = get_token(object);
 
@@ -4405,6 +4472,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                 )
             });
             // Simplistic cast logic
+            if self.check_dynamic_cast(expr, object, &obj_ty, &target_ty) {
+                self.set_expr_type(expr, target_ty);
+                return;
+            }
             if !obj_ty.is_compatible_with(&target_ty) {
                 // Maybe it's int->float or vice versa, or same user type, etc.
                 // We'll do a minimal check
