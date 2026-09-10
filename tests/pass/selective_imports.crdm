@@ -1,0 +1,35 @@
+import math.{sqrt as root, sin};
+import math as numbers;
+import io.{println};
+import selective_source.{
+    compute,
+    callback as next,
+    // Multiline lists and trailing commas are accepted.
+    unused,
+    shadowed,
+};
+
+fn callShadow(shadowed: fn(int) -> int) -> int {
+    return shadowed(2);
+}
+
+fn main() -> int {
+    if (root(9.0) != 3.0 || sin(0.0) != 0.0) { return 1; }
+    if (numbers.sqrt(16.0) != 4.0 || compute(21) != 42) { return 2; }
+
+    // Imported functions work as values and in grouped calls.
+    let stored: fn(int) -> int = next;
+    let callbacks: (fn(int) -> int)[] = [next];
+    if (stored(41) != 42 || callbacks[0](4) != 5 || (next)(6) != 7) { return 3; }
+
+    // Local bindings take precedence over a selected function.
+    {
+        let next: fn(int) -> int = |value| int -> { return value * 3; };
+        if (next(4) != 12) { return 4; }
+    }
+    if (callShadow(|value| int -> { return value + 10; }) != 12) { return 5; }
+    if (next(4) != 5) { return 6; }
+
+    println("selective imports ok");
+    return 0;
+}

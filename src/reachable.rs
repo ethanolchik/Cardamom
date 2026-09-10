@@ -9,27 +9,26 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, Stmt};
 use crate::modules::Program;
+use crate::typecheck::FunctionRefs;
 
 /// A function identified by the module that defines it and its name.
 pub type FunctionRef = (String, String);
 
 /// Per-module information needed to resolve a call to the function it refers to.
-struct ModuleContext {
+struct ModuleContext<'a> {
     /// Functions defined in this module.
     locals: HashSet<String>,
-    /// `alias -> module name` for this module's imports.
-    imports: HashMap<String, String>,
     /// Function name -> body, so the walk can follow calls into it.
-    bodies: HashMap<String, Vec<Box<Stmt>>>,
+    bodies: HashMap<String, &'a [Box<Stmt>]>,
     /// Bodies that are always considered live, such as class methods.
-    always_live: Vec<Vec<Box<Stmt>>>,
+    always_live: Vec<&'a [Box<Stmt>]>,
 }
 
 /// Returns every function reachable from the program's own code.
 ///
 /// The program's own module is treated as entirely live, since a user does not expect
 /// their own functions to vanish; imported modules are reduced to what is used.
-pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
+pub fn analyse(program: &Program, function_refs: &FunctionRefs) -> HashSet<FunctionRef> {
     let mut contexts: HashMap<String, ModuleContext> = HashMap::new();
 
     for module in &program.modules {
@@ -41,21 +40,21 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
             match &**stmt {
                 Stmt::Function { name, body, .. } => {
                     locals.insert(name.lexeme.clone());
-                    bodies.insert(name.lexeme.clone(), body.clone());
+                    bodies.insert(name.lexeme.clone(), body.as_slice());
                 }
                 // Classes are always emitted in full, so their methods are always live
                 // and anything they call must be kept too.
                 Stmt::Class { methods, .. } => {
                     for method in methods {
                         if let Stmt::Function { body, .. } = &**method {
-                            always_live.push(body.clone());
+                            always_live.push(body.as_slice());
                         }
                     }
                 }
                 Stmt::Extension { methods, .. } | Stmt::Impl { methods, .. } => {
                     for method in methods {
                         if let Stmt::Function { body, .. } = &**method {
-                            always_live.push(body.clone());
+                            always_live.push(body.as_slice());
                         }
                     }
                 }
@@ -67,7 +66,6 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
             module.name.clone(),
             ModuleContext {
                 locals,
-                imports: module.imports.clone(),
                 bodies,
                 always_live,
             },
@@ -87,9 +85,9 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
     }
 
     // Class and extension method bodies are emitted regardless, in every module.
-    for (module_name, context) in &contexts {
+    for context in contexts.values() {
         for body in &context.always_live {
-            for called in calls_in(body, module_name, context) {
+            for called in calls_in(body, function_refs) {
                 worklist.push(called);
             }
         }
@@ -108,7 +106,7 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
             continue;
         };
 
-        for called in calls_in(body, module_name, context) {
+        for called in calls_in(body, function_refs) {
             if !reachable.contains(&called) {
                 worklist.push(called);
             }
@@ -118,11 +116,11 @@ pub fn analyse(program: &Program) -> HashSet<FunctionRef> {
     reachable
 }
 
-/// Every function call appearing anywhere in `body`, resolved to a `FunctionRef`.
-fn calls_in(body: &[Box<Stmt>], module: &str, context: &ModuleContext) -> Vec<FunctionRef> {
+/// Includes functions passed or stored as values, as well as direct calls. The
+/// checker resolves each reference against lexical scopes and selective aliases.
+fn calls_in(body: &[Box<Stmt>], function_refs: &FunctionRefs) -> Vec<FunctionRef> {
     let mut collector = CallCollector {
-        module,
-        context,
+        function_refs,
         found: Vec::new(),
     };
 
@@ -134,34 +132,11 @@ fn calls_in(body: &[Box<Stmt>], module: &str, context: &ModuleContext) -> Vec<Fu
 }
 
 struct CallCollector<'a> {
-    module: &'a str,
-    context: &'a ModuleContext,
+    function_refs: &'a FunctionRefs,
     found: Vec<FunctionRef>,
 }
 
 impl<'a> CallCollector<'a> {
-    /// Records a call if the callee resolves to a known function.
-    fn record_callee(&mut self, callee: &Expr) {
-        match callee {
-            // `foo()` refers to a function of the module being walked.
-            Expr::Variable { name } => {
-                if self.context.locals.contains(&name.lexeme) {
-                    self.found
-                        .push((self.module.to_string(), name.lexeme.clone()));
-                }
-            }
-            // `io.println()` refers to a function of an imported module.
-            Expr::MemberAccess { object, name } => {
-                if let Expr::Variable { name: object_name } = &**object {
-                    if let Some(imported) = self.context.imports.get(&object_name.lexeme) {
-                        self.found.push((imported.clone(), name.lexeme.clone()));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn walk_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Expression { expression } => self.walk_expr(expression),
@@ -228,11 +203,13 @@ impl<'a> CallCollector<'a> {
     }
 
     fn walk_expr(&mut self, expr: &Expr) {
+        if let Some(function) = self.function_refs.get(&(expr as *const Expr)) {
+            self.found.push(function.clone());
+        }
         match expr {
             Expr::Call {
                 callee, arguments, ..
             } => {
-                self.record_callee(callee);
                 self.walk_expr(callee);
                 for argument in arguments {
                     self.walk_expr(argument);
@@ -241,7 +218,6 @@ impl<'a> CallCollector<'a> {
             Expr::GenericCall {
                 callee, arguments, ..
             } => {
-                self.record_callee(callee);
                 self.walk_expr(callee);
                 for argument in arguments {
                     self.walk_expr(argument);
@@ -258,9 +234,12 @@ impl<'a> CallCollector<'a> {
                     self.walk_expr(element);
                 }
             }
-            Expr::Assignment { value, .. }
-            | Expr::MemberAssignment { value, .. }
-            | Expr::StaticAssignment { value, .. } => self.walk_expr(value),
+            Expr::Assignment { value, .. } => self.walk_expr(value),
+            Expr::MemberAssignment { object, value, .. }
+            | Expr::StaticAssignment { object, value, .. } => {
+                self.walk_expr(object);
+                self.walk_expr(value);
+            }
             Expr::IndexAssignment {
                 object,
                 index,

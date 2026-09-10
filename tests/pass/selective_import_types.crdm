@@ -1,0 +1,65 @@
+import selective_source.{
+    Box as Parcel,
+    Key as RemoteKey,
+    Readable as CanRead,
+    Into as ConvertTo,
+    read as remoteRead,
+    convert,
+    identity as originalIdentity,
+};
+import selective_bridge.{wrap, bounce, wrapper, getCallback};
+
+// Original export names may still be used by unrelated local declarations.
+class Box(private value: string) {
+    public get() -> string { return this.value; }
+}
+
+class Key(private value: string) {
+    public get() -> string { return this.value; }
+}
+
+fn identity(value: string) -> string { return value; }
+
+// Generic parameters can shadow imported type aliases.
+fn keep<RemoteKey>(value: RemoteKey) -> RemoteKey { return value; }
+
+impl CanRead for int {
+    public read() -> int { return this; }
+}
+
+impl ConvertTo<string> for int {
+    public convert() -> string { return "converted"; }
+}
+
+fn read<T>(value: &T) -> int where T: CanRead {
+    return value.read();
+}
+
+fn main() -> int {
+    let remote: RemoteKey = new RemoteKey(42);
+    let copied: RemoteKey = bounce(originalIdentity<RemoteKey>(remote));
+    let borrowed: &RemoteKey = &copied;
+    let keys: RemoteKey[] = [remote];
+    if (read(borrowed) != 42 || remoteRead(&keys[0]) != 42) { return 1; }
+
+    let nested: Parcel<Parcel<RemoteKey>> =
+        new Parcel<Parcel<RemoteKey>>(new Parcel<RemoteKey>(remote));
+    if (nested.get().get().read() != 42) { return 2; }
+
+    // Cross-module aliases must preserve generic class and method identities.
+    let wrapped: Parcel<int> = wrap(wrapper(7));
+    let mapper: fn(int) -> int = |value| int -> { return value + 1; };
+    if (wrapped.map<int>(mapper) != 8) { return 3; }
+    if (keep<string>("local generic") != "local generic") { return 4; }
+
+    let number: int = 42;
+    if (remoteRead(&number) != 42 || read(&number) != 42) { return 5; }
+    if (convert<int, string>(&number) != "converted") { return 6; }
+
+    let local: Box = new Box(identity("local class"));
+    let localKey: Key = new Key("local key");
+    if (local.get() != "local class" || localKey.get() != "local key") { return 7; }
+    let callback: fn(int) -> int = getCallback();
+    if (callback(9) != 10) { return 8; }
+    return 0;
+}

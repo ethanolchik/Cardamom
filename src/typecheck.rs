@@ -5,12 +5,17 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::errors::{Error, Help, Note};
+use crate::modules::MemberImports;
 use crate::token::{Token, TokenKind};
 use crate::ty::{Type, TypeKind};
 use crate::utils::symtable::{Symbol, SymbolTable, Visibility};
 
 /// A map from expressions to their inferred types.
 type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
+
+/// The defining module and name of each expression that refers to a function.
+/// Recording resolution here preserves lexical shadowing through code generation.
+pub type FunctionRefs = HashMap<*const Expr, (String, String)>;
 
 /// Main TypeChecker structure.
 /// - Contains a mutable reference to the `SymbolTable`.
@@ -21,6 +26,7 @@ type ExprTypeMap<'a> = HashMap<*const Expr, Type>;
 pub struct TypeChecker<'a> {
     pub symtable: &'a mut SymbolTable,
     pub expr_types: ExprTypeMap<'a>,
+    pub function_refs: FunctionRefs,
     pub errors: RefCell<Vec<Error>>,
 
     /// The name of the file we're currently checking, so we can attach it to errors.
@@ -63,6 +69,7 @@ pub struct TypeChecker<'a> {
 
     /// Public exports of every module compiled so far, keyed by module name.
     pub module_exports: HashMap<String, ModuleExports>,
+    member_imports: MemberImports,
     /// The type arguments each generic call site resolved to, keyed by AST node.
     pub call_instantiations: HashMap<*const Expr, Vec<TypeKind>>,
     /// Every distinct instantiation of each generic function, in first-use order so the
@@ -191,6 +198,7 @@ impl<'a> TypeChecker<'a> {
         Self {
             symtable,
             expr_types: HashMap::new(),
+            function_refs: FunctionRefs::new(),
             errors: RefCell::new(Vec::new()),
 
             filename,
@@ -217,6 +225,7 @@ impl<'a> TypeChecker<'a> {
             explicit_impls: Vec::new(),
             trait_call_sites: HashMap::new(),
             module_exports: HashMap::new(),
+            member_imports: MemberImports::new(),
             call_instantiations: HashMap::new(),
             instantiations: HashMap::new(),
             generic_call_sites: Vec::new(),
@@ -545,15 +554,24 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Binds each `import <module>;` to a module that has already been type checked.
-    ///
-    /// The imported name becomes a symbol of module type, so `io.println` resolves
-    /// through the normal member-access path.
+    /// Binds namespace imports and selected public exports. Import bindings are
+    /// file-wide; function-local variables can shadow selected names.
     fn resolve_imports(&mut self, module: &Module) {
         let mut imported: HashMap<String, Token> = HashMap::new();
+        let declarations: HashMap<&str, &Token> = module
+            .statements
+            .iter()
+            .filter_map(|stmt| match &**stmt {
+                Stmt::Function { name, .. }
+                | Stmt::Class { name, .. }
+                | Stmt::Trait { name, .. }
+                | Stmt::Variable { name, .. } => Some((name.lexeme.as_str(), name)),
+                _ => None,
+            })
+            .collect();
 
         for stmt in &module.statements {
-            let Stmt::Import { name, alias } = &**stmt else {
+            let Stmt::Import { name, kind } = &**stmt else {
                 continue;
             };
 
@@ -563,35 +581,97 @@ impl<'a> TypeChecker<'a> {
                 continue;
             }
 
-            if let Some(previous) = imported.get(&alias.lexeme) {
-                self.error_with_notes(
-                    alias.clone(),
-                    &format!("`{}` is imported more than once", alias.lexeme),
-                    vec![Note::new(
-                        format!("`{}` was first imported here", alias.lexeme),
-                        previous.line,
-                        previous.span.clone(),
-                        self.filename.clone(),
-                    )],
-                    vec![Help::new(
-                        "Use `import <module> as <name>;` to bind it to a different name"
-                            .to_string(),
-                        alias.line,
-                        alias.span.clone(),
-                        self.filename.clone(),
-                    )],
-                );
-                continue;
+            let bindings: Vec<(&Token, Option<&Token>)> = match kind {
+                ImportKind::Namespace(alias) => vec![(alias, None)],
+                ImportKind::Members(members) => members
+                    .iter()
+                    .map(|member| (&member.alias, Some(&member.name)))
+                    .collect(),
+            };
+            for (alias, member) in bindings {
+                let help = vec![Help::new(
+                    "Use `as <name>` to give this import a different name".to_string(),
+                    alias.line,
+                    alias.span.clone(),
+                    self.filename.clone(),
+                )];
+                if let Some(previous) = imported.get(&alias.lexeme) {
+                    self.error_with_notes(
+                        alias.clone(),
+                        &format!("`{}` is imported more than once", alias.lexeme),
+                        vec![Note::new(
+                            format!("`{}` was first imported here", alias.lexeme),
+                            previous.line,
+                            previous.span.clone(),
+                            self.filename.clone(),
+                        )],
+                        help,
+                    );
+                    continue;
+                }
+                imported.insert(alias.lexeme.clone(), alias.clone());
+                if let Some(previous) = declarations.get(alias.lexeme.as_str()) {
+                    self.error_with_notes(
+                        alias.clone(),
+                        &format!(
+                            "Import `{}` conflicts with a top-level declaration",
+                            alias.lexeme
+                        ),
+                        vec![Note::new(
+                            format!("`{}` is declared here", alias.lexeme),
+                            previous.line,
+                            previous.span.clone(),
+                            self.filename.clone(),
+                        )],
+                        help,
+                    );
+                    continue;
+                }
+
+                if let Some(member) = member {
+                    let exports = &self.module_exports[&name.lexeme];
+                    if !exports.functions.contains_key(&member.lexeme)
+                        && !exports.classes.contains_key(&member.lexeme)
+                        && !exports.traits.contains_key(&member.lexeme)
+                    {
+                        let mut available: Vec<&str> = exports
+                            .functions
+                            .keys()
+                            .chain(exports.classes.keys())
+                            .chain(exports.traits.keys())
+                            .map(String::as_str)
+                            .collect();
+                        available.sort_unstable();
+                        available.dedup();
+                        self.error_with_notes(
+                            member.clone(),
+                            &format!(
+                                "No public export `{}` in module `{}`",
+                                member.lexeme, name.lexeme
+                            ),
+                            vec![Note::new(
+                                format!("Public exports: {}", available.join(", ")),
+                                member.line,
+                                member.span.clone(),
+                                self.filename.clone(),
+                            )],
+                            vec![],
+                        );
+                        continue;
+                    }
+                    self.member_imports.insert(
+                        alias.lexeme.clone(),
+                        (name.lexeme.clone(), member.lexeme.clone()),
+                    );
+                } else {
+                    let module_type =
+                        Type::new(alias.clone(), TypeKind::Module(name.lexeme.clone()));
+                    self.symtable.declare_module(
+                        &alias.lexeme,
+                        Symbol::new_variable(alias.clone(), module_type),
+                    );
+                }
             }
-
-            imported.insert(alias.lexeme.clone(), alias.clone());
-
-            let module_type = Type::new(alias.clone(), TypeKind::Module(name.lexeme.clone()));
-
-            self.symtable.declare_module(
-                &alias.lexeme,
-                Symbol::new_variable(alias.clone(), module_type),
-            );
         }
     }
 
@@ -1081,6 +1161,10 @@ impl<'a> TypeChecker<'a> {
     /// If `callee` names a function of an imported module, returns its module and
     /// exported signature.
     fn module_callee(&self, callee: &Expr) -> Option<(String, String, ExportedFunction)> {
+        if let Some((module, name)) = self.function_refs.get(&(callee as *const Expr)) {
+            let function = self.module_exports.get(module)?.functions.get(name)?;
+            return Some((module.clone(), name.clone(), function.clone()));
+        }
         let Expr::MemberAccess { object, name } = callee else {
             return None;
         };
@@ -1368,7 +1452,10 @@ impl<'a> TypeChecker<'a> {
             {
                 return Ok(());
             }
-            if self.explicit_impl_candidates(concrete, trait_type).is_empty() {
+            if self
+                .explicit_impl_candidates(concrete, trait_type)
+                .is_empty()
+            {
                 return Err(format!(
                     "type parameter `{}` needs a `{}` bound",
                     parameter, trait_type.kind
@@ -1651,6 +1738,18 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Resolves a written type name, retaining the defining module of an alias.
+    fn resolve_type_name(&self, name: &str) -> (String, String) {
+        match name.rsplit_once('.') {
+            Some((module, name)) => (self.resolve_module_name(module), name.to_string()),
+            None => self
+                .member_imports
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| (self.module_name.clone(), name.to_string())),
+        }
+    }
+
     /// Resolves module ownership for user-written types.
     ///
     /// Parsed unqualified names intentionally have an empty owner until type checking,
@@ -1668,11 +1767,8 @@ impl<'a> TypeChecker<'a> {
                         name.as_str()
                     };
 
-                    if let Some((owner, base)) = written.rsplit_once('.') {
-                        TypeKind::User(self.resolve_module_name(owner), base.to_string())
-                    } else {
-                        TypeKind::User(self.module_name.clone(), name.clone())
-                    }
+                    let (owner, base) = self.resolve_type_name(written);
+                    TypeKind::User(owner, base)
                 } else {
                     TypeKind::User(self.resolve_module_name(module), name.clone())
                 }
@@ -1686,15 +1782,8 @@ impl<'a> TypeChecker<'a> {
                         name.as_str()
                     };
 
-                    if let Some((owner, base)) = written.rsplit_once('.') {
-                        TypeKind::GenericInstance(
-                            self.resolve_module_name(owner),
-                            base.to_string(),
-                            args,
-                        )
-                    } else {
-                        TypeKind::GenericInstance(self.module_name.clone(), name.clone(), args)
-                    }
+                    let (owner, base) = self.resolve_type_name(written);
+                    TypeKind::GenericInstance(owner, base, args)
                 } else {
                     TypeKind::GenericInstance(self.resolve_module_name(module), name.clone(), args)
                 }
@@ -2721,6 +2810,13 @@ impl<'a> Visitor for TypeChecker<'a> {
             if let Some(ty) = self.get_expr_type(expression).cloned() {
                 self.set_expr_type(expr, ty);
             }
+            if let Some(function) = self
+                .function_refs
+                .get(&(&**expression as *const Expr))
+                .cloned()
+            {
+                self.function_refs.insert(expr as *const Expr, function);
+            }
         }
     }
 
@@ -2779,7 +2875,33 @@ impl<'a> Visitor for TypeChecker<'a> {
                 }
             } else {
                 // Check if it's a class name (for static access) or global function
-                if let Some(Symbol::Class { .. }) = self.symtable.lookup_class(&name.lexeme) {
+                if let Some((module, exported_name)) =
+                    self.member_imports.get(&name.lexeme).cloned()
+                {
+                    let exports = &self.module_exports[&module];
+                    if let Some(function) = exports.functions.get(&exported_name) {
+                        let ty = self.function_type(
+                            name,
+                            function.params.clone(),
+                            function.return_type.clone(),
+                        );
+                        self.function_refs
+                            .insert(expr as *const Expr, (module, exported_name));
+                        self.set_expr_type(expr, ty);
+                    } else if exports.classes.contains_key(&exported_name) {
+                        self.set_expr_type(
+                            expr,
+                            Type::new(name.clone(), TypeKind::User(module, exported_name)),
+                        );
+                    } else {
+                        self.error_token(
+                            name,
+                            &format!("Trait `{}` cannot be used as a value", name.lexeme),
+                        );
+                        self.set_expr_type(expr, self.error_type(name));
+                    }
+                } else if let Some(Symbol::Class { .. }) = self.symtable.lookup_class(&name.lexeme)
+                {
                     // It's a valid class reference
                     self.set_expr_type(
                         expr,
@@ -2789,6 +2911,10 @@ impl<'a> Visitor for TypeChecker<'a> {
                         ),
                     );
                 } else if let Some(symbol) = self.symtable.lookup_function(&name.lexeme) {
+                    self.function_refs.insert(
+                        expr as *const Expr,
+                        (self.module_name.clone(), name.lexeme.clone()),
+                    );
                     if self.in_call {
                         // In callee position the name is resolved by `visit_call`, which
                         // looks the function up again to report better diagnostics.
@@ -3854,6 +3980,10 @@ impl<'a> Visitor for TypeChecker<'a> {
 
                     match exports.functions.get(&name.lexeme) {
                         Some(function) => {
+                            self.function_refs.insert(
+                                expr as *const Expr,
+                                (module_name.clone(), name.lexeme.clone()),
+                            );
                             let member_ty = self.function_type(
                                 name,
                                 function.params.clone(),
@@ -4320,10 +4450,7 @@ impl<'a> Visitor for TypeChecker<'a> {
                 })
                 .collect();
 
-            let (owner, class_name) = match name.lexeme.rsplit_once('.') {
-                Some((module, class)) => (self.resolve_module_name(module), class.to_string()),
-                None => (self.module_name.clone(), name.lexeme.clone()),
-            };
+            let (owner, class_name) = self.resolve_type_name(&name.lexeme);
 
             let (class_generics, constructor_params, fully_defined, class_constraints) = if owner
                 == self.module_name
@@ -5226,15 +5353,19 @@ impl<'a> Visitor for TypeChecker<'a> {
         }
     }
 
-    fn visit_import(&mut self, _stmt: &Stmt) {
-        // Not doing anything special with imports here
+    fn visit_import(&mut self, stmt: &Stmt) {
+        if let Stmt::Import { name, .. } = stmt {
+            self.error_token(name, "Imports are only allowed at module scope");
+        }
     }
 
     fn visit_module(&mut self, module: &Module) {
-        // Typically do nothing here if we've already visited statements in `check_module`.
-        // Or you could recursively visit each statement.
         for stmt in &module.statements {
-            stmt.accept(self);
+            // Top-level imports were resolved before declarations. Nested imports
+            // still visit `visit_import`, which reports their unsupported scope.
+            if !matches!(&**stmt, Stmt::Import { .. }) {
+                stmt.accept(self);
+            }
         }
     }
 

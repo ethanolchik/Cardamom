@@ -50,6 +50,10 @@ double quotes delimit strings, which may span lines. Backslashes do not escape a
 closing quote. C++ keywords such as `template` remain ordinary identifiers outside
 `@cpp(...)`.
 
+Selective imports such as `import math.{sin, sqrt as root};` highlight module names,
+members, and aliases, including multiline lists. Use the `import-members` snippet
+to insert one.
+
 Embedded C++ uses the editor's built-in C++ grammar. Its state is reset on each
 line and at the closing Cardamom quote, so incomplete C++ cannot colour the rest
 of the Cardamom file. Multiline C++ block comments and raw strings may therefore

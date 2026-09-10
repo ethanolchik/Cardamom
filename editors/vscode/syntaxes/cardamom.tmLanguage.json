@@ -200,21 +200,43 @@
       ]
     },
     "imports": {
-      "match": "\\b(import)\\s+([A-Za-z][A-Za-z0-9_]*)(?:\\s+(as)\\s+([A-Za-z][A-Za-z0-9_]*))?",
-      "captures": {
+      "name": "meta.import.cardamom",
+      "begin": "\\b(import)\\b",
+      "beginCaptures": {
         "1": {
           "name": "keyword.control.import.cardamom"
-        },
-        "2": {
-          "name": "entity.name.namespace.cardamom"
-        },
-        "3": {
-          "name": "keyword.control.import.cardamom"
-        },
-        "4": {
-          "name": "entity.name.namespace.cardamom"
         }
-      }
+      },
+      "end": ";",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.terminator.statement.cardamom"
+        }
+      },
+      "patterns": [
+        { "include": "#comments" },
+        {
+          "name": "meta.import.members.cardamom",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.imports.begin.cardamom" }
+          },
+          "end": "(\\})|(?=;)",
+          "endCaptures": {
+            "1": { "name": "punctuation.section.imports.end.cardamom" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "name": "keyword.control.import.cardamom", "match": "\\bas\\b" },
+            { "name": "entity.name.type.cardamom", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" },
+            { "name": "entity.name.function.cardamom", "match": "\\b[A-Za-z][A-Za-z0-9_]*\\b" },
+            { "name": "punctuation.separator.comma.cardamom", "match": "," }
+          ]
+        },
+        { "name": "keyword.control.import.cardamom", "match": "\\bas\\b" },
+        { "name": "entity.name.namespace.cardamom", "match": "\\b[A-Za-z][A-Za-z0-9_]*\\b" },
+        { "name": "punctuation.accessor.cardamom", "match": "\\." }
+      ]
     },
     "declarations": {
       "patterns": [

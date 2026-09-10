@@ -71,6 +71,28 @@ fn main() {
 Use `import <module> as <name>;` to bind a module to a different name. Import cycles are
 detected and reported with the full chain.
 
+To use individual exports without a module prefix, select them with `.{...}`:
+
+```cpp
+import math.{sin, sqrt as root};
+import io.{println};
+import str.{fromFloat};
+
+fn main() {
+    let value: float = root(9.0) + sin(0.0);
+    println(fromFloat(value));
+}
+```
+
+Selective imports work with public functions, classes, and traits, including
+generics. Use `as` on an individual name to give it an alias. Lists may span lines
+and have a trailing comma. They must contain at least one name.
+
+Imports belong at module scope. A selective import binds only the listed names;
+add `import math;` separately if you also want the `math` namespace. Duplicate
+import bindings and clashes with top-level declarations are errors; local variables
+and parameters may shadow selected names. Imported names are not re-exported.
+
 ## Standard library
 
 The standard library is just a set of modules that happen to live on the search path.
@@ -91,7 +113,7 @@ It is written in Cardamom, in `std/`:
 
 Adding a function or trait implementation means editing `std/<module>/main.crdm` — no compiler changes.
 
-Only the functions a program actually calls are emitted, so importing a module costs
+Only the functions a program calls or uses as values are emitted, so importing a module costs
 nothing for the parts you do not use.
 
 The search path is, in order: the importing file's directory, `$CARDAMOM_STD`, `std/`

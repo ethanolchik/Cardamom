@@ -53,6 +53,162 @@ fn fixture(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn selective_imports_compile_and_execute() {
+    let workspace = Workspace::new();
+    for name in ["selective_imports", "selective_import_types"] {
+        let binary = workspace.path(name);
+        success(
+            workspace
+                .compiler()
+                .arg(fixture(&format!("tests/pass/{name}.crdm")))
+                .arg("-o")
+                .arg(&binary)
+                .arg("-out"),
+        );
+        success(&mut Command::new(&binary));
+        let cpp = fs::read_to_string(binary.with_extension("cpp")).unwrap();
+        assert!(!cpp.contains("cardamom_unused_import"));
+        assert!(!cpp.contains("cardamom_shadowed_import"));
+    }
+}
+
+#[test]
+fn invalid_selective_imports_are_rejected_before_codegen() {
+    let workspace = Workspace::new();
+    fs::write(
+        workspace.path("library.crdm"),
+        r#"
+public fn visible(value: int) -> int { return value; }
+fn hidden() -> int { return 0; }
+public class Item {}
+class HiddenItem {}
+public trait Readable { read() -> int; }
+trait HiddenTrait { read() -> int; }
+"#,
+    )
+    .unwrap();
+    fs::write(workspace.path("bridge.crdm"), "import library.{visible};\n").unwrap();
+    for (source, diagnostic) in [
+        (
+            "import library.{missing}; fn main() {}",
+            "No public export `missing`",
+        ),
+        (
+            "import library.{hidden}; fn main() {}",
+            "No public export `hidden`",
+        ),
+        (
+            "import library.{HiddenItem}; fn main() {}",
+            "No public export `HiddenItem`",
+        ),
+        (
+            "import library.{HiddenTrait}; fn main() {}",
+            "No public export `HiddenTrait`",
+        ),
+        (
+            "import library.{visible, visible}; fn main() {}",
+            "`visible` is imported more than once",
+        ),
+        (
+            "import library.{visible as Item, Item}; fn main() {}",
+            "`Item` is imported more than once",
+        ),
+        (
+            "import library as visible; import library.{visible}; fn main() {}",
+            "`visible` is imported more than once",
+        ),
+        (
+            "import library.{visible}; import library.{visible}; fn main() {}",
+            "`visible` is imported more than once",
+        ),
+        (
+            "import library.{visible}; fn visible() {} fn main() {}",
+            "Import `visible` conflicts with a top-level declaration",
+        ),
+        (
+            "class Item {} import library.{Item}; fn main() {}",
+            "Import `Item` conflicts with a top-level declaration",
+        ),
+        (
+            "import library.{Readable}; trait Readable {} fn main() {}",
+            "Import `Readable` conflicts with a top-level declaration",
+        ),
+        (
+            "import library.{visible}; let visible: int = 1; fn main() {}",
+            "Import `visible` conflicts with a top-level declaration",
+        ),
+        (
+            "import library.{visible}; fn main() { library.visible(1); }",
+            "Unknown variable `library`",
+        ),
+        (
+            "import library.{visible}; fn main() { visible(); }",
+            "expects 1 args",
+        ),
+        (
+            "import library.{visible}; fn main() { visible<int>(1); }",
+            "is not generic",
+        ),
+        (
+            "import library.{Readable}; fn main() { Readable; }",
+            "cannot be used as a value",
+        ),
+        (
+            "import bridge.{visible}; fn main() {}",
+            "No public export `visible`",
+        ),
+        (
+            "fn main() { import library.{visible}; }",
+            "Imports are only allowed at module scope",
+        ),
+        ("import library.{}; fn main() {}", "Expected an export name"),
+        (
+            "import library.{visible as}; fn main() {}",
+            "Expected identifier after 'as'",
+        ),
+        (
+            "import library.{visible Item}; fn main() {}",
+            "Expected '}' after imported names",
+        ),
+        (
+            "import library.{visible}; fn main() { let visible: int = 1; visible(2); }",
+            "Cannot call non-function type `int`",
+        ),
+        (
+            "import missing.{visible}; fn main() {}",
+            "Cannot find module `missing`",
+        ),
+    ] {
+        let input = workspace.path("input.crdm");
+        fs::write(&input, source).unwrap();
+        let output = workspace
+            .compiler()
+            .arg(&input)
+            .arg("--cxx")
+            .arg(workspace.path("must not run"))
+            .arg("-o")
+            .arg(workspace.path("rejected"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{source} unexpectedly passed");
+        assert!(!stderr.contains("panicked"), "{source} panicked:\n{stderr}");
+        assert!(
+            stderr.contains(diagnostic),
+            "{source}: missing {diagnostic}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("Could not run C++ compiler"),
+            "{source} reached codegen"
+        );
+        assert!(
+            !workspace.path("rejected.cpp").exists(),
+            "{source} emitted C++ despite an error"
+        );
+    }
+}
+
+#[test]
 fn trait_operators_compile_and_execute() {
     let workspace = Workspace::new();
     for name in ["operators_1.crdm", "operators_2.crdm"] {

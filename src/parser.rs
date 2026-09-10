@@ -900,20 +900,45 @@ impl Parser {
     }
 
     pub fn import_declaration(&mut self) -> Result<Stmt, Error> {
-        // `import io;`, or `import io as console;` to bind it to a different name.
         let name = self.consume(
             TokenKind::Identifier,
             "Expected module name after 'import'.",
         )?;
 
-        let alias = if self.match_token(TokenKind::As) {
-            self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?
+        let kind = if self.match_token(TokenKind::Dot) {
+            self.consume(TokenKind::LBrace, "Expected '{' after module name and '.'.")?;
+            let mut members = Vec::new();
+            loop {
+                let member = self.consume(
+                    TokenKind::Identifier,
+                    "Expected an export name in selective import.",
+                )?;
+                let alias = if self.match_token(TokenKind::As) {
+                    self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?
+                } else {
+                    member.clone()
+                };
+                members.push(ImportMember {
+                    name: member,
+                    alias,
+                });
+                if !self.match_token(TokenKind::Comma) || self.check(TokenKind::RBrace) {
+                    break;
+                }
+            }
+            self.consume(TokenKind::RBrace, "Expected '}' after imported names.")?;
+            ImportKind::Members(members)
         } else {
-            name.clone()
+            let alias = if self.match_token(TokenKind::As) {
+                self.consume(TokenKind::Identifier, "Expected identifier after 'as'.")?
+            } else {
+                name.clone()
+            };
+            ImportKind::Namespace(alias)
         };
 
         self.consume(TokenKind::Semicolon, "Expected ';' after import statement.")?;
-        Ok(Stmt::Import { name, alias })
+        Ok(Stmt::Import { name, kind })
     }
 
     pub fn expression_statement(&mut self) -> Result<Stmt, Error> {

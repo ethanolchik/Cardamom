@@ -11,10 +11,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Module, Stmt};
+use crate::ast::{ImportKind, Module, Stmt};
 use crate::errors::{Error, Note};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+
+/// Local name -> (defining module, exported name) for selective imports.
+pub type MemberImports = HashMap<String, (String, String)>;
 
 /// A module that has been found, read and parsed.
 pub struct LoadedModule {
@@ -23,8 +26,9 @@ pub struct LoadedModule {
     pub path: PathBuf,
     pub source: String,
     pub ast: Module,
-    /// `alias -> module name` for everything this module imports.
+    /// `alias -> module name` for namespace imports.
     pub imports: HashMap<String, String>,
+    pub member_imports: MemberImports,
 }
 
 /// Every module making up one compilation, in dependency order: a module always appears
@@ -172,9 +176,22 @@ fn parse_module(name: &str, path: &Path) -> Result<LoadedModule, Vec<Error>> {
     }
 
     let mut imports = HashMap::new();
+    let mut member_imports = MemberImports::new();
     for stmt in &ast.statements {
-        if let Stmt::Import { name, alias } = &**stmt {
-            imports.insert(alias.lexeme.clone(), name.lexeme.clone());
+        if let Stmt::Import { name, kind } = &**stmt {
+            match kind {
+                ImportKind::Namespace(alias) => {
+                    imports.insert(alias.lexeme.clone(), name.lexeme.clone());
+                }
+                ImportKind::Members(members) => {
+                    for member in members {
+                        member_imports.insert(
+                            member.alias.lexeme.clone(),
+                            (name.lexeme.clone(), member.name.lexeme.clone()),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -184,6 +201,7 @@ fn parse_module(name: &str, path: &Path) -> Result<LoadedModule, Vec<Error>> {
         source,
         ast,
         imports,
+        member_imports,
     })
 }
 
@@ -195,6 +213,9 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
     let mut modules: Vec<LoadedModule> = Vec::new();
     let mut loaded: HashSet<String> = HashSet::new();
     let mut errors: Vec<Error> = Vec::new();
+    // Lexer and parser diagnostics are emitted immediately, so their failure can
+    // carry no Error objects. Keep that failure even when a module produced no AST.
+    let mut parse_failed = false;
 
     // `visiting` is the current import chain, used to detect and report cycles.
     let mut visiting: Vec<String> = Vec::new();
@@ -206,6 +227,7 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
         loaded: &mut HashSet<String>,
         visiting: &mut Vec<String>,
         errors: &mut Vec<Error>,
+        parse_failed: &mut bool,
     ) {
         if loaded.contains(name) {
             return;
@@ -214,6 +236,7 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
         let module = match parse_module(name, path) {
             Ok(module) => module,
             Err(mut e) => {
+                *parse_failed = true;
                 errors.append(&mut e);
                 // Mark as loaded so one broken module does not cascade.
                 loaded.insert(name.to_string());
@@ -255,7 +278,15 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
 
             match resolve(imported, &local_dirs) {
                 Some(resolved) => {
-                    visit(imported, &resolved, modules, loaded, visiting, errors);
+                    visit(
+                        imported,
+                        &resolved,
+                        modules,
+                        loaded,
+                        visiting,
+                        errors,
+                        parse_failed,
+                    );
                 }
                 None => {
                     let mut error = Error::new(
@@ -290,9 +321,10 @@ pub fn load(entry: &Path) -> Result<Program, Vec<Error>> {
         &mut loaded,
         &mut visiting,
         &mut errors,
+        &mut parse_failed,
     );
 
-    if !errors.is_empty() {
+    if parse_failed || !errors.is_empty() {
         return Err(errors);
     }
 

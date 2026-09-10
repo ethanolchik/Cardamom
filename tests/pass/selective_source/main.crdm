@@ -1,0 +1,57 @@
+public fn identity<T>(value: T) -> T {
+    return value;
+}
+
+fn double(value: int) -> int {
+    return value * 2;
+}
+
+public fn compute(value: int) -> int {
+    return double(value);
+}
+
+public fn callback(value: int) -> int {
+    return value + 1;
+}
+
+// Neither an unused import nor a shadowed one should make these bodies live.
+public fn unused() {
+    @include("<cardamom_unused_import_should_not_be_emitted.h>");
+}
+
+public fn shadowed(value: int) -> int {
+    @include("<cardamom_shadowed_import_should_not_be_emitted.h>");
+    return value;
+}
+
+public class Key(private value: int) {
+    public read() -> int {
+        return this.value;
+    }
+}
+
+public class Box<T>(private value: T) {
+    public get() -> T {
+        return this.value;
+    }
+
+    public map<U>(f: fn(T) -> U) -> U {
+        return identity(f(this.value));
+    }
+}
+
+public trait Readable {
+    read() -> int;
+}
+
+public trait Into<T> {
+    convert() -> T;
+}
+
+public fn read<T>(value: &T) -> int where T: Readable {
+    return value.read();
+}
+
+public fn convert<T, U>(value: &T) -> U where T: Into<U> {
+    return value.convert();
+}

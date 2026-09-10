@@ -2,7 +2,7 @@ use crate::ast::{
     is_constructor_field, is_static_member, member_modifiers, member_visibility, Modifier,
 };
 use crate::ast::{Expr, Module, Node, Stmt, Visitor};
-use crate::modules::Program;
+use crate::modules::{MemberImports, Program};
 use crate::reachable::{self, FunctionRef};
 use crate::token::Token;
 use crate::ty::{Type, TypeKind};
@@ -20,6 +20,7 @@ pub type ExprTypes = HashMap<*const Expr, Type>;
 /// The type arguments each generic call site resolved to, keyed by AST node.
 pub type CallInstantiations = HashMap<*const Expr, Vec<TypeKind>>;
 pub type TraitCallSites = HashMap<*const Expr, TraitCallSite>;
+pub use crate::typecheck::FunctionRefs;
 
 #[derive(Clone)]
 struct ExplicitImpl {
@@ -36,11 +37,13 @@ pub struct CppCodeGenerator {
     output: String,
     indent_level: usize,
     expr_types: ExprTypes,
+    function_refs: FunctionRefs,
     /// True while generating the body of a `main` that was declared as returning `void`,
     /// so bare `return;` statements can be lowered to `return 0;`.
     in_synthesised_int_main: bool,
     /// Imported name -> module name, for the module currently being generated.
     imports: HashMap<String, String>,
+    member_imports: MemberImports,
     /// The module currently being generated. The program itself is `main`.
     current_module: String,
     /// Names of functions declared in the module currently being generated, so calls to
@@ -71,6 +74,7 @@ impl CppCodeGenerator {
             output: String::new(),
             indent_level: 0,
             expr_types: ExprTypes::new(),
+            function_refs: FunctionRefs::new(),
             in_synthesised_int_main: false,
             call_instantiations: CallInstantiations::new(),
             trait_call_sites: TraitCallSites::new(),
@@ -79,6 +83,7 @@ impl CppCodeGenerator {
             instantiations: Instantiations::new(),
             current_substitution: HashMap::new(),
             imports: HashMap::new(),
+            member_imports: MemberImports::new(),
             current_module: "main".to_string(),
             local_functions: HashSet::new(),
             extra_includes: BTreeSet::new(),
@@ -106,6 +111,10 @@ impl CppCodeGenerator {
 
     pub fn set_trait_call_sites(&mut self, sites: TraitCallSites) {
         self.trait_call_sites = sites;
+    }
+
+    pub fn set_function_refs(&mut self, refs: FunctionRefs) {
+        self.function_refs = refs;
     }
 
     /// The C++ symbol for one specialisation of a generic function.
@@ -191,7 +200,7 @@ impl CppCodeGenerator {
 
     /// Applies the active specialisation to a type argument.
     fn resolve_type_argument(&self, kind: &TypeKind) -> TypeKind {
-        match kind {
+        let resolved = match kind {
             TypeKind::GenericParam(name) | TypeKind::User(_, name) => {
                 match self.current_substitution.get(name) {
                     Some(bound) if !Self::names_itself(name, bound) => bound.clone(),
@@ -203,7 +212,13 @@ impl CppCodeGenerator {
                     .apply_substitution(&self.current_substitution)
                     .kind
             }
-        }
+        };
+        Self::owned_type_kind(
+            &self.current_module,
+            &self.imports,
+            &self.member_imports,
+            &resolved,
+        )
     }
 
     /// Normalises a type's module owner for codegen.
@@ -220,6 +235,15 @@ impl CppCodeGenerator {
                 .map(String::as_str)
                 .unwrap_or(module)
         }
+    }
+
+    fn type_identity(&self, module: &str, name: &str) -> (String, String) {
+        if module.is_empty() {
+            if let Some(imported) = self.member_imports.get(name) {
+                return imported.clone();
+            }
+        }
+        (self.type_module(module).to_string(), name.to_string())
     }
 
     /// Every instantiation of `name` needed in the module being generated.
@@ -372,6 +396,7 @@ impl CppCodeGenerator {
     fn owned_type_kind(
         module: &str,
         imports: &HashMap<String, String>,
+        member_imports: &MemberImports,
         kind: &TypeKind,
     ) -> TypeKind {
         let owner = |name: &str| {
@@ -384,20 +409,34 @@ impl CppCodeGenerator {
                     .unwrap_or_else(|| name.to_string())
             }
         };
+        let identity = |m: &str, name: &str| {
+            if m.is_empty() {
+                if let Some(imported) = member_imports.get(name) {
+                    return imported.clone();
+                }
+            }
+            (owner(m), name.to_string())
+        };
         let nested = |ty: &Type| Type {
-            kind: Self::owned_type_kind(module, imports, &ty.kind),
+            kind: Self::owned_type_kind(module, imports, member_imports, &ty.kind),
             ..ty.clone()
         };
         match kind {
-            TypeKind::User(m, name) => TypeKind::User(owner(m), name.clone()),
-            TypeKind::GenericInstance(m, name, arguments) => TypeKind::GenericInstance(
-                owner(m),
-                name.clone(),
-                arguments.iter().map(nested).collect(),
-            ),
+            TypeKind::User(m, name) => {
+                let (owner, name) = identity(m, name);
+                TypeKind::User(owner, name)
+            }
+            TypeKind::GenericInstance(m, name, arguments) => {
+                let (owner, name) = identity(m, name);
+                TypeKind::GenericInstance(owner, name, arguments.iter().map(nested).collect())
+            }
             TypeKind::Array(inner, depth) => TypeKind::Array(Box::new(nested(inner)), *depth),
             TypeKind::Reference(inner) => TypeKind::Reference(Box::new(nested(inner))),
             TypeKind::MutRef(inner) => TypeKind::MutRef(Box::new(nested(inner))),
+            TypeKind::Function(params, ret) => {
+                TypeKind::Function(params.iter().map(nested).collect(), Box::new(nested(ret)))
+            }
+            TypeKind::Tuple(elements) => TypeKind::Tuple(elements.iter().map(nested).collect()),
             _ => kind.clone(),
         }
     }
@@ -440,7 +479,7 @@ impl CppCodeGenerator {
     /// Generate C++ code for a whole program: every imported module, then the program
     /// itself, in dependency order so definitions precede their uses.
     pub fn generate_program(&mut self, program: &Program) -> String {
-        self.live_functions = Some(reachable::analyse(program));
+        self.live_functions = Some(reachable::analyse(program, &self.function_refs));
         self.explicit_impls = program
             .modules
             .iter()
@@ -465,11 +504,13 @@ impl CppCodeGenerator {
                                 trait_type: Self::owned_type_kind(
                                     &module.name,
                                     &module.imports,
+                                    &module.member_imports,
                                     &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
                                 ),
                                 target: Self::owned_type_kind(
                                     &module.name,
                                     &module.imports,
+                                    &module.member_imports,
                                     &Self::generalise_impl_kind(&target.kind, &generic_names),
                                 ),
                             })
@@ -488,6 +529,7 @@ impl CppCodeGenerator {
             for module in &program.modules {
                 gen.current_module = module.name.clone();
                 gen.imports = module.imports.clone();
+                gen.member_imports = module.member_imports.clone();
                 for stmt in &module.ast.statements {
                     if matches!(&**stmt, Stmt::Class { .. }) {
                         gen.write_class_forward_declaration(stmt);
@@ -501,6 +543,7 @@ impl CppCodeGenerator {
         for module in &program.modules {
             self.current_module = module.name.clone();
             self.imports = module.imports.clone();
+            self.member_imports = module.member_imports.clone();
             self.local_functions = module
                 .ast
                 .statements
@@ -543,6 +586,7 @@ impl CppCodeGenerator {
         for module in &program.modules {
             self.current_module = module.name.clone();
             self.imports = module.imports.clone();
+            self.member_imports = module.member_imports.clone();
             self.local_functions = module
                 .ast
                 .statements
@@ -1292,11 +1336,13 @@ impl CppCodeGenerator {
             let trait_pattern = Self::owned_type_kind(
                 &self.current_module,
                 &self.imports,
+                &self.member_imports,
                 &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
             );
             let target_pattern = Self::owned_type_kind(
                 &self.current_module,
                 &self.imports,
+                &self.member_imports,
                 &Self::generalise_impl_kind(&target.kind, &generic_names),
             );
             for substitution in self.impl_specialisations(&trait_pattern, &target_pattern, generics)
@@ -1453,7 +1499,10 @@ impl CppCodeGenerator {
                 Some(bound) if !Self::names_itself(name, bound) => {
                     self.translate_type(&Type::new(ty.name.clone(), bound.clone()))
                 }
-                _ => Self::mangled(self.type_module(module), name), // user types become class names
+                _ => {
+                    let (owner, base) = self.type_identity(module, name);
+                    Self::mangled(&owner, &base)
+                }
             },
             TypeKind::Array(inner, depth) => {
                 let mut inner_type = self.translate_type(inner);
@@ -1496,7 +1545,8 @@ impl CppCodeGenerator {
                     .iter()
                     .map(|a| self.resolve_type_argument(&a.kind))
                     .collect();
-                Self::mangled_class(self.type_module(module), name, &arguments)
+                let (owner, base) = self.type_identity(module, name);
+                Self::mangled_class(&owner, &base, &arguments)
             }
             // Inside a specialisation, a type parameter stands for its bound type.
             TypeKind::GenericParam(name) => match self.current_substitution.get(name) {
@@ -2149,7 +2199,9 @@ impl Visitor for CppCodeGenerator {
 
     fn visit_variable_expr(&mut self, expr: &Expr) {
         if let Expr::Variable { name } = expr {
-            if self.in_impl_method && name.lexeme == "this" {
+            if let Some((module, name)) = self.function_refs.get(&(expr as *const Expr)) {
+                self.output.push_str(&Self::mangled(module, name));
+            } else if self.in_impl_method && name.lexeme == "this" {
                 self.output.push_str("self");
             } else {
                 self.output.push_str(&Self::ident(&name.lexeme));
@@ -2177,6 +2229,13 @@ impl Visitor for CppCodeGenerator {
             arguments,
         } = expr
         {
+            if let Some((module, name)) = self.function_refs.get(&(&**callee as *const Expr)) {
+                self.output.push_str(&self.call_name(expr, module, name));
+                self.output.push('(');
+                self.write_call_arguments(arguments);
+                self.output.push(')');
+                return;
+            }
             if let Expr::MemberAccess { object, name } = &**callee {
                 self.visit_member_call(expr, object, name, arguments);
                 return;
@@ -2185,7 +2244,9 @@ impl Visitor for CppCodeGenerator {
             // A call to a function of the module being generated has to use the same
             // mangled name its definition was given, including any specialisation.
             if let Expr::Variable { name } = &**callee {
-                if self.local_functions.contains(&name.lexeme) {
+                if !self.expr_types.contains_key(&(&**callee as *const Expr))
+                    && self.local_functions.contains(&name.lexeme)
+                {
                     let cpp_name = self.call_name(expr, &self.current_module, &name.lexeme);
                     self.output.push_str(&cpp_name);
                     self.output.push('(');
@@ -2212,13 +2273,22 @@ impl Visitor for CppCodeGenerator {
         {
             // The type arguments are already baked into the specialisation's name, so
             // nothing of them survives into the generated C++.
+            if let Some((module, name)) = self.function_refs.get(&(&**callee as *const Expr)) {
+                self.output.push_str(&self.call_name(expr, module, name));
+                self.output.push('(');
+                self.write_call_arguments(arguments);
+                self.output.push(')');
+                return;
+            }
             if let Expr::MemberAccess { object, name } = &**callee {
                 self.visit_member_call(expr, object, name, arguments);
                 return;
             }
 
             if let Expr::Variable { name } = &**callee {
-                if self.local_functions.contains(&name.lexeme) {
+                if !self.expr_types.contains_key(&(&**callee as *const Expr))
+                    && self.local_functions.contains(&name.lexeme)
+                {
                     let cpp_name = self.call_name(expr, &self.current_module, &name.lexeme);
                     self.output.push_str(&cpp_name);
                     self.output.push('(');
@@ -2502,11 +2572,13 @@ impl Visitor for CppCodeGenerator {
         let trait_pattern = Self::owned_type_kind(
             &self.current_module,
             &self.imports,
+            &self.member_imports,
             &Self::generalise_impl_kind(&trait_type.kind, &generic_names),
         );
         let target_pattern = Self::owned_type_kind(
             &self.current_module,
             &self.imports,
+            &self.member_imports,
             &Self::generalise_impl_kind(&target.kind, &generic_names),
         );
         for substitution in self.impl_specialisations(&trait_pattern, &target_pattern, generics) {
@@ -2632,6 +2704,7 @@ mod tests {
         let root = program.root().name.clone();
         let mut exports: HashMap<String, crate::typecheck::ModuleExports> = HashMap::new();
         let mut expr_types = ExprTypes::new();
+        let mut function_refs = FunctionRefs::new();
         let mut call_instantiations = CallInstantiations::new();
         let mut trait_call_sites = TraitCallSites::new();
         let mut instantiations = Instantiations::new();
@@ -2659,6 +2732,7 @@ mod tests {
 
             exports.insert(module.name.clone(), checker.exports(&module.ast));
             expr_types.extend(checker.expr_types.clone());
+            function_refs.extend(checker.function_refs.clone());
             call_instantiations.extend(checker.call_instantiations.clone());
             trait_call_sites.extend(checker.trait_call_sites.clone());
             generic_call_sites.extend(checker.generic_call_sites.clone());
@@ -2684,6 +2758,7 @@ mod tests {
         );
 
         let mut generator = CppCodeGenerator::with_types(expr_types);
+        generator.set_function_refs(function_refs);
         generator.set_instantiations(call_instantiations, instantiations);
         generator.set_trait_call_sites(trait_call_sites);
         generator.generate_program(&program)

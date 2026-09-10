@@ -1,0 +1,18 @@
+import selective_source.{identity as id, Box as Parcel, Key as ForeignKey, callback};
+
+public fn wrap<T>(value: T) -> Parcel<T> {
+    return new Parcel<T>(id(value));
+}
+
+public fn bounce(value: ForeignKey) -> ForeignKey {
+    return value;
+}
+
+public fn wrapper<T>(value: T) -> T {
+    return id(value);
+}
+
+// The callback is only referenced as a value inside this imported module.
+public fn getCallback() -> fn(int) -> int {
+    return callback;
+}

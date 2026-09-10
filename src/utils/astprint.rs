@@ -490,17 +490,29 @@ impl Visitor for AstPrinter {
     fn visit_import(&mut self, stmt: &Stmt) {
         println!("{}Import: ", String::from("\t").repeat(self.indent));
         self.indent += 1;
-        if let Stmt::Import { name, alias, .. } = stmt {
+        if let Stmt::Import { name, kind } = stmt {
             println!(
                 "{}Name: {}",
                 String::from("\t").repeat(self.indent),
                 name.lexeme
             );
-            println!(
-                "{}Alias: {}",
-                String::from("\t").repeat(self.indent),
-                alias.lexeme
-            );
+            match kind {
+                ImportKind::Namespace(alias) => println!(
+                    "{}Alias: {}",
+                    String::from("\t").repeat(self.indent),
+                    alias.lexeme
+                ),
+                ImportKind::Members(members) => {
+                    for member in members {
+                        println!(
+                            "{}Member: {} as {}",
+                            String::from("\t").repeat(self.indent),
+                            member.name.lexeme,
+                            member.alias.lexeme
+                        );
+                    }
+                }
+            }
         }
         self.indent -= 1;
     }

@@ -30,7 +30,7 @@ fn run_file(options: cli::Options) -> bool {
             for error in &errors {
                 eprintln!("{}", error.to_string());
             }
-            eprintln!("Program exited with {} error(s).", errors.len());
+            eprintln!("Program exited with {} error(s).", errors.len().max(1));
             return false;
         }
     };
@@ -57,6 +57,7 @@ fn run_file(options: cli::Options) -> bool {
     // a module imports has already been checked and its exports recorded.
     let mut exports: HashMap<String, ModuleExports> = HashMap::new();
     let mut expr_types = codegen::ExprTypes::new();
+    let mut function_refs = codegen::FunctionRefs::new();
     let mut call_instantiations = codegen::CallInstantiations::new();
     let mut trait_call_sites = codegen::TraitCallSites::new();
     let mut instantiations = typecheck::Instantiations::new();
@@ -87,6 +88,7 @@ fn run_file(options: cli::Options) -> bool {
         // Expression types are keyed by AST node address, and every module's AST is
         // kept alive by `program`, so the maps can simply be merged.
         expr_types.extend(tc.expr_types.clone());
+        function_refs.extend(tc.function_refs.clone());
         call_instantiations.extend(tc.call_instantiations.clone());
         trait_call_sites.extend(tc.trait_call_sites.clone());
         generic_call_sites.extend(tc.generic_call_sites.clone());
@@ -115,6 +117,7 @@ fn run_file(options: cli::Options) -> bool {
     }
 
     let mut cg = CppCodeGenerator::with_types(expr_types);
+    cg.set_function_refs(function_refs);
     cg.set_instantiations(call_instantiations, instantiations);
     cg.set_trait_call_sites(trait_call_sites);
     let code = cg.generate_program(&program);

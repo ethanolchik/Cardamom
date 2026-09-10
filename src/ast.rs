@@ -1,6 +1,19 @@
 use crate::token::Token;
 use crate::ty::Type;
 
+/// A selected export, optionally bound to a different local name with `as`.
+#[derive(Clone, Debug)]
+pub struct ImportMember {
+    pub name: Token,
+    pub alias: Token,
+}
+
+#[derive(Clone, Debug)]
+pub enum ImportKind {
+    Namespace(Token),
+    Members(Vec<ImportMember>),
+}
+
 /// A modifier for a class or function
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Modifier {
@@ -248,8 +261,7 @@ pub enum Stmt {
     Import {
         /// The module being imported, e.g. `io` in `import io;`.
         name: Token,
-        /// The name it is bound to, which is the module name unless `as` was used.
-        alias: Token,
+        kind: ImportKind,
     },
     Class {
         name: Token,

@@ -93,6 +93,35 @@ let box: Box<int> = new Box<int>(1);`;
   hasScope(source, 'int', 'storage.type.primitive.cardamom');
 });
 
+test('selective imports highlight multiline members, aliases, and comments', () => {
+  const source = `import math.{
+    sin,
+    sqrt as root, // aliases keep their function scope
+};
+import model.{Box as Parcel, Readable};
+fn after() { return; }`;
+  hasScope(source, 'import', 'keyword.control.import.cardamom');
+  hasScope(source, 'math', 'entity.name.namespace.cardamom');
+  hasScope(source, '.', 'punctuation.accessor.cardamom');
+  hasScope(source, 'sin', 'entity.name.function.cardamom');
+  hasScope(source, 'sqrt', 'entity.name.function.cardamom');
+  hasScope(source, 'as root', 'keyword.control.import.cardamom');
+  hasScope(source, 'root', 'entity.name.function.cardamom');
+  hasScope(source, 'aliases', 'comment.line.double-slash.cardamom');
+  hasScope(source, 'Box', 'entity.name.type.cardamom');
+  hasScope(source, 'Parcel', 'entity.name.type.cardamom');
+  hasScope(source, 'Readable', 'entity.name.type.cardamom');
+  hasScope(source, 'after', 'entity.name.function.cardamom');
+  assert.ok(!scopesAt(source, 'after').includes('meta.import.cardamom'));
+});
+
+test('an incomplete member list ends at the import semicolon', () => {
+  const source = 'import math.{sin;\nfn after() {}';
+  hasScope(source, 'sin', 'entity.name.function.cardamom');
+  hasScope(source, 'after', 'entity.name.function.cardamom');
+  assert.ok(!scopesAt(source, 'after').includes('meta.import.cardamom'));
+});
+
 test('traits, implementations, and constraints get useful scopes', () => {
   const source = `trait Printable { text() -> string; }
 fn render<T>(value: &T) -> string where T: Printable { return value.text(); }
